@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "cppdbg",
+      "request": "launch",
+      "args": [],
+      "stopAtEntry": false,
+      "externalConsole": true,
+      "cwd": "c:/Users/Jiuxiao/AppData/Roaming/TRAE SOLO CN/ModularData/ai-agent/work-mode-projects/6a03d7beab6c1b51d340eda6/arduino_inverter_wifi/src",
+      "program": "c:/Users/Jiuxiao/AppData/Roaming/TRAE SOLO CN/ModularData/ai-agent/work-mode-projects/6a03d7beab6c1b51d340eda6/arduino_inverter_wifi/src/build/Debug/outDebug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}
