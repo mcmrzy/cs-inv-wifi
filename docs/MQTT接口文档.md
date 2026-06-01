@@ -77,7 +77,11 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
 | `cs_inv/{sn}/data/battery` | 0 | false | 5s | ARM | 电池 BMS |
 | `cs_inv/{sn}/data/pv` | 0 | false | 5s | ARM | 光伏 MPPT |
 | `cs_inv/{sn}/data/status` | 0 | false | 5s | ARM | 逆变器系统状态 |
+| `cs_inv/{sn}/data/power_flow` | 0 | false | 5s | ARM | 系统功率流向 |
 | `cs_inv/{sn}/data/energy` | 0 | false | 60s | ARM | 能量统计 |
+| `cs_inv/{sn}/data/energy_detail` | 0 | false | 60s | ARM | 详细能量统计 |
+| `cs_inv/{sn}/data/eps` | 0 | false | 5s | ARM | EPS应急电源 |
+| `cs_inv/{sn}/data/gen` | 0 | false | 5s | ARM | 发电机接口 |
 | `cs_inv/{sn}/data/cells` | 0 | false | 30s | ARM | 电芯详细数据 |
 | `cs_inv/{sn}/data/alarm` | 1 | false | 事件触发 | ARM | 告警/故障事件 |
 | `cs_inv/{sn}/cmd/response` | 1 | false | 按需 | ARM | 控制命令执行结果 |
@@ -156,7 +160,10 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
   "load_percent": 30.2,
   "thd_v": 1.8,
   "thd_i": 2.5,
-  "dc_injection": 15.0
+  "dc_injection": 15.0,
+  "voltage_r": 220.5,
+  "voltage_s": 220.1,
+  "voltage_t": 220.3
 }
 ```
 
@@ -173,6 +180,9 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
 | `thd_v` | float | 电压 THD (%) |
 | `thd_i` | float | 电流 THD (%) |
 | `dc_injection` | float | 直流分量 (mA) |
+| `voltage_r` | float | R 相交流输出电压 (V) |
+| `voltage_s` | float | S 相交流输出电压 (V) |
+| `voltage_t` | float | T 相交流输出电压 (V) |
 
 #### data/battery（电池 BMS）
 
@@ -198,7 +208,23 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
   "protect_status1": 0,
   "protect_status2": 0,
   "bms_fault_code": 0,
-  "bms_alarm_code": 0
+  "bms_alarm_code": 0,
+  "max_charge_curr": 500,
+  "max_discharge_curr": 1000,
+  "charge_volt_ref": 584,
+  "discharge_volt_cutoff": 430,
+  "bat_status0": 0,
+  "bat_status1": 0,
+  "bat_status2": 0,
+  "bat_status3": 0,
+  "bat_status4": 0,
+  "bat_status5": 0,
+  "bat_status6": 0,
+  "bat_status7": 0,
+  "bat_status8": 0,
+  "bat_status9": 0,
+  "bat_status_inv": 0,
+  "internal_fault": 0
 }
 ```
 
@@ -223,6 +249,22 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
 | `protect_status2` | int | 保护状态位掩码（Bit0=均衡中, Bit1=通信异常, Bit2=绝缘故障, Bit3=SOC过低, Bit4=SOC过高, Bit5=压差异常） |
 | `bms_fault_code` | int | BMS 故障码，0=正常 |
 | `bms_alarm_code` | int | BMS 告警码，0=无告警 |
+| `max_charge_curr` | float | 最大允许充电电流 (0.1A) |
+| `max_discharge_curr` | float | 最大允许放电电流 (0.1A) |
+| `charge_volt_ref` | float | 充电目标电压 (0.1V) |
+| `discharge_volt_cutoff` | float | 放电截止电压 (0.1V) |
+| `bat_status0` | int | 电池状态位 Bit0 |
+| `bat_status1` | int | 电池状态位 Bit1 |
+| `bat_status2` | int | 电池状态位 Bit2 |
+| `bat_status3` | int | 电池状态位 Bit3 |
+| `bat_status4` | int | 电池状态位 Bit4 |
+| `bat_status5` | int | 电池状态位 Bit5 |
+| `bat_status6` | int | 电池状态位 Bit6 |
+| `bat_status7` | int | 电池状态位 Bit7 |
+| `bat_status8` | int | 电池状态位 Bit8 |
+| `bat_status9` | int | 电池状态位 Bit9 |
+| `bat_status_inv` | int | 电池逆变器侧状态标志 |
+| `internal_fault` | int | BMS 内部故障码 |
 
 #### data/pv（光伏 MPPT）
 
@@ -236,6 +278,9 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
   "pv2_voltage": 0.0,
   "pv2_current": 0.0,
   "pv2_power": 0.0,
+  "pv3_voltage": 0.0,
+  "pv3_current": 0.0,
+  "pv3_power": 0.0,
   "pv_power_total": 1066.3,
   "mppt_state": "tracking",
   "pv_temp": 52.0
@@ -250,6 +295,9 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
 | `pv2_voltage` | float | 第二路光伏输入电压 (V) |
 | `pv2_current` | float | 第二路光伏输入电流 (A) |
 | `pv2_power` | float | 第二路光伏输入功率 (W) |
+| `pv3_voltage` | float | 第三路光伏输入电压 (V) |
+| `pv3_current` | float | 第三路光伏输入电流 (A) |
+| `pv3_power` | float | 第三路光伏输入功率 (W) |
 | `pv_power_total` | float | 光伏输入总功率 (W) |
 | `mppt_state` | string | MPPT 状态：`tracking`、`standby`、`float`、`off` |
 | `pv_temp` | float | 组件或控制器温度 (℃)，可选 |
@@ -268,9 +316,15 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
   "temp_mos": 55.2,
   "temp_ambient": 32.0,
   "dc_bus_voltage": 380.0,
+  "dc_bus1_voltage": 380.0,
+  "dc_bus2_voltage": 380.0,
+  "dc_busp_voltage": 190.0,
   "runtime_hours": 8640,
   "fan_speed": 60,
-  "efficiency": 94.6
+  "efficiency": 94.6,
+  "temp_radiator1": 52.0,
+  "temp_radiator2": 50.5,
+  "temp_radiator3": 51.2
 }
 ```
 
@@ -284,9 +338,15 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
 | `temp_mos` | float | 散热器温度 (℃) |
 | `temp_ambient` | float | 环境温度 (℃)，可选 |
 | `dc_bus_voltage` | float | 直流母线电压 (V) |
+| `dc_bus1_voltage` | float | 直流母线 1 电压 (V) |
+| `dc_bus2_voltage` | float | 直流母线 2 电压 (V) |
+| `dc_busp_voltage` | float | 直流母线正端电压 (V) |
 | `runtime_hours` | int | 累计运行时长 (小时) |
 | `fan_speed` | int | 风扇转速 (%)，0=停转 |
 | `efficiency` | float | 逆变效率 (%) |
+| `temp_radiator1` | float | 散热器 1 温度 (℃) |
+| `temp_radiator2` | float | 散热器 2 温度 (℃) |
+| `temp_radiator3` | float | 散热器 3 温度 (℃) |
 
 #### data/energy（能量统计）
 
@@ -315,6 +375,140 @@ Payload: {"voltage":220.5,...}     ← 内层 payload 原样转发
 | `total_discharge` | float | 累计放电量 (kWh) |
 | `daily_load` | float | 当日负载消耗 (kWh) |
 | `total_load` | float | 累计负载消耗 (kWh) |
+
+#### data/power_flow（系统功率流向）
+
+频率：5s
+
+```json
+{
+  "p_to_grid": 500.5,
+  "p_to_user": 1200.3,
+  "p_load": 1700.8
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `p_to_grid` | float | 上网功率 (W)，正向为向电网卖电 |
+| `p_to_user` | float | 向用户负载供电的功率 (W) |
+| `p_load` | float | 系统所带的总负载功率 (W) |
+
+#### data/energy_detail（详细能量统计）
+
+频率：60s
+
+```json
+{
+  "daily_pv1": 2.80,
+  "daily_pv2": 2.90,
+  "daily_pv3": 2.86,
+  "total_pv1": 450.3,
+  "total_pv2": 460.2,
+  "total_pv3": 440.1,
+  "daily_to_grid": 3.5,
+  "total_to_grid": 560.8,
+  "daily_to_user": 4.8,
+  "total_to_user": 680.5,
+  "daily_eps": 1.2,
+  "total_eps": 180.3,
+  "daily_eps_l1n": 0.6,
+  "total_eps_l1n": 90.2,
+  "daily_eps_l2n": 0.6,
+  "total_eps_l2n": 90.1,
+  "daily_gen": 0.0,
+  "total_gen": 0.0
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `daily_pv1` | float | PV1 组串当日累计发电量 (kWh) |
+| `daily_pv2` | float | PV2 组串当日累计发电量 (kWh) |
+| `daily_pv3` | float | PV3 组串当日累计发电量 (kWh) |
+| `total_pv1` | float | PV1 全生命周期累计发电量 (kWh) |
+| `total_pv2` | float | PV2 全生命周期累计发电量 (kWh) |
+| `total_pv3` | float | PV3 全生命周期累计发电量 (kWh) |
+| `daily_to_grid` | float | 当日累计向电网输送电量 (kWh) |
+| `total_to_grid` | float | 全生命周期累计向电网输送电量 (kWh) |
+| `daily_to_user` | float | 当日累计向用户供电量 (kWh) |
+| `total_to_user` | float | 全生命周期累计向用户供电量 (kWh) |
+| `daily_eps` | float | EPS 当日累计供电量 (kWh) |
+| `total_eps` | float | EPS 全生命周期累计供电量 (kWh) |
+| `daily_eps_l1n` | float | EPS L1-N 相当日累计供电量 (kWh) |
+| `total_eps_l1n` | float | EPS L1-N 相全生命周期累计供电量 (kWh) |
+| `daily_eps_l2n` | float | EPS L2-N 相当日累计供电量 (kWh) |
+| `total_eps_l2n` | float | EPS L2-N 相全生命周期累计供电量 (kWh) |
+| `daily_gen` | float | 发电机当日发电量 (kWh) |
+| `total_gen` | float | 发电机全生命周期累计发电量 (kWh) |
+
+#### data/eps（EPS应急电源）
+
+频率：5s
+
+```json
+{
+  "voltage_r": 220.5,
+  "voltage_s": 220.1,
+  "voltage_t": 220.3,
+  "frequency": 50.02,
+  "power": 1200.5,
+  "apparent": 1210.3,
+  "voltage_l1n": 110.3,
+  "voltage_l2n": 110.2,
+  "power_l1n": 600.2,
+  "power_l2n": 600.3,
+  "apparent_l1n": 605.2,
+  "apparent_l2n": 605.1
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `voltage_r` | float | EPS R 相输出电压 (V) |
+| `voltage_s` | float | EPS S 相输出电压 (V) |
+| `voltage_t` | float | EPS T 相输出电压 (V) |
+| `frequency` | float | EPS 输出频率 (Hz) |
+| `power` | float | EPS 有功功率 (W) |
+| `apparent` | float | EPS 视在功率 (VA) |
+| `voltage_l1n` | float | EPS L1-N 相电压 (V) |
+| `voltage_l2n` | float | EPS L2-N 相电压 (V) |
+| `power_l1n` | float | EPS L1 相有功功率 (W) |
+| `power_l2n` | float | EPS L2 相有功功率 (W) |
+| `apparent_l1n` | float | EPS L1 相视在功率 (VA) |
+| `apparent_l2n` | float | EPS L2 相视在功率 (VA) |
+
+#### data/gen（发电机接口）
+
+频率：5s
+
+```json
+{
+  "voltage": 220.5,
+  "frequency": 50.02,
+  "power": 2500.3
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `voltage` | float | 发电机输出端电压 (V) |
+| `frequency` | float | 发电机输出频率 (Hz) |
+| `power` | float | 发电机输出有功功率 (W) |
+
+##### data/gen 能量统计（在 data/energy_detail 中包含）
+
+```json
+{
+  "daily_gen": 0.0,
+  "total_gen": 0.0
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `daily_gen` | float | 发电机当日发电量 (kWh) |
+| `total_gen` | float | 发电机全生命周期累计发电量 (kWh) |
 
 #### data/cells（电芯详情）
 
@@ -447,6 +641,21 @@ DATA={"topic":"ac_on","payload":""}
 | `mppt_on` | `""` | 启用 MPPT 充电 |
 | `mppt_off` | `""` | 禁用 MPPT 充电 |
 | `mppt_power_limit` | `{"value":1000}` | PV 输入功率限制 (W) |
+
+#### EPS 应急电源控制
+
+| 命令 | Payload | 说明 |
+|------|---------|------|
+| `eps_enable` | `{"value":1}` | 启用 EPS：0=禁用, 1=启用 |
+| `eps_power_limit` | `{"value":3000}` | EPS 最大输出功率 (W) |
+| `eps_voltage_set` | `{"value":220}` | EPS 输出电压设定 (V) |
+
+#### 发电机控制
+
+| 命令 | Payload | 说明 |
+|------|---------|------|
+| `gen_enable` | `{"value":1}` | 启用发电机：0=禁用, 1=启用 |
+| `gen_power_limit` | `{"value":5000}` | 发电机最大输出功率 (W) |
 
 ### 6.3 OTA 远程升级
 

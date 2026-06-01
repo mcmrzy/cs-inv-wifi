@@ -23,6 +23,7 @@
 #include "led_status.h"
 #include "tcp_provision.h"
 #include "mqtt_handler.h"
+#include "mqtt_ota_handler.h"
 #include "sn_encoder.h"
 #include "ota_manager.h"
 #include "arm_ota.h"
@@ -74,104 +75,18 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len);
 static void on_provision_done(const char* ssid, const char* password);
 static void on_mqtt_message(const char* topic, const char* payload, unsigned int len);
 
-// ==================== MQTT OTA 处理 ====================
-
-// OTA 进度回调（由 ota_manager 调用）
-static void ota_progress_mqtt_callback(OtaTarget target, int percent, OtaStatus status, const char* message) {
-  char payload_json[256];
-  const char* target_str = (target == OTA_TARGET_ESP) ? "esp" : "arm";
-  const char* status_str = "idle";
-
-  switch (status) {
-    case OTA_STATUS_DOWNLOADING: status_str = "downloading"; break;
-    case OTA_STATUS_WRITING:     status_str = "writing"; break;
-    case OTA_STATUS_VERIFYING:   status_str = "verifying"; break;
-    case OTA_STATUS_DONE:        status_str = "done"; break;
-    case OTA_STATUS_ERROR:       status_str = "error"; break;
-    default:                     status_str = "idle"; break;
-  }
-
-  snprintf(payload_json, sizeof(payload_json),
-           "{\"target\":\"%s\",\"progress\":%d,\"status\":\"%s\",\"message\":\"%s\"}",
-           target_str, percent, status_str, message ? message : "");
-
-  mqtt_publish("ota/status", payload_json, strlen(payload_json), 1, false);
-}
-
-// 处理 MQTT OTA 命令
-static void handle_ota_mqtt_cmd(const char* payload, unsigned int len) {
-  Serial.printf("[OTA-MQTT] Received: %.*s\n", (int)len, payload);
-
-  // 解析 JSON（简化：手动解析关键字段）
-  char action[16] = {0};
-  char target[8] = {0};
-  char url[256] = {0};
-
-  // 简单 JSON 解析（查找 "action": 的值）
-  const char* p = payload;
-  while (*p && (size_t)(p - payload) < len) {
-    // 跳过空白
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (strncmp(p, "\"action\"", 8) == 0) {
-      p += 8;
-      while (*p && *p != ':') p++;
-      if (*p == ':') p++;
-      while (*p == ' ' || *p == '"') p++;
-      char* ap = action;
-      while (*p && *p != '"' && *p != ',' && *p != '}') *ap++ = *p++;
-      *ap = '\0';
-    }
-    if (strncmp(p, "\"target\"", 8) == 0) {
-      p += 8;
-      while (*p && *p != ':') p++;
-      if (*p == ':') p++;
-      while (*p == ' ' || *p == '"') p++;
-      char* tp = target;
-      while (*p && *p != '"' && *p != ',' && *p != '}') *tp++ = *p++;
-      *tp = '\0';
-    }
-    if (strncmp(p, "\"url\"", 5) == 0) {
-      p += 5;
-      while (*p && *p != ':') p++;
-      if (*p == ':') p++;
-      while (*p == ' ' || *p == '"') p++;
-      char* up = url;
-      while (*p && *p != '"' && *p != ',' && *p != '}') *up++ = *p++;
-      *up = '\0';
-    }
-    p++;
-  }
-
-  Serial.printf("[OTA-MQTT] action=%s target=%s url=%s\n", action, target, url);
-
-  if (strcmp(action, "start") == 0) {
-    if (ota_is_busy()) {
-      Serial.println("[OTA-MQTT] OTA busy, ignored");
-      return;
-    }
-
-    if (strcmp(target, "esp") == 0 && strlen(url) > 0) {
-      Serial.printf("[OTA-MQTT] Starting ESP OTA from: %s\n", url);
-      ota_start_esp(url);
-    } else if (strcmp(target, "arm") == 0 && strlen(url) > 0) {
-      Serial.printf("[OTA-MQTT] Starting ARM OTA from: %s\n", url);
-      ota_start_arm(url);
-    } else {
-      Serial.println("[OTA-MQTT] Invalid target or URL");
-    }
-  } else if (strcmp(action, "cancel") == 0) {
-    Serial.println("[OTA-MQTT] Cancel not implemented yet");
-    // TODO: 实现取消功能
-  } else if (strcmp(action, "query") == 0) {
-    // 立即发布当前状态
-    ota_progress_mqtt_callback(ota_get_target(), ota_get_progress(),
-                               ota_get_status(), ota_get_message());
-  } else {
-    Serial.printf("[OTA-MQTT] Unknown action: %s\n", action);
-  }
-}
+// ==================== MQTT OTA 处理（已移至 mqtt_ota_handler.cpp） ====================
+// 参考 mqtt_ota_handler.h 中的 API
 static void check_button();
 static void build_ap_ssid(char* out, size_t out_len);
+
+// ==================== OTA 进度回调（用于传统 OTA 管理器） ====================
+static void ota_progress_mqtt_callback(OtaTarget target, int percent, OtaStatus status, const char* message) {
+  // 这个函数留作备用，给传统 OTA Manager 使用
+  // MQTT OTA 处理通过 mqtt_ota_handler 直接上报
+}
+
+// ==================== 前向声明（结束） ====================
 
 // ==================== SETUP ====================
 void setup() {
@@ -220,8 +135,11 @@ void setup() {
   }
 
   mqtt_init(on_mqtt_message);
-  ota_manager_init();  // 初始化 OTA 管理器
-  ota_set_progress_callback(ota_progress_mqtt_callback);  // OTA 进度上报到 MQTT
+
+  // 初始化 OTA 相关模块
+  ota_manager_init();
+  ota_set_progress_callback(ota_progress_mqtt_callback);
+  mqtt_ota_init();  // 初始化 MQTT OTA 处理
 
   if (storage_has_wifi_config()) {
     storage_get_wifi(g_wifi_ssid, sizeof(g_wifi_ssid),
@@ -288,6 +206,7 @@ void loop() {
     case STATE_RUNNING:
       state_running();
       tcp_provision_process();
+      mqtt_ota_process();  // 处理 MQTT OTA
       break;
     case STATE_OTA:
       ota_manager_process();
@@ -656,7 +575,8 @@ static void on_mqtt_message(const char* topic, const char* payload, unsigned int
 
   // 判断是否为 OTA 命令
   if (strcmp(sub, "ota/cmd") == 0) {
-    handle_ota_mqtt_cmd(payload, len);
+    // 使用新的 mqtt_ota_handler 处理
+    mqtt_ota_handle_command(topic, (const uint8_t*)payload, len);
     return;
   }
 
