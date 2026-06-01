@@ -55,6 +55,14 @@
 #define CMD_ACK             0xFE  // ACK
 #define CMD_NACK            0xFF  // NACK
 
+// ==================== OTA 命令码（ARM 串口升级）====================
+#define CMD_ARM_OTA_START    0x10  // ESP32→ARM: 通知进入 IAP 模式
+#define CMD_ARM_OTA_DATA     0x11  // ESP32→ARM: 发送固件数据包
+#define CMD_ARM_OTA_END      0x12  // ESP32→ARM: 传输结束，校验跳转
+#define CMD_ARM_OTA_ACK      0x13  // ARM→ESP32: 确认收到
+#define CMD_ARM_OTA_NACK     0x14  // ARM→ESP32: 请求重传
+#define CMD_ARM_OTA_INFO     0x15  // ARM→ESP32: 上报固件信息
+
 // ==================== 状态机 ====================
 enum SystemState {
   STATE_INIT,             // 初始化
@@ -87,20 +95,10 @@ enum SystemState {
 #define KEY_DEVICE_SN     "dev_sn"
 #define KEY_DEVICE_KEY    "dev_key"
 #define KEY_AP_SSID       "ap_ssid"   // 自定义热点名称
-#define KEY_IPGEO_HOST    "igeo_h"    // IP 定位 API 主机
-#define KEY_IPGEO_PORT    "igeo_p"    // IP 定位 API 端口
-#define KEY_IPGEO_PATH    "igeo_u"    // IP 定位 API 路径
 
 // ==================== AP 配置常量 ====================
 #define AP_SSID_MAX_LEN   32
 #define AP_SSID_PREFIX    "CS_INV_"
-
-// ==================== IP 定位 API 默认配置 ====================
-#define IPGEO_DEFAULT_HOST  "ipapi.co"
-#define IPGEO_DEFAULT_PORT  443
-#define IPGEO_DEFAULT_PATH  "/json/"
-#define IPGEO_HOST_MAX_LEN  64
-#define IPGEO_PATH_MAX_LEN  64
 
 // ==================== 硬件配置 ====================
 #define UART_BAUDRATE       115200
@@ -108,6 +106,14 @@ enum SystemState {
 #define HEARTBEAT_INTERVAL  60000
 #define PROVISION_AP_SSID_PREFIX "CS_INV_"
 #define PROVISION_TCP_PORT  8888
+
+// ==================== 离线数据缓存配置 ====================
+#define OFFLINE_CACHE_MAX_ITEMS   1000    // 最大缓存数据条数
+#define OFFLINE_CACHE_TTL_DAYS     7      // 缓存保留天数
+#define OFFLINE_CACHE_ENABLED      1     // 1=启用离线缓存, 0=禁用
+
+// ==================== 固件版本 ====================
+#define FIRMWARE_VERSION "1.1.0"
 
 // ==================== 宏工具 ====================
 #define SN_MAX_LEN 32      // 兼容旧代码的最大缓冲区 (标准 SN 为 16 字符)

@@ -1,7 +1,7 @@
 #include "tcp_provision.h"
 #include "nvs_storage.h"
 #include "sn_encoder.h"
-#include "ip_geolocation.h"
+#include "ota_manager.h"
 #include <string.h>
 
 extern char g_device_sn[];
@@ -92,13 +92,6 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   <div class="wifi-list" id="wifiList" style="display:none"></div>
   <form id="configForm">
     <div class="form-group">
-      <label>🔑 设备序列号 (16位)</label>
-      <input type="text" id="sn" placeholder="如 H1CNA0013500001O" maxlength="16"
-             autocomplete="off" style="font-family:monospace;letter-spacing:1px;text-transform:uppercase;">
-      <div class="sn-check" id="snCheck"></div>
-      <div class="sn-hint">格式: 厂商+国家+客户+日期+序号+校验位，最后一位自动校验</div>
-    </div>
-    <div class="form-group">
       <label>WiFi 名称 (SSID)</label>
       <input type="text" id="ssid" placeholder="请输入 WiFi 名称" required autocomplete="off">
     </div>
@@ -111,92 +104,10 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   <div class="spinner" id="spinner"></div>
   <div class="msg" id="msg"></div>
   <a href="/status" class="status-link">📊 查看网络连接状态</a>
-  <a href="/ap_config" class="status-link" style="margin-top:8px;">📡 修改热点名称</a>
-  <a href="/ipgeo_config" class="status-link" style="margin-top:8px;">🌍 IP定位API设置</a>
+  <a href="/ota" class="status-link" style="margin-top:8px;background:linear-gradient(135deg,#fff3e0,#ffe0b2);border-color:#e65100;color:#e65100;">🔄 固件升级</a>
   <div class="hint">也可通过 辰烁科技App 配网</div>
 </div>
 <script>
-// ====== SN 校验 (CRC-16-CCITT 与 C++ 端一致) ======
-var SN_CHECK = {};
-SN_CHECK.yearCodes = '123456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-SN_CHECK.monthCodes = { '1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'A':10,'B':11,'C':12 };
-SN_CHECK.validGrades = ['A','B','C','D','E','P','X'];
-
-SN_CHECK.crc16 = function(data) {
-  var crc = 0xFFFF;
-  for (var i = 0; i < data.length; i++) {
-    crc ^= (data.charCodeAt(i) << 8);
-    for (var j = 0; j < 8; j++) {
-      if (crc & 0x8000) crc = ((crc << 1) ^ 0x1021) & 0xFFFF;
-      else crc = (crc << 1) & 0xFFFF;
-    }
-  }
-  return crc;
-};
-
-SN_CHECK.valueToChar = function(v) {
-  if (v < 10) return String.fromCharCode(48 + v);
-  return String.fromCharCode(65 + v - 10);
-};
-
-SN_CHECK.computeCheck = function(prefix) {
-  if (prefix.length !== 15) return '?';
-  var crc = this.crc16(prefix);
-  return this.valueToChar(crc % 36);
-};
-
-SN_CHECK.validateFormat = function(sn) {
-  sn = sn.toUpperCase();
-  if (sn.length !== 16) return false;
-  if (!/^[A-Z0-9]{16}$/.test(sn)) return false;
-  if (!/[A-Z]/.test(sn[0])) return false;
-  if (this.validGrades.indexOf(sn[4]) < 0 && !/[0-9]/.test(sn[4])) return false;
-  if (!/^[0-9]{3}$/.test(sn.substring(5,8))) return false;
-  if (this.yearCodes.indexOf(sn[8]) < 0) return false;
-  if (!(sn[9] in this.monthCodes)) return false;
-  if (!/^[0-9]{5}$/.test(sn.substring(10,15))) return false;
-  return true;
-};
-
-SN_CHECK.validate = function(sn) {
-  if (!this.validateFormat(sn)) return false;
-  sn = sn.toUpperCase();
-  var expected = this.computeCheck(sn.substring(0,15));
-  return expected === sn[15];
-};
-
-SN_CHECK.checkSnInput = function() {
-  var input = document.getElementById('sn');
-  var sn = input.value.trim().toUpperCase();
-  input.value = sn;
-  var check = document.getElementById('snCheck');
-  if (sn.length === 0) {
-    input.className = '';
-    check.textContent = '';
-    check.className = 'sn-check';
-  } else if (sn.length < 16) {
-    input.className = '';
-    check.textContent = '\u8fd8\u9700 ' + (16-sn.length) + ' \u4f4d';
-    check.className = 'sn-check';
-  } else if (!SN_CHECK.validateFormat(sn)) {
-    input.className = 'invalid';
-    check.textContent = '\u2717 \u683c\u5f0f\u9519\u8bef\uff0c\u8bf7\u68c0\u67e5\u5404\u6bb5\u4f4d\u662f\u5426\u6b63\u786e';
-    check.className = 'sn-check err';
-  } else if (!SN_CHECK.validate(sn)) {
-    input.className = 'invalid';
-    var expect = SN_CHECK.computeCheck(sn.substring(0,15));
-    check.textContent = '\u2717 \u6821\u9a8c\u4f4d\u9519\u8bef\uff0c\u5e94\u4e3a "' + expect + '"\uff0c\u5f53\u524d\u4e3a "' + sn[15] + '"';
-    check.className = 'sn-check err';
-  } else {
-    input.className = 'valid';
-    check.textContent = '\u2713 \u5e8f\u5217\u53f7\u6709\u6548';
-    check.className = 'sn-check ok';
-  }
-};
-
-// 绑定 SN 输入框事件
-document.getElementById('sn').addEventListener('input', SN_CHECK.checkSnInput.bind(SN_CHECK));
-
 // ====== 原有功能 ======
 function showMsg(text, isOk) {
   var m = document.getElementById('msg');
@@ -248,19 +159,9 @@ async function scanWiFi() {
 
 document.getElementById('configForm').onsubmit = async function(e) {
   e.preventDefault();
-  var snInput = document.getElementById('sn').value.trim().toUpperCase();
   var ssid = document.getElementById('ssid').value.trim();
   var pass = document.getElementById('pass').value;
 
-  // 序列号必填校验
-  if (!snInput) { showMsg('请输入设备序列号（16位）', false); return; }
-  if (snInput.length !== 16) { showMsg('序列号长度必须为 16 位', false); return; }
-  if (!SN_CHECK.validateFormat(snInput)) { showMsg('序列号格式错误，请检查各段位', false); return; }
-  if (!SN_CHECK.validate(snInput)) { 
-    var expect = SN_CHECK.computeCheck(snInput.substring(0,15));
-    showMsg('校验位错误，应为 "' + expect + '"，当前为 "' + snInput[15] + '"', false); 
-    return; 
-  }
   if (!ssid) { showMsg('请输入 WiFi 名称', false); return; }
   document.getElementById('submitBtn').disabled = true;
   document.getElementById('spinner').style.display = 'block';
@@ -269,7 +170,7 @@ document.getElementById('configForm').onsubmit = async function(e) {
     var r = await fetch('/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sn: snInput, ssid: ssid, password: pass })
+      body: JSON.stringify({ ssid: ssid, password: pass })
     });
     var data = await r.json();
     if (data.result === 'ok') {
@@ -326,9 +227,16 @@ static bool json_extract(const char* json, const char* key, char* value, size_t 
 }
 
 // ==================== HTTP 响应 ====================
-static void send_http_response(WiFiClient& client, int code, const char* type, const char* body) {
-  client.printf("HTTP/1.1 %d OK\r\n", code);
-  client.printf("Content-Type: %s\r\n", type);
+static void send_http_response(WiFiClient& client, int code, const char* content_type, const char* body) {
+  const char* reason = "OK";
+  if (code == 400) reason = "Bad Request";
+  else if (code == 404) reason = "Not Found";
+  else if (code == 405) reason = "Method Not Allowed";
+  else if (code == 500) reason = "Internal Server Error";
+  else if (code == 503) reason = "Service Unavailable";
+
+  client.printf("HTTP/1.1 %d %s\r\n", code, reason);
+  client.printf("Content-Type: %s\r\n", content_type);
   client.printf("Content-Length: %d\r\n", strlen(body));
   client.printf("Connection: close\r\n");
   client.printf("Access-Control-Allow-Origin: *\r\n");
@@ -366,258 +274,6 @@ static void url_decode(char* str) {
   }
   *q = '\0';
 }
-
-// ==================== AP 热点名称配置页面 HTML ====================
-static const char AP_CONFIG_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>修改热点名称</title>
-<style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; 
-       background:linear-gradient(135deg,#0f2027,#203a43,#2c5364); min-height:100vh;
-       display:flex; align-items:center; justify-content:center; }
-.card { background:#fff; border-radius:16px; padding:30px 24px; width:92%; max-width:380px;
-        box-shadow:0 20px 60px rgba(0,0,0,.3); }
-.logo { text-align:center; margin-bottom:8px; }
-.logo .icon { font-size:42px; }
-.logo h2 { font-size:18px; color:#2c5364; margin-top:4px; }
-.current { text-align:center; font-size:13px; color:#666; margin-bottom:16px; padding:10px; 
-           background:#f5f5f5; border-radius:8px; }
-.current .label { color:#999; font-size:11px; }
-.form-group { margin-bottom:16px; }
-.form-group label { display:block; font-size:13px; color:#555; margin-bottom:6px; font-weight:500; }
-.form-group input { width:100%; padding:12px 14px; border:2px solid #e0e0e0; border-radius:10px;
-                    font-size:15px; transition:border .2s; outline:none; }
-.form-group input:focus { border-color:#2c5364; }
-.form-group .hint { font-size:11px; color:#999; margin-top:4px; }
-.btn { width:100%; padding:14px; background:linear-gradient(135deg,#2c5364,#203a43);
-       color:#fff; border:none; border-radius:10px; font-size:16px; font-weight:600;
-       cursor:pointer; transition:opacity .2s; margin-top:6px; }
-.btn:active { opacity:.85; }
-.btn:disabled { opacity:.5; cursor:not-allowed; }
-.btn.secondary { background:#f5f5f5; color:#666; margin-top:10px; }
-.msg { text-align:center; font-size:13px; margin-top:14px; min-height:20px; }
-.msg.ok { color:#27ae60; }
-.msg.err { color:#e74c3c; }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="logo">
-    <div class="icon">📡</div>
-    <h2>修改热点名称</h2>
-  </div>
-  <div class="current">
-    <div class="label">当前热点名称</div>
-    <div id="currentAp">%CURRENT_AP%</div>
-  </div>
-  <form id="apForm">
-    <div class="form-group">
-      <label>新热点名称</label>
-      <input type="text" id="apSsid" placeholder="请输入热点名称" maxlength="31" required autocomplete="off">
-      <div class="hint">留空则使用默认格式 CS_INV_完整SN号，保存后自动重启</div>
-    </div>
-    <button type="submit" class="btn" id="submitBtn">💾 保存设置</button>
-    <button type="button" class="btn secondary" onclick="resetAp()">🔄 恢复默认</button>
-  </form>
-  <div class="msg" id="msg"></div>
-</div>
-<script>
-function showMsg(text, isOk) {
-  var m = document.getElementById('msg');
-  m.textContent = text;
-  m.className = 'msg ' + (isOk ? 'ok' : 'err');
-}
-
-document.getElementById('apForm').onsubmit = async function(e) {
-  e.preventDefault();
-  var ssid = document.getElementById('apSsid').value.trim();
-  document.getElementById('submitBtn').disabled = true;
-  showMsg('正在保存...', true);
-  try {
-    var r = await fetch('/ap_config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ap_ssid: ssid })
-    });
-    var data = await r.json();
-    if (data.result === 'ok') {
-      showMsg('✅ ' + (data.message || '保存成功'), true);
-      document.getElementById('currentAp').textContent = ssid || 'CS_INV_完整SN号 (默认)';
-    } else {
-      showMsg('❌ ' + (data.message || '保存失败'), false);
-    }
-  } catch(e) {
-    showMsg('❌ 请求失败', false);
-  }
-  document.getElementById('submitBtn').disabled = false;
-};
-
-async function resetAp() {
-  if (!confirm('确定要恢复默认热点名称吗？')) return;
-  document.getElementById('submitBtn').disabled = true;
-  showMsg('正在恢复...', true);
-  try {
-    var r = await fetch('/ap_config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ap_ssid: '' })
-    });
-    var data = await r.json();
-    if (data.result === 'ok') {
-      showMsg('✅ 已恢复默认设置，重启后生效', true);
-      document.getElementById('currentAp').textContent = 'CS_INV_完整SN号 (默认)';
-      document.getElementById('apSsid').value = '';
-    } else {
-      showMsg('❌ ' + (data.message || '恢复失败'), false);
-    }
-  } catch(e) {
-    showMsg('❌ 请求失败', false);
-  }
-  document.getElementById('submitBtn').disabled = false;
-}
-</script>
-</body>
-</html>
-)rawliteral";
-
-// ==================== IP 定位 API 配置页面 HTML ====================
-static const char IPGEO_CONFIG_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>IP定位API配置</title>
-<style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; 
-       background:linear-gradient(135deg,#0f2027,#203a43,#2c5364); min-height:100vh;
-       display:flex; align-items:center; justify-content:center; }
-.card { background:#fff; border-radius:16px; padding:30px 24px; width:92%; max-width:400px;
-        box-shadow:0 20px 60px rgba(0,0,0,.3); }
-.logo { text-align:center; margin-bottom:8px; }
-.logo .icon { font-size:42px; }
-.logo h2 { font-size:18px; color:#2c5364; margin-top:4px; }
-.current { text-align:center; font-size:12px; color:#666; margin-bottom:16px; padding:10px; 
-           background:#f5f5f5; border-radius:8px; word-break:break-all; }
-.current .label { color:#999; font-size:11px; }
-.form-group { margin-bottom:14px; }
-.form-group label { display:block; font-size:13px; color:#555; margin-bottom:6px; font-weight:500; }
-.form-group input { width:100%; padding:12px 14px; border:2px solid #e0e0e0; border-radius:10px;
-                    font-size:15px; transition:border .2s; outline:none; }
-.form-group input:focus { border-color:#2c5364; }
-.form-group .hint { font-size:11px; color:#999; margin-top:4px; }
-.btn { width:100%; padding:14px; background:linear-gradient(135deg,#2c5364,#203a43);
-       color:#fff; border:none; border-radius:10px; font-size:16px; font-weight:600;
-       cursor:pointer; transition:opacity .2s; margin-top:6px; }
-.btn:active { opacity:.85; }
-.btn:disabled { opacity:.5; cursor:not-allowed; }
-.btn.secondary { background:#f5f5f5; color:#666; margin-top:10px; }
-.msg { text-align:center; font-size:13px; margin-top:14px; min-height:20px; }
-.msg.ok { color:#27ae60; }
-.msg.err { color:#e74c3c; }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="logo">
-    <div class="icon">🌍</div>
-    <h2>IP 定位 API 配置</h2>
-  </div>
-  <div class="current">
-    <div class="label">当前 API 地址</div>
-    <div id="currentUrl">%CURRENT_URL%</div>
-  </div>
-  <form id="ipgeoForm">
-    <div class="form-group">
-      <label>API 主机 (Host)</label>
-      <input type="text" id="host" placeholder="如 ipapi.co" maxlength="63" required autocomplete="off">
-      <div class="hint">例如: ipapi.co, ip-api.com, api.ipify.org</div>
-    </div>
-    <div class="form-group">
-      <label>端口 (Port)</label>
-      <input type="number" id="port" placeholder="443" min="1" max="65535" required autocomplete="off">
-      <div class="hint">HTTPS 通常使用 443 端口</div>
-    </div>
-    <div class="form-group">
-      <label>请求路径 (Path)</label>
-      <input type="text" id="path" placeholder="/json/" maxlength="63" required autocomplete="off">
-      <div class="hint">例如: /json/, /api/location</div>
-    </div>
-    <button type="submit" class="btn" id="submitBtn">💾 保存设置</button>
-    <button type="button" class="btn secondary" onclick="resetIpgeo()">🔄 恢复默认</button>
-  </form>
-  <div class="msg" id="msg"></div>
-</div>
-<script>
-function showMsg(text, isOk) {
-  var m = document.getElementById('msg');
-  m.textContent = text;
-  m.className = 'msg ' + (isOk ? 'ok' : 'err');
-}
-
-document.getElementById('ipgeoForm').onsubmit = async function(e) {
-  e.preventDefault();
-  var host = document.getElementById('host').value.trim();
-  var port = parseInt(document.getElementById('port').value);
-  var path = document.getElementById('path').value.trim();
-  if (!host || !port || !path) { showMsg('请填写完整信息', false); return; }
-  document.getElementById('submitBtn').disabled = true;
-  showMsg('正在保存...', true);
-  try {
-    var r = await fetch('/ipgeo_config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: host, port: port, path: path })
-    });
-    var data = await r.json();
-    if (data.result === 'ok') {
-      showMsg('✅ ' + (data.message || '保存成功，无需重启立即生效'), true);
-      document.getElementById('currentUrl').textContent = 
-        'https://' + host + ':' + port + path;
-    } else {
-      showMsg('❌ ' + (data.message || '保存失败'), false);
-    }
-  } catch(e) {
-    showMsg('❌ 请求失败', false);
-  }
-  document.getElementById('submitBtn').disabled = false;
-};
-
-async function resetIpgeo() {
-  if (!confirm('确定要恢复默认 API 地址吗？')) return;
-  document.getElementById('submitBtn').disabled = true;
-  showMsg('正在恢复...', true);
-  try {
-    var r = await fetch('/ipgeo_config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reset: true })
-    });
-    var data = await r.json();
-    if (data.result === 'ok') {
-      showMsg('✅ 已恢复默认设置，立即生效', true);
-      document.getElementById('currentUrl').textContent = data.default_url || '';
-      document.getElementById('host').value = 'ipapi.co';
-      document.getElementById('port').value = '443';
-      document.getElementById('path').value = '/json/';
-    } else {
-      showMsg('❌ ' + (data.message || '恢复失败'), false);
-    }
-  } catch(e) {
-    showMsg('❌ 请求失败', false);
-  }
-  document.getElementById('submitBtn').disabled = false;
-}
-</script>
-</body>
-</html>
-)rawliteral";
 
 // ==================== 状态查询页面 HTML ====================
 static const char STATUS_HTML[] PROGMEM = R"rawliteral(
@@ -695,150 +351,326 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     <span class="value">%HEAP%</span>
   </div>
   <a href="/" class="btn">⚙️ 配网设置</a>
+  <a href="/ota" class="btn" style="margin-top:10px;background:linear-gradient(135deg,#e67e22,#d35400);">🔄 固件升级</a>
   <div class="hint">访问 <a href="http://192.168.4.1:8888/status">192.168.4.1:8888</a> 查看此页面</div>
 </div>
 </body>
 </html>
 )rawliteral";
 
-// ==================== AP 热点名称配置页面处理 ====================
-static void handle_ap_config_page(WiFiClient& client) {
-  String html = String(FPSTR(AP_CONFIG_HTML));
+// ==================== OTA 升级页面 HTML ====================
+static const char OTA_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>固件升级</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       background:linear-gradient(135deg,#0f2027,#203a43,#2c5364); min-height:100vh;
+       display:flex; align-items:center; justify-content:center; padding:20px; }
+.card { background:#fff; border-radius:16px; padding:24px; width:92%; max-width:420px;
+        box-shadow:0 20px 60px rgba(0,0,0,.3); }
+.header { text-align:center; margin-bottom:20px; }
+.header .icon { font-size:36px; }
+.header h2 { font-size:18px; color:#2c5364; margin-top:4px; }
+.info-row { display:flex; justify-content:space-between; padding:8px 0; font-size:13px; border-bottom:1px solid #f0f0f0; }
+.info-row .label { color:#999; }
+.info-row .value { color:#333; font-weight:500; }
+.section { margin-top:20px; padding:16px; background:#f8f9fa; border-radius:12px; }
+.section h3 { font-size:15px; color:#2c5364; margin-bottom:12px; }
+.section h3 .tag { font-size:11px; background:#2c5364; color:#fff; padding:2px 8px;
+                   border-radius:10px; margin-left:8px; font-weight:400; }
+.form-group { margin-bottom:12px; }
+.form-group label { display:block; font-size:12px; color:#666; margin-bottom:4px; }
+.form-group input { width:100%; padding:10px 12px; border:2px solid #e0e0e0; border-radius:8px;
+                    font-size:14px; outline:none; transition:border .2s; }
+.form-group input:focus { border-color:#2c5364; }
+.progress-bar { width:100%; height:8px; background:#e0e0e0; border-radius:4px; overflow:hidden;
+                margin:12px 0; display:none; }
+.progress-bar .fill { height:100%; background:linear-gradient(90deg,#27ae60,#2ecc71);
+                      border-radius:4px; transition:width .3s; width:0%; }
+.progress-bar .fill.error { background:linear-gradient(90deg,#e74c3c,#c0392b); }
+.progress-text { text-align:center; font-size:12px; color:#666; min-height:18px; }
+.btn { width:100%; padding:12px; border:none; border-radius:10px; font-size:14px; font-weight:600;
+       cursor:pointer; transition:opacity .2s; margin-top:6px; }
+.btn:active { opacity:.85; }
+.btn:disabled { opacity:.5; cursor:not-allowed; }
+.btn.primary { background:linear-gradient(135deg,#2c5364,#203a43); color:#fff; }
+.btn.arm { background:linear-gradient(135deg,#e67e22,#d35400); color:#fff; }
+.btn.danger { background:#e74c3c; color:#fff; }
+.msg { text-align:center; font-size:13px; margin-top:10px; min-height:20px; }
+.msg.ok { color:#27ae60; }
+.msg.err { color:#e74c3c; }
+.hint { text-align:center; font-size:11px; color:#bbb; margin-top:12px; }
+.back-link { display:block; text-align:center; padding:10px; margin-top:12px;
+             color:#2c5364; font-size:13px; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <div class="icon">🔄</div>
+    <h2>固件升级 (OTA)</h2>
+  </div>
+  <div class="info-row">
+    <span class="label">设备序列号</span>
+    <span class="value">%SN%</span>
+  </div>
+  <div class="info-row">
+    <span class="label">ESP 固件版本</span>
+    <span class="value">%ESP_VER%</span>
+  </div>
+  <div class="info-row">
+    <span class="label">ARM 固件版本</span>
+    <span class="value">%ARM_VER%</span>
+  </div>
+  <div class="info-row">
+    <span class="label">剩余内存</span>
+    <span class="value">%HEAP%</span>
+  </div>
 
-  // 获取当前热点名称
-  char current_ap[AP_SSID_MAX_LEN];
-  if (storage_get_ap_ssid(current_ap, sizeof(current_ap))) {
-    html.replace("%CURRENT_AP%", String(current_ap) + " (自定义)");
-  } else {
-    html.replace("%CURRENT_AP%", "CS_INV_完整SN号 (默认)");
-  }
+  <!-- ESP 固件升级 -->
+  <div class="section">
+    <h3>ESP 模块升级 <span class="tag">WiFi</span></h3>
+    <div class="form-group">
+      <label>固件下载地址 (URL)</label>
+      <input type="text" id="espUrl" placeholder="http://your-server/firmware.bin" autocomplete="off">
+    </div>
+    <button class="btn primary" id="espBtn" onclick="startEspOta()">⬇️ 升级 ESP 固件</button>
+    <div class="progress-bar" id="espProgress"><div class="fill" id="espFill"></div></div>
+    <div class="progress-text" id="espProgressText"></div>
+    <div class="msg" id="espMsg"></div>
+  </div>
 
+  <!-- ARM 固件升级 -->
+  <div class="section">
+    <h3>ARM 芯片升级 <span class="tag">GD32F303</span></h3>
+    <div class="form-group">
+      <label>固件下载地址 (URL)</label>
+      <input type="text" id="armUrl" placeholder="http://your-server/arm_firmware.bin" autocomplete="off">
+    </div>
+    <button class="btn arm" id="armBtn" onclick="startArmOta()">⬇️ 升级 ARM 固件</button>
+    <div class="progress-bar" id="armProgress"><div class="fill" id="armFill"></div></div>
+    <div class="progress-text" id="armProgressText"></div>
+    <div class="msg" id="armMsg"></div>
+  </div>
+
+  <a href="/status" class="back-link">📊 返回设备状态</a>
+  <div class="hint">升级过程中请勿断电，ESP 升级成功后自动重启</div>
+</div>
+<script>
+function showMsg(id, text, isOk) {
+  var m = document.getElementById(id);
+  m.textContent = text;
+  m.className = 'msg ' + (isOk ? 'ok' : 'err');
+}
+
+function updateProgress(target, percent, status) {
+  var bar = document.getElementById(target + 'Progress');
+  var fill = document.getElementById(target + 'Fill');
+  var text = document.getElementById(target + 'ProgressText');
+  bar.style.display = 'block';
+  fill.style.width = percent + '%';
+  fill.className = 'fill' + (status === 'error' ? ' error' : '');
+  var statusMap = {downloading:'下载中...',writing:'写入中...',verifying:'校验中...',done:'完成',error:'失败'};
+  text.textContent = percent + '% - ' + (statusMap[status] || status);
+}
+
+var pollTimer = null;
+
+function pollProgress(target) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(function() {
+    fetch('/ota/progress').then(function(r) { return r.json(); }).then(function(data) {
+      if (data.target === target || data.target === 'none') {
+        updateProgress(target, data.progress, data.status);
+        if (data.status === 'done' || data.status === 'error' || data.status === 'idle') {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          if (data.status === 'done') {
+            showMsg(target + 'Msg', '✅ 升级成功!', true);
+          } else if (data.status === 'error') {
+            showMsg(target + 'Msg', '❌ ' + (data.message || '升级失败'), false);
+            document.getElementById(target + 'Btn').disabled = false;
+          }
+        }
+      }
+    }).catch(function() {});
+  }, 1000);
+}
+
+function startEspOta() {
+  var url = document.getElementById('espUrl').value.trim();
+  if (!url) { showMsg('espMsg', '请输入固件 URL', false); return; }
+  document.getElementById('espBtn').disabled = true;
+  showMsg('espMsg', '正在启动升级...', true);
+  fetch('/ota/esp', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url: url})
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.result === 'ok') {
+      showMsg('espMsg', '升级已开始，请勿断电...', true);
+      pollProgress('esp');
+    } else {
+      showMsg('espMsg', '❌ ' + (data.message || '启动失败'), false);
+      document.getElementById('espBtn').disabled = false;
+    }
+  }).catch(function() {
+    showMsg('espMsg', '❌ 请求失败', false);
+    document.getElementById('espBtn').disabled = false;
+  });
+}
+
+function startArmOta() {
+  var url = document.getElementById('armUrl').value.trim();
+  if (!url) { showMsg('armMsg', '请输入固件 URL', false); return; }
+  document.getElementById('armBtn').disabled = true;
+  showMsg('armMsg', '正在启动升级...', true);
+  fetch('/ota/arm', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url: url})
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.result === 'ok') {
+      showMsg('armMsg', '升级已开始，请勿断电...', true);
+      pollProgress('arm');
+    } else {
+      showMsg('armMsg', '❌ ' + (data.message || '启动失败'), false);
+      document.getElementById('armBtn').disabled = false;
+    }
+  }).catch(function() {
+    showMsg('armMsg', '❌ 请求失败', false);
+    document.getElementById('armBtn').disabled = false;
+  });
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+// ==================== OTA 页面处理 ====================
+static void handle_ota_page(WiFiClient& client) {
+  String html = String(FPSTR(OTA_HTML));
+  html.replace("%SN%", g_device_sn);
+  html.replace("%ESP_VER%", ota_get_esp_version());
+  html.replace("%ARM_VER%", ota_get_arm_version());
+  html.replace("%HEAP%", String(ESP.getFreeHeap() / 1024) + " KB");
   send_http_response(client, 200, "text/html; charset=utf-8", html.c_str());
 }
 
-static void handle_ap_config_post(WiFiClient& client, const char* body) {
-  char ap_ssid[AP_SSID_MAX_LEN] = {0};
-
-  // 解析 JSON
-  const char* key = "\"ap_ssid\":\"";
-  const char* p = strstr(body, key);
-  if (p) {
-    p += strlen(key);
-    size_t i = 0;
-    while (*p && *p != '"' && i < AP_SSID_MAX_LEN - 1) {
-      ap_ssid[i++] = *p++;
-    }
-    ap_ssid[i] = '\0';
-  }
-
-  if (strlen(ap_ssid) == 0) {
-    // 恢复默认
-    storage_clear_ap_ssid();
-    const char* resp = "{\"result\":\"ok\",\"message\":\"已恢复默认热点名称，即将重启\"}";
-    send_http_response(client, 200, "application/json", resp);
-    Serial.printf("[PROV] AP SSID reset to default, restarting...\n");
-  } else if (strlen(ap_ssid) < 2 || strlen(ap_ssid) > 31) {
-    const char* resp = "{\"result\":\"error\",\"message\":\"热点名称长度需在 2-31 个字符之间\"}";
-    send_http_response(client, 400, "application/json", resp);
-    return;  // 不重启
-  } else {
-    // 保存自定义热点名称
-    storage_set_ap_ssid(ap_ssid);
-    const char* resp = "{\"result\":\"ok\",\"message\":\"热点名称已保存，即将重启\"}";
-    send_http_response(client, 200, "application/json", resp);
-    Serial.printf("[PROV] AP SSID set to: %s, restarting...\n", ap_ssid);
-  }
-
-  // 等待响应发送完毕后重启
-  delay(500);
-  ESP.restart();
-}
-
-// ==================== IP 定位 API 配置页面处理 ====================
-static void handle_ipgeo_config_page(WiFiClient& client) {
-  String html = String(FPSTR(IPGEO_CONFIG_HTML));
-
-  // 获取当前配置
-  char host[IPGEO_HOST_MAX_LEN];
-  uint16_t port;
-  char path[IPGEO_PATH_MAX_LEN];
-  ipgeo_get_config(host, sizeof(host), &port, path, sizeof(path));
-
-  String current_url = String("https://") + host + ":" + String(port) + path;
-  html.replace("%CURRENT_URL%", current_url);
-
-  send_http_response(client, 200, "text/html; charset=utf-8", html.c_str());
-}
-
-static void handle_ipgeo_config_post(WiFiClient& client, const char* body) {
-  // 检查是否为重置请求
-  const char* reset_key = "\"reset\":";
-  const char* p_reset = strstr(body, reset_key);
-  if (p_reset) {
-    // 跳过 key 和空格，找 true
-    const char* val = p_reset + strlen(reset_key);
-    while (*val == ' ' || *val == '\t') val++;
-    if (strncmp(val, "true", 4) == 0) {
-      ipgeo_reset_config();
-      char resp[256];
-      snprintf(resp, sizeof(resp),
-        "{\"result\":\"ok\",\"message\":\"已恢复默认\",\"default_url\":\"https://%s:%d%s\"}",
-        IPGEO_DEFAULT_HOST, IPGEO_DEFAULT_PORT, IPGEO_DEFAULT_PATH);
-      send_http_response(client, 200, "application/json", resp);
-      return;
-    }
-  }
-
-  // 解析 JSON: {"host":"...","port":443,"path":"/json/"}
-  auto extract_json_str = [](const char* json, const char* key, char* out, size_t out_len) -> bool {
-    char search[64];
-    snprintf(search, sizeof(search), "\"%s\":\"", key);
-    const char* p = strstr(json, search);
-    if (!p) return false;
-    p += strlen(search);
-    size_t i = 0;
-    while (*p && *p != '"' && i < out_len - 1) {
-      out[i++] = *p++;
-    }
-    out[i] = '\0';
-    return true;
-  };
-
-  auto extract_json_int = [](const char* json, const char* key, int* out) -> bool {
-    char search[64];
-    snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* p = strstr(json, search);
-    if (!p) return false;
-    p += strlen(search);
-    *out = atoi(p);
-    return true;
-  };
-
-  char host[IPGEO_HOST_MAX_LEN] = {0};
-  int port_val = 0;
-  char path[IPGEO_PATH_MAX_LEN] = {0};
-
-  bool got_host = extract_json_str(body, "host", host, sizeof(host));
-  bool got_port = extract_json_int(body, "port", &port_val);
-  bool got_path = extract_json_str(body, "path", path, sizeof(path));
-
-  if (!got_host || !got_port || !got_path || strlen(host) == 0 || 
-      port_val < 1 || port_val > 65535 || strlen(path) == 0) {
-    const char* resp = "{\"result\":\"error\",\"message\":\"参数不完整或格式错误\"}";
-    send_http_response(client, 400, "application/json", resp);
+// POST /ota/esp - 触发 ESP 自身 OTA
+static void handle_ota_esp(WiFiClient& client, const char* body) {
+  char url[256] = {0};
+  if (!json_extract(body, "url", url, sizeof(url)) || strlen(url) == 0) {
+    send_http_response(client, 400, "application/json",
+                       "{\"result\":\"error\",\"message\":\"缺少 url 参数\"}");
     return;
   }
 
-  if (ipgeo_set_config(host, (uint16_t)port_val, path)) {
-    char resp[256];
-    snprintf(resp, sizeof(resp),
-      "{\"result\":\"ok\",\"message\":\"API 地址已保存，无需重启\"}");
-    send_http_response(client, 200, "application/json", resp);
-    Serial.printf("[PROV] IPGEO API URL updated: %s:%d%s\n", host, port_val, path);
-  } else {
-    const char* resp = "{\"result\":\"error\",\"message\":\"保存失败\"}";
-    send_http_response(client, 500, "application/json", resp);
+  if (ota_is_busy()) {
+    send_http_response(client, 409, "application/json",
+                       "{\"result\":\"error\",\"message\":\"OTA 正在进行中\"}");
+    return;
   }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    send_http_response(client, 503, "application/json",
+                       "{\"result\":\"error\",\"message\":\"WiFi 未连接\"}");
+    return;
+  }
+
+  Serial.printf("[OTA] ESP OTA from: %s\n", url);
+  bool ok = ota_start_esp(url);
+
+  if (ok) {
+    send_http_response(client, 200, "application/json",
+                       "{\"result\":\"ok\",\"message\":\"ESP OTA started\"}");
+  } else {
+    send_http_response(client, 400, "application/json",
+                       "{\"result\":\"error\",\"message\":\"URL 无效或参数错误\"}");
+  }
+}
+
+// POST /ota/arm - 触发 ARM 固件 OTA
+static void handle_ota_arm(WiFiClient& client, const char* body) {
+  char url[256] = {0};
+  if (!json_extract(body, "url", url, sizeof(url)) || strlen(url) == 0) {
+    send_http_response(client, 400, "application/json",
+                       "{\"result\":\"error\",\"message\":\"缺少 url 参数\"}");
+    return;
+  }
+
+  if (ota_is_busy()) {
+    send_http_response(client, 409, "application/json",
+                       "{\"result\":\"error\",\"message\":\"OTA 正在进行中\"}");
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    send_http_response(client, 503, "application/json",
+                       "{\"result\":\"error\",\"message\":\"WiFi 未连接\"}");
+    return;
+  }
+
+  Serial.printf("[OTA] ARM OTA from: %s\n", url);
+  bool ok = ota_start_arm(url);
+
+  if (ok) {
+    send_http_response(client, 200, "application/json",
+                       "{\"result\":\"ok\",\"message\":\"ARM OTA started\"}");
+  } else {
+    send_http_response(client, 400, "application/json",
+                       "{\"result\":\"error\",\"message\":\"URL 无效或参数错误\"}");
+  }
+}
+
+// GET /ota/progress - 查询 OTA 进度
+static void handle_ota_progress(WiFiClient& client) {
+  char resp[256];
+  const char* target_str = "none";
+  const char* status_str = "idle";
+
+  if (ota_is_busy()) {
+    target_str = (ota_get_target() == OTA_TARGET_ESP) ? "esp" : "arm";
+    switch (ota_get_status()) {
+      case OTA_STATUS_DOWNLOADING: status_str = "downloading"; break;
+      case OTA_STATUS_WRITING:     status_str = "writing"; break;
+      case OTA_STATUS_VERIFYING:   status_str = "verifying"; break;
+      case OTA_STATUS_DONE:        status_str = "done"; break;
+      case OTA_STATUS_ERROR:       status_str = "error"; break;
+      default:                     status_str = "idle"; break;
+    }
+  } else if (ota_get_status() == OTA_STATUS_DONE) {
+    target_str = (ota_get_target() == OTA_TARGET_ESP) ? "esp" : "arm";
+    status_str = "done";
+  } else if (ota_get_status() == OTA_STATUS_ERROR) {
+    target_str = (ota_get_target() == OTA_TARGET_ESP) ? "esp" : "arm";
+    status_str = "error";
+  }
+
+  snprintf(resp, sizeof(resp),
+           "{\"target\":\"%s\",\"progress\":%d,\"status\":\"%s\",\"message\":\"%s\"}",
+           target_str, ota_get_progress(), status_str, ota_get_message());
+  send_http_response(client, 200, "application/json", resp);
+}
+
+// GET /ota/info - 查询设备固件信息
+static void handle_ota_info(WiFiClient& client) {
+  char resp[256];
+  snprintf(resp, sizeof(resp),
+           "{\"esp_version\":\"%s\",\"arm_version\":\"%s\",\"free_heap\":%d,\"chip\":\"%s\"}",
+           ota_get_esp_version(), ota_get_arm_version(), ESP.getFreeHeap(),
+#ifdef CHIP_ESP32C3
+           "ESP32-C3"
+#else
+           "ESP8266"
+#endif
+  );
+  send_http_response(client, 200, "application/json", resp);
 }
 
 // ==================== WiFi 扫描（供网页调用） ====================
@@ -1002,43 +834,6 @@ static void process_http_request(WiFiClient& client) {
     return;
   }
 
-  // GET /ap_config → 返回 AP 热点名称配置页面
-  if (strcmp(method, "GET") == 0 && strcmp(path, "/ap_config") == 0) {
-    handle_ap_config_page(client);
-    return;
-  }
-
-  // POST /ap_config → 设置 AP 热点名称（网页和 App 共用接口）
-  if (strcmp(method, "POST") == 0 && strcmp(path, "/ap_config") == 0) {
-    handle_ap_config_post(client, body);
-    return;
-  }
-
-  // GET /ap_info → 获取当前 AP 热点名称（供 App 查询）
-  if (strcmp(method, "GET") == 0 && strcmp(path, "/ap_info") == 0) {
-    char ap_ssid[AP_SSID_MAX_LEN];
-    if (storage_get_ap_ssid(ap_ssid, sizeof(ap_ssid))) {
-      char resp[128];
-      snprintf(resp, sizeof(resp), "{\"result\":\"ok\",\"ap_ssid\":\"%s\",\"type\":\"custom\"}", ap_ssid);
-      send_http_response(client, 200, "application/json", resp);
-    } else {
-      send_http_response(client, 200, "application/json", "{\"result\":\"ok\",\"ap_ssid\":\"\",\"type\":\"default\"}");
-    }
-    return;
-  }
-
-  // GET /ipgeo_config → 返回 IP 定位 API 配置页面
-  if (strcmp(method, "GET") == 0 && strcmp(path, "/ipgeo_config") == 0) {
-    handle_ipgeo_config_page(client);
-    return;
-  }
-
-  // POST /ipgeo_config → 设置 IP 定位 API URL
-  if (strcmp(method, "POST") == 0 && strcmp(path, "/ipgeo_config") == 0) {
-    handle_ipgeo_config_post(client, body);
-    return;
-  }
-
   // GET /wifi_status → 返回 WiFi 连接状态（用于配网后轮询检查）
   if (strcmp(method, "GET") == 0 && strcmp(path, "/wifi_status") == 0) {
     if (WiFi.status() == WL_CONNECTED) {
@@ -1053,6 +848,38 @@ static void process_http_request(WiFiClient& client) {
     return;
   }
 
+  // ========== OTA 路由 ==========
+
+  // GET /ota → 返回 OTA 升级页面
+  if (strcmp(method, "GET") == 0 && strcmp(path, "/ota") == 0) {
+    handle_ota_page(client);
+    return;
+  }
+
+  // POST /ota/esp → 触发 ESP 自身 OTA
+  if (strcmp(method, "POST") == 0 && strcmp(path, "/ota/esp") == 0) {
+    handle_ota_esp(client, body);
+    return;
+  }
+
+  // POST /ota/arm → 触发 ARM 固件 OTA
+  if (strcmp(method, "POST") == 0 && strcmp(path, "/ota/arm") == 0) {
+    handle_ota_arm(client, body);
+    return;
+  }
+
+  // GET /ota/progress → 查询 OTA 进度
+  if (strcmp(method, "GET") == 0 && strcmp(path, "/ota/progress") == 0) {
+    handle_ota_progress(client);
+    return;
+  }
+
+  // GET /ota/info → 查询设备固件信息
+  if (strcmp(method, "GET") == 0 && strcmp(path, "/ota/info") == 0) {
+    handle_ota_info(client);
+    return;
+  }
+
   if ((strcmp(method, "POST") == 0 && strcmp(path, "/config") == 0) ||
       (strcmp(method, "POST") == 0 && strcmp(path, "/") == 0)) {
 
@@ -1061,12 +888,10 @@ static void process_http_request(WiFiClient& client) {
 
     char ssid[33] = {0};
     char pass[65] = {0};
-    char sn[SN_MAX_LEN] = {0};
 
     // 尝试 JSON 解析
     bool got_ssid = json_extract(json_body, "ssid", ssid, sizeof(ssid));
     bool got_pass = json_extract(json_body, "password", pass, sizeof(pass));
-    bool got_sn   = json_extract(json_body, "sn", sn, sizeof(sn));
 
     // 兼容旧版 JSON API: {"cmd":"set_wifi","ssid":"...","password":"..."}
     char cmd[16] = {0};
@@ -1074,27 +899,6 @@ static void process_http_request(WiFiClient& client) {
     if (got_cmd && strcmp(cmd, "set_wifi") == 0) {
       got_ssid = json_extract(json_body, "ssid", ssid, sizeof(ssid));
       got_pass = json_extract(json_body, "password", pass, sizeof(pass));
-    }
-
-    // ---- SN 校验 (CS-SN-STD-001 V1.1) ----
-    if (got_sn && strlen(sn) > 0) {
-      if (!sn_validate(sn)) {
-        Serial.printf("[PROV] SN REJECTED (invalid): %s\n", sn);
-        const char* resp = "{\"result\":\"error\",\"message\":\"序列号无效，请检查校验位\"}";
-        send_http_response(client, 400, "application/json", resp);
-        return;
-      }
-      // 存储 SN
-      storage_set_sn(sn);
-      strncpy(g_device_sn, sn, SN_MAX_LEN - 1);
-      g_device_sn[SN_MAX_LEN - 1] = '\0';
-      SNFields sf;
-      if (sn_parse(sn, &sf)) {
-        char readable[32];
-        sn_printable(sn, readable, sizeof(readable));
-        Serial.printf("[PROV] SN stored (valid): %s | Mfr=%s Country=%s Cust=%s\n",
-                      readable, sf.manufacturer, sf.country, sf.customer);
-      }
     }
 
     if (got_ssid && got_pass) {

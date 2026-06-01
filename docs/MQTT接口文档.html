@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CS-I10-6k2 MQTT 接口文档</title>
+<style>
+  :root {
+    --primary: #2563eb;
+    --primary-light: #dbeafe;
+    --success: #16a34a;
+    --success-light: #dcfce7;
+    --warning: #d97706;
+    --warning-light: #fef3c7;
+    --danger: #dc2626;
+    --danger-light: #fee2e2;
+    --gray-50: #f9fafb;
+    --gray-100: #f3f4f6;
+    --gray-200: #e5e7eb;
+    --gray-300: #d1d5db;
+    --gray-500: #6b7280;
+    --gray-700: #374151;
+    --gray-900: #111827;
+    --sidebar-w: 260px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: var(--gray-900); background: #fff; line-height: 1.6; }
+  a { color: var(--primary); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Sidebar */
+  .sidebar {
+    position: fixed; top: 0; left: 0; width: var(--sidebar-w); height: 100vh;
+    background: var(--gray-50); border-right: 1px solid var(--gray-200);
+    overflow-y: auto; padding: 24px 16px; z-index: 10;
+  }
+  .sidebar h2 { font-size: 15px; color: var(--gray-700); margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--gray-200); }
+  .sidebar ul { list-style: none; }
+  .sidebar li { margin-bottom: 2px; }
+  .sidebar a {
+    display: block; padding: 5px 10px; font-size: 13px; color: var(--gray-700);
+    border-radius: 4px; transition: background .15s;
+  }
+  .sidebar a:hover { background: var(--gray-200); text-decoration: none; }
+  .sidebar .section-title { font-size: 12px; font-weight: 600; color: var(--gray-500); text-transform: uppercase; margin: 12px 0 4px; }
+
+  /* Main */
+  .main { margin-left: var(--sidebar-w); max-width: 960px; padding: 32px 48px 80px; }
+  h1 { font-size: 28px; margin-bottom: 8px; }
+  h2 { font-size: 22px; margin: 40px 0 16px; padding-bottom: 8px; border-bottom: 2px solid var(--primary); color: var(--gray-900); }
+  h3 { font-size: 17px; margin: 28px 0 12px; color: var(--gray-700); }
+  h4 { font-size: 15px; margin: 20px 0 8px; color: var(--gray-700); }
+  p { margin-bottom: 12px; }
+  hr { border: none; border-top: 1px solid var(--gray-200); margin: 32px 0; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 14px; }
+  th { background: var(--gray-100); text-align: left; padding: 8px 12px; font-weight: 600; border: 1px solid var(--gray-200); white-space: nowrap; }
+  td { padding: 7px 12px; border: 1px solid var(--gray-200); vertical-align: top; }
+  tr:hover td { background: var(--gray-50); }
+  code { background: var(--gray-100); padding: 1px 5px; border-radius: 3px; font-size: 13px; color: var(--danger); }
+
+  /* JSON block */
+  .json-block {
+    background: var(--gray-900); color: #e5e7eb; border-radius: 8px;
+    padding: 16px 20px; margin-bottom: 16px; overflow-x: auto;
+    font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace; font-size: 13px; line-height: 1.5;
+  }
+  .json-key { color: #7dd3fc; }
+  .json-str { color: #86efac; }
+  .json-num { color: #fbbf24; }
+  .json-bool { color: #c084fc; }
+  .json-null { color: #94a3b8; }
+
+  /* Badges */
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; vertical-align: middle; margin-left: 6px;
+  }
+  .badge-qos { background: var(--primary-light); color: var(--primary); }
+  .badge-retain { background: var(--warning-light); color: var(--warning); }
+  .badge-freq { background: var(--success-light); color: var(--success); }
+  .badge-src { background: var(--gray-100); color: var(--gray-700); }
+
+  /* Topic card */
+  .topic-card {
+    border: 1px solid var(--gray-200); border-radius: 8px;
+    padding: 20px 24px; margin-bottom: 24px; background: #fff;
+  }
+  .topic-card h4 { margin-top: 0; font-size: 16px; color: var(--primary); }
+  .topic-meta { margin-bottom: 12px; font-size: 13px; color: var(--gray-500); }
+  .topic-meta span { margin-right: 12px; }
+
+  /* Architecture */
+  .arch-box {
+    background: var(--gray-100); border-radius: 8px; padding: 16px 24px;
+    font-family: monospace; font-size: 14px; text-align: center; margin-bottom: 16px;
+    letter-spacing: 1px;
+  }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; padding: 20px 16px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<nav class="sidebar">
+  <h2>MQTT 接口文档</h2>
+  <div class="section-title">概述</div>
+  <ul>
+    <li><a href="#overview">一、概述</a></li>
+    <li><a href="#terms">二、术语说明</a></li>
+    <li><a href="#connection">三、MQTT 连接参数</a></li>
+    <li><a href="#topic-format">四、主题格式</a></li>
+  </ul>
+  <div class="section-title">数据上行</div>
+  <ul>
+    <li><a href="#uplink">五、数据上行</a></li>
+    <li><a href="#topic-status">status</a></li>
+    <li><a href="#topic-info">info</a></li>
+    <li><a href="#topic-data-ac">data/ac</a></li>
+    <li><a href="#topic-data-battery">data/battery</a></li>
+    <li><a href="#topic-data-pv">data/pv</a></li>
+    <li><a href="#topic-data-status">data/status</a></li>
+    <li><a href="#topic-data-energy">data/energy</a></li>
+    <li><a href="#topic-data-cells">data/cells</a></li>
+    <li><a href="#topic-data-alarm">data/alarm</a></li>
+    <li><a href="#topic-ota-status">ota/status</a></li>
+  </ul>
+  <div class="section-title">数据下行</div>
+  <ul>
+    <li><a href="#downlink">六、数据下行</a></li>
+    <li><a href="#cmd-inv">逆变器控制</a></li>
+    <li><a href="#cmd-bms">BMS 控制</a></li>
+    <li><a href="#cmd-mppt">MPPT 控制</a></li>
+    <li><a href="#cmd-ota">OTA 升级</a></li>
+  </ul>
+  <div class="section-title">其他</div>
+  <ul>
+    <li><a href="#heartbeat">七、心跳与在线状态</a></li>
+  </ul>
+</nav>
+
+<!-- Main Content -->
+<div class="main">
+
+<h1>CS-I10-6k2 MQTT 接口文档</h1>
+
+<!-- 一、概述 -->
+<h2 id="overview">一、概述</h2>
+<p>本文档定义 CS-I10-6k2 单相离网 48V 逆变器 WiFi 通信模块的 MQTT 接口规范，涵盖连接参数、数据上行/下行协议、心跳机制及 OTA 升级流程。</p>
+<div class="arch-box">云端 Broker &lt;── MQTT ──&gt; ESP32 &lt;── UART ──&gt; ARM</div>
+
+<!-- 二、术语说明 -->
+<h2 id="terms">二、术语说明</h2>
+<table>
+  <tr><th>缩写</th><th>说明</th></tr>
+  <tr><td>SN</td><td>设备序列号，16 位，格式 <code>CS-SN-STD-001 V1.1规范</code></td></tr>
+  <tr><td>ESP32</td><td>WiFi 通信模块，负责 MQTT 连接与数据透传</td></tr>
+  <tr><td>ARM</td><td>逆变器主控芯片，负责采集数据与执行控制</td></tr>
+  <tr><td>Broker</td><td>MQTT 消息服务器</td></tr>
+  <tr><td>LWT</td><td>Last Will and Testament，遗嘱消息</td></tr>
+</table>
+
+<!-- 三、MQTT 连接参数 -->
+<h2 id="connection">三、MQTT 连接参数</h2>
+<table>
+  <tr><th>参数</th><th>值</th><th>说明</th></tr>
+  <tr><td>协议</td><td><code>mqtts://</code></td><td>TLS 加密（端口 8883）</td></tr>
+  <tr><td>端口</td><td>8883</td><td>TLS 端口（默认）</td></tr>
+  <tr><td>Keepalive</td><td>60s</td><td>保活间隔</td></tr>
+  <tr><td>Client ID</td><td>设备 SN</td><td>16 位 CS-SN-STD-001 V1.1 规范</td></tr>
+  <tr><td>Username</td><td><code>CSKJ-INV-DEVICE-6K2</code></td><td>固定用户名</td></tr>
+  <tr><td>Password</td><td><code>CSKJINVDEVICE6K2</code></td><td>固定密码</td></tr>
+  <tr><td>Clean Session</td><td>false</td><td>非清理会话</td></tr>
+  <tr><td>默认 Broker</td><td><code>jiuxiaoyw.online:8883</code></td><td>可通过配网页面修改</td></tr>
+</table>
+
+<!-- 四、主题格式 -->
+<h2 id="topic-format">四、主题格式</h2>
+<div class="json-block">cs_inv/{设备SN}/{子主题}</div>
+<p>示例：<code>cs_inv/H1CNA00135000014/data/ac</code></p>
+
+<!-- 五、数据上行 -->
+<h2 id="uplink">五、数据上行（设备 → 云端）</h2>
+
+<h3>5.1 上行主题总览</h3>
+<table>
+  <tr><th>主题</th><th>QoS</th><th>Retain</th><th>频率</th><th>来源</th><th>说明</th></tr>
+  <tr><td><code>cs_inv/{sn}/status</code></td><td>1</td><td>true</td><td>60s</td><td>ESP32</td><td>在线状态 + RSSI + IP</td></tr>
+  <tr><td><code>cs_inv/{sn}/info</code></td><td>1</td><td>false</td><td>连接时</td><td>ARM</td><td>设备信息（上电一次）</td></tr>
+  <tr><td><code>cs_inv/{sn}/data/ac</code></td><td>0</td><td>false</td><td>5s</td><td>ARM</td><td>交流输出</td></tr>
+  <tr><td><code>cs_inv/{sn}/data/battery</code></td><td>0</td><td>false</td><td>5s</td><td>ARM</td><td>电池 BMS</td></tr>
+  <tr><td><code>cs_inv/{sn}/data/pv</code></td><td>0</td><td>false</td><td>5s</td><td>ARM</td><td>光伏 MPPT</td></tr>
+  <tr><td><code>cs_inv/{sn}/data/status</code></td><td>0</td><td>false</td><td>5s</td><td>ARM</td><td>逆变器系统状态</td></tr>
+  <tr><td><code>cs_inv/{sn}/data/energy</code></td><td>0</td><td>false</td><td>60s</td><td>ARM</td><td>能量统计</td></tr>
+  <tr><td><code>cs_inv/{sn}/data/cells</code></td><td>0</td><td>false</td><td>30s</td><td>ARM</td><td>电芯详细数据</td></tr>
+  <tr><td><code>cs_inv/{sn}/data/alarm</code></td><td>1</td><td>false</td><td>事件</td><td>ARM</td><td>告警/故障事件</td></tr>
+  <tr><td><code>cs_inv/{sn}/cmd/response</code></td><td>1</td><td>false</td><td>按需</td><td>ARM</td><td>控制命令执行结果</td></tr>
+  <tr><td><code>cs_inv/{sn}/ota/status</code></td><td>1</td><td>false</td><td>按需</td><td>ESP32</td><td>OTA 升级状态</td></tr>
+</table>
+
+<h3>5.2 各主题 Payload 格式</h3>
+
+<!-- status -->
+<div class="topic-card" id="topic-status">
+  <h4>status（ESP32 自动生成）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">60s</span>
+    <span class="badge badge-qos">QoS 1</span>
+    <span class="badge badge-retain">Retain</span>
+    <span class="badge badge-src">ESP32</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"online"</span>: <span class="json-bool">true</span>,
+  <span class="json-key">"rssi"</span>: <span class="json-num">-45</span>,
+  <span class="json-key">"ip"</span>: <span class="json-str">"192.168.1.100"</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>online</code></td><td>bool</td><td>设备在线状态</td></tr>
+    <tr><td><code>rssi</code></td><td>int</td><td>WiFi 信号强度 (dBm)</td></tr>
+    <tr><td><code>ip</code></td><td>string</td><td>设备本地 IP 地址</td></tr>
+  </table>
+</div>
+
+<!-- info -->
+<div class="topic-card" id="topic-info">
+  <h4>info（ARM 上报，连接时一次）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">连接时</span>
+    <span class="badge badge-qos">QoS 1</span>
+    <span class="badge badge-src">ARM</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"sn"</span>: <span class="json-str">"H1CNA00135000014"</span>,
+  <span class="json-key">"model"</span>: <span class="json-str">"CS-I10-6k2"</span>,
+  <span class="json-key">"manufacturer"</span>: <span class="json-str">"辰烁科技"</span>,
+  <span class="json-key">"firmware_arm"</span>: <span class="json-str">"V1.2.3.20240510"</span>,
+  <span class="json-key">"firmware_esp"</span>: <span class="json-str">"V1.0.5.20240420"</span>,
+  <span class="json-key">"type"</span>: <span class="json-str">"离网逆变器"</span>,
+  <span class="json-key">"rated_power"</span>: <span class="json-num">6200</span>,
+  <span class="json-key">"rated_voltage"</span>: <span class="json-num">220</span>,
+  <span class="json-key">"rated_freq"</span>: <span class="json-num">50.0</span>,
+  <span class="json-key">"battery_voltage"</span>: <span class="json-num">51.2</span>,
+  <span class="json-key">"battery_type"</span>: <span class="json-str">"LiFePO4"</span>,
+  <span class="json-key">"cell_count"</span>: <span class="json-num">16</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>sn</code></td><td>string</td><td>设备序列号（16 位）</td></tr>
+    <tr><td><code>model</code></td><td>string</td><td>设备型号</td></tr>
+    <tr><td><code>manufacturer</code></td><td>string</td><td>制造商名称</td></tr>
+    <tr><td><code>firmware_arm</code></td><td>string</td><td>ARM 固件版本号</td></tr>
+    <tr><td><code>firmware_esp</code></td><td>string</td><td>ESP32 固件版本号</td></tr>
+    <tr><td><code>type</code></td><td>string</td><td>设备类型</td></tr>
+    <tr><td><code>rated_power</code></td><td>int</td><td>额定功率 (W)</td></tr>
+    <tr><td><code>rated_voltage</code></td><td>int</td><td>额定输出电压 (V)</td></tr>
+    <tr><td><code>rated_freq</code></td><td>float</td><td>额定输出频率 (Hz)</td></tr>
+    <tr><td><code>battery_voltage</code></td><td>float</td><td>电池额定电压 (V)</td></tr>
+    <tr><td><code>battery_type</code></td><td>string</td><td>电池类型（如 <code>LiFePO4</code>）</td></tr>
+    <tr><td><code>cell_count</code></td><td>int</td><td>电芯串数</td></tr>
+  </table>
+</div>
+
+<!-- data/ac -->
+<div class="topic-card" id="topic-data-ac">
+  <h4>data/ac（交流输出）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">5s</span>
+    <span class="badge badge-qos">QoS 0</span>
+    <span class="badge badge-src">ARM</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"voltage"</span>: <span class="json-num">220.5</span>,
+  <span class="json-key">"current"</span>: <span class="json-num">8.52</span>,
+  <span class="json-key">"power"</span>: <span class="json-num">1870.3</span>,
+  <span class="json-key">"apparent"</span>: <span class="json-num">1875.6</span>,
+  <span class="json-key">"reactive"</span>: <span class="json-num">120.5</span>,
+  <span class="json-key">"frequency"</span>: <span class="json-num">50.02</span>,
+  <span class="json-key">"pf"</span>: <span class="json-num">0.997</span>,
+  <span class="json-key">"load_percent"</span>: <span class="json-num">30.2</span>,
+  <span class="json-key">"thd_v"</span>: <span class="json-num">1.8</span>,
+  <span class="json-key">"thd_i"</span>: <span class="json-num">2.5</span>,
+  <span class="json-key">"dc_injection"</span>: <span class="json-num">15.0</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>voltage</code></td><td>float</td><td>交流输出电压 (V)</td></tr>
+    <tr><td><code>current</code></td><td>float</td><td>交流输出电流 (A)</td></tr>
+    <tr><td><code>power</code></td><td>float</td><td>有功功率 (W)</td></tr>
+    <tr><td><code>apparent</code></td><td>float</td><td>视在功率 (VA)</td></tr>
+    <tr><td><code>reactive</code></td><td>float</td><td>无功功率 (Var)</td></tr>
+    <tr><td><code>frequency</code></td><td>float</td><td>输出频率 (Hz)</td></tr>
+    <tr><td><code>pf</code></td><td>float</td><td>功率因数（0~1，<b>必须 &le; 1</b>）</td></tr>
+    <tr><td><code>load_percent</code></td><td>float</td><td>负载率 (%)</td></tr>
+    <tr><td><code>thd_v</code></td><td>float</td><td>电压 THD (%)</td></tr>
+    <tr><td><code>thd_i</code></td><td>float</td><td>电流 THD (%)</td></tr>
+    <tr><td><code>dc_injection</code></td><td>float</td><td>直流分量 (mA)</td></tr>
+  </table>
+</div>
+
+<!-- data/battery -->
+<div class="topic-card" id="topic-data-battery">
+  <h4>data/battery（电池 BMS）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">5s</span>
+    <span class="badge badge-qos">QoS 0</span>
+    <span class="badge badge-src">ARM</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"soc"</span>: <span class="json-num">78.5</span>,
+  <span class="json-key">"soh"</span>: <span class="json-num">96.2</span>,
+  <span class="json-key">"voltage"</span>: <span class="json-num">51.2</span>,
+  <span class="json-key">"current"</span>: <span class="json-num">25.5</span>,
+  <span class="json-key">"power"</span>: <span class="json-num">1305.6</span>,
+  <span class="json-key">"capacity_remain"</span>: <span class="json-num">78.5</span>,
+  <span class="json-key">"capacity_total"</span>: <span class="json-num">100.0</span>,
+  <span class="json-key">"cycle_count"</span>: <span class="json-num">152</span>,
+  <span class="json-key">"temp_max"</span>: <span class="json-num">28.5</span>,
+  <span class="json-key">"temp_min"</span>: <span class="json-num">25.0</span>,
+  <span class="json-key">"cell_volt_max"</span>: <span class="json-num">3.35</span>,
+  <span class="json-key">"cell_volt_min"</span>: <span class="json-num">3.28</span>,
+  <span class="json-key">"cell_volt_diff"</span>: <span class="json-num">0.07</span>,
+  <span class="json-key">"charge_state"</span>: <span class="json-num">1</span>,
+  <span class="json-key">"battery_type"</span>: <span class="json-str">"LiFePO4"</span>,
+  <span class="json-key">"protect_status1"</span>: <span class="json-num">0</span>,
+  <span class="json-key">"protect_status2"</span>: <span class="json-num">0</span>,
+  <span class="json-key">"bms_fault_code"</span>: <span class="json-num">0</span>,
+  <span class="json-key">"bms_alarm_code"</span>: <span class="json-num">0</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>soc</code></td><td>float</td><td>电池电量百分比 (%)</td></tr>
+    <tr><td><code>soh</code></td><td>float</td><td>电池健康度 (%)</td></tr>
+    <tr><td><code>voltage</code></td><td>float</td><td>电池电压 (V)</td></tr>
+    <tr><td><code>current</code></td><td>float</td><td>电池电流 (A)，正值充电，负值放电</td></tr>
+    <tr><td><code>power</code></td><td>float</td><td>充放电功率 (W)，正=充电，负=放电</td></tr>
+    <tr><td><code>capacity_remain</code></td><td>float</td><td>当前剩余容量 (Ah)</td></tr>
+    <tr><td><code>capacity_total</code></td><td>float</td><td>标称额定容量 (Ah)</td></tr>
+    <tr><td><code>cycle_count</code></td><td>int</td><td>累计充放电循环次数</td></tr>
+    <tr><td><code>temp_max</code></td><td>float</td><td>电芯最高温度 (℃)</td></tr>
+    <tr><td><code>temp_min</code></td><td>float</td><td>电芯最低温度 (℃)</td></tr>
+    <tr><td><code>cell_volt_max</code></td><td>float</td><td>单体最高电压 (V)</td></tr>
+    <tr><td><code>cell_volt_min</code></td><td>float</td><td>单体最低电压 (V)</td></tr>
+    <tr><td><code>cell_volt_diff</code></td><td>float</td><td>电芯压差 (V)</td></tr>
+    <tr><td><code>charge_state</code></td><td>int</td><td>充电状态：0=静置、1=充电、2=放电</td></tr>
+    <tr><td><code>battery_type</code></td><td>string</td><td>电池类型：<code>LiFePO4</code> / <code>NCM</code> / <code>NCA</code> / <code>LeadAcid</code></td></tr>
+    <tr><td><code>protect_status1</code></td><td>int</td><td>保护状态位掩码（Bit0=过压, Bit1=欠压, Bit2=充电过流, Bit3=放电过流, Bit4=过温, Bit5=低温, Bit6=短路, Bit7=反接）</td></tr>
+    <tr><td><code>protect_status2</code></td><td>int</td><td>保护状态位掩码（Bit0=均衡中, Bit1=通信异常, Bit2=绝缘故障, Bit3=SOC过低, Bit4=SOC过高, Bit5=压差异常）</td></tr>
+    <tr><td><code>bms_fault_code</code></td><td>int</td><td>BMS 故障码，0=正常</td></tr>
+    <tr><td><code>bms_alarm_code</code></td><td>int</td><td>BMS 告警码，0=无告警</td></tr>
+  </table>
+</div>
+
+<!-- data/pv -->
+<div class="topic-card" id="topic-data-pv">
+  <h4>data/pv（光伏 MPPT）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">5s</span>
+    <span class="badge badge-qos">QoS 0</span>
+    <span class="badge badge-src">ARM</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"pv1_voltage"</span>: <span class="json-num">85.3</span>,
+  <span class="json-key">"pv1_current"</span>: <span class="json-num">12.5</span>,
+  <span class="json-key">"pv1_power"</span>: <span class="json-num">1066.3</span>,
+  <span class="json-key">"pv2_voltage"</span>: <span class="json-num">0.0</span>,
+  <span class="json-key">"pv2_current"</span>: <span class="json-num">0.0</span>,
+  <span class="json-key">"pv2_power"</span>: <span class="json-num">0.0</span>,
+  <span class="json-key">"pv_power_total"</span>: <span class="json-num">1066.3</span>,
+  <span class="json-key">"mppt_state"</span>: <span class="json-str">"tracking"</span>,
+  <span class="json-key">"pv_temp"</span>: <span class="json-num">52.0</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>pv1_voltage</code></td><td>float</td><td>第一路光伏输入电压 (V)</td></tr>
+    <tr><td><code>pv1_current</code></td><td>float</td><td>第一路光伏输入电流 (A)</td></tr>
+    <tr><td><code>pv1_power</code></td><td>float</td><td>第一路光伏输入功率 (W)</td></tr>
+    <tr><td><code>pv2_voltage</code></td><td>float</td><td>第二路光伏输入电压 (V)</td></tr>
+    <tr><td><code>pv2_current</code></td><td>float</td><td>第二路光伏输入电流 (A)</td></tr>
+    <tr><td><code>pv2_power</code></td><td>float</td><td>第二路光伏输入功率 (W)</td></tr>
+    <tr><td><code>pv_power_total</code></td><td>float</td><td>光伏输入总功率 (W)</td></tr>
+    <tr><td><code>mppt_state</code></td><td>string</td><td>MPPT 状态：<code>tracking</code>、<code>standby</code>、<code>float</code>、<code>off</code></td></tr>
+    <tr><td><code>pv_temp</code></td><td>float</td><td>组件或控制器温度 (℃)，可选</td></tr>
+  </table>
+</div>
+
+<!-- data/status -->
+<div class="topic-card" id="topic-data-status">
+  <h4>data/status（逆变器系统状态）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">5s</span>
+    <span class="badge badge-qos">QoS 0</span>
+    <span class="badge badge-src">ARM</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"state"</span>: <span class="json-num">2</span>,
+  <span class="json-key">"fault_code"</span>: <span class="json-num">0</span>,
+  <span class="json-key">"alarm_code"</span>: <span class="json-num">0</span>,
+  <span class="json-key">"alarm_code2"</span>: <span class="json-num">0</span>,
+  <span class="json-key">"temp_inv"</span>: <span class="json-num">48.5</span>,
+  <span class="json-key">"temp_mos"</span>: <span class="json-num">55.2</span>,
+  <span class="json-key">"temp_ambient"</span>: <span class="json-num">32.0</span>,
+  <span class="json-key">"dc_bus_voltage"</span>: <span class="json-num">380.0</span>,
+  <span class="json-key">"runtime_hours"</span>: <span class="json-num">8640</span>,
+  <span class="json-key">"fan_speed"</span>: <span class="json-num">60</span>,
+  <span class="json-key">"efficiency"</span>: <span class="json-num">94.6</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>state</code></td><td>int</td><td>运行状态：0=待机、2=离网运行、3=故障、4=维护模式</td></tr>
+    <tr><td><code>fault_code</code></td><td>int</td><td>故障码，0 表示无故障</td></tr>
+    <tr><td><code>alarm_code</code></td><td>int</td><td>告警码 1，0 表示无告警</td></tr>
+    <tr><td><code>alarm_code2</code></td><td>int</td><td>告警码 2（扩展），0 表示无告警</td></tr>
+    <tr><td><code>temp_inv</code></td><td>float</td><td>逆变器内部温度 (℃)</td></tr>
+    <tr><td><code>temp_mos</code></td><td>float</td><td>散热器温度 (℃)</td></tr>
+    <tr><td><code>temp_ambient</code></td><td>float</td><td>环境温度 (℃)，可选</td></tr>
+    <tr><td><code>dc_bus_voltage</code></td><td>float</td><td>直流母线电压 (V)</td></tr>
+    <tr><td><code>runtime_hours</code></td><td>int</td><td>累计运行时长 (小时)</td></tr>
+    <tr><td><code>fan_speed</code></td><td>int</td><td>风扇转速 (%)，0=停转</td></tr>
+    <tr><td><code>efficiency</code></td><td>float</td><td>逆变效率 (%)</td></tr>
+  </table>
+</div>
+
+<!-- data/energy -->
+<div class="topic-card" id="topic-data-energy">
+  <h4>data/energy（能量统计）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">60s</span>
+    <span class="badge badge-qos">QoS 0</span>
+    <span class="badge badge-src">ARM</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"daily_pv"</span>: <span class="json-num">8.56</span>,
+  <span class="json-key">"total_pv"</span>: <span class="json-num">1250.3</span>,
+  <span class="json-key">"daily_charge"</span>: <span class="json-num">7.80</span>,
+  <span class="json-key">"total_charge"</span>: <span class="json-num">1100.5</span>,
+  <span class="json-key">"daily_discharge"</span>: <span class="json-num">6.20</span>,
+  <span class="json-key">"total_discharge"</span>: <span class="json-num">980.8</span>,
+  <span class="json-key">"daily_load"</span>: <span class="json-num">6.00</span>,
+  <span class="json-key">"total_load"</span>: <span class="json-num">950.2</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>daily_pv</code></td><td>float</td><td>当日光伏发电量 (kWh)</td></tr>
+    <tr><td><code>total_pv</code></td><td>float</td><td>累计光伏发电量 (kWh)</td></tr>
+    <tr><td><code>daily_charge</code></td><td>float</td><td>当日充入电池电量 (kWh)</td></tr>
+    <tr><td><code>total_charge</code></td><td>float</td><td>累计充电量 (kWh)</td></tr>
+    <tr><td><code>daily_discharge</code></td><td>float</td><td>当日电池放电量 (kWh)</td></tr>
+    <tr><td><code>total_discharge</code></td><td>float</td><td>累计放电量 (kWh)</td></tr>
+    <tr><td><code>daily_load</code></td><td>float</td><td>当日负载消耗 (kWh)</td></tr>
+    <tr><td><code>total_load</code></td><td>float</td><td>累计负载消耗 (kWh)</td></tr>
+  </table>
+</div>
+
+<!-- data/cells -->
+<div class="topic-card" id="topic-data-cells">
+  <h4>data/cells（电芯详情）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">30s</span>
+    <span class="badge badge-qos">QoS 0</span>
+    <span class="badge badge-src">ARM</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"cell_count"</span>: <span class="json-num">16</span>,
+  <span class="json-key">"voltages"</span>: [<span class="json-num">3.32</span>, <span class="json-num">3.33</span>, <span class="json-num">3.31</span>, <span class="json-num">3.32</span>, <span class="json-num">3.35</span>, <span class="json-num">3.30</span>, <span class="json-num">3.32</span>, <span class="json-num">3.31</span>,
+    <span class="json-num">3.33</span>, <span class="json-num">3.32</span>, <span class="json-num">3.31</span>, <span class="json-num">3.32</span>, <span class="json-num">3.34</span>, <span class="json-num">3.29</span>, <span class="json-num">3.32</span>, <span class="json-num">3.31</span>],
+  <span class="json-key">"temps"</span>: [<span class="json-num">26.5</span>, <span class="json-num">26.8</span>, <span class="json-num">26.2</span>, <span class="json-num">26.5</span>, <span class="json-num">27.0</span>, <span class="json-num">26.0</span>, <span class="json-num">26.5</span>, <span class="json-num">26.3</span>,
+    <span class="json-num">26.8</span>, <span class="json-num">26.5</span>, <span class="json-num">26.2</span>, <span class="json-num">26.5</span>, <span class="json-num">26.9</span>, <span class="json-num">25.8</span>, <span class="json-num">26.5</span>, <span class="json-num">26.4</span>],
+  <span class="json-key">"charge_ah_total"</span>: <span class="json-num">12580.3</span>,
+  <span class="json-key">"discharge_ah_total"</span>: <span class="json-num">12450.6</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>cell_count</code></td><td>int</td><td>电芯串数</td></tr>
+    <tr><td><code>voltages</code></td><td>float[]</td><td>各电芯电压 (V)，数组长度 = <code>cell_count</code></td></tr>
+    <tr><td><code>temps</code></td><td>float[]</td><td>各电芯温度 (℃)，数组长度 = <code>cell_count</code></td></tr>
+    <tr><td><code>charge_ah_total</code></td><td>float</td><td>充电累计安时 (Ah)</td></tr>
+    <tr><td><code>discharge_ah_total</code></td><td>float</td><td>放电累计安时 (Ah)</td></tr>
+  </table>
+</div>
+
+<!-- data/alarm -->
+<div class="topic-card" id="topic-data-alarm">
+  <h4>data/alarm（告警/故障事件）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">事件触发</span>
+    <span class="badge badge-qos">QoS 1</span>
+    <span class="badge badge-src">ARM</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"code"</span>: <span class="json-num">1001</span>,
+  <span class="json-key">"level"</span>: <span class="json-str">"warning"</span>,
+  <span class="json-key">"message"</span>: <span class="json-str">"电池电压过低"</span>,
+  <span class="json-key">"timestamp"</span>: <span class="json-num">1716800000</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>code</code></td><td>int</td><td>告警/故障码</td></tr>
+    <tr><td><code>level</code></td><td>string</td><td>级别：<code>info</code>、<code>warning</code>、<code>fault</code></td></tr>
+    <tr><td><code>message</code></td><td>string</td><td>告警/故障描述</td></tr>
+    <tr><td><code>timestamp</code></td><td>int</td><td>事件发生时间（Unix 时间戳，秒）</td></tr>
+  </table>
+</div>
+
+<!-- ota/status -->
+<div class="topic-card" id="topic-ota-status">
+  <h4>ota/status（OTA 升级状态）</h4>
+  <div class="topic-meta">
+    <span class="badge badge-freq">按需</span>
+    <span class="badge badge-qos">QoS 1</span>
+    <span class="badge badge-src">ESP32</span>
+  </div>
+  <div class="json-block">{
+  <span class="json-key">"target"</span>: <span class="json-str">"esp"</span>,
+  <span class="json-key">"state"</span>: <span class="json-str">"downloading"</span>,
+  <span class="json-key">"progress"</span>: <span class="json-num">45</span>,
+  <span class="json-key">"message"</span>: <span class="json-str">"下载中..."</span>
+}</div>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>target</code></td><td>string</td><td>升级目标：<code>esp</code> 或 <code>arm</code></td></tr>
+    <tr><td><code>state</code></td><td>string</td><td>状态：<code>idle</code>、<code>downloading</code>、<code>uploading</code>、<code>verifying</code>、<code>done</code>、<code>error</code></td></tr>
+    <tr><td><code>progress</code></td><td>int</td><td>进度 0-100</td></tr>
+    <tr><td><code>message</code></td><td>string</td><td>状态消息</td></tr>
+  </table>
+</div>
+
+<!-- 六、数据下行 -->
+<h2 id="downlink">六、数据下行（云端 &rarr; 设备）</h2>
+
+<h3>6.1 命令下发</h3>
+<p>云端通过 <code>cs_inv/{sn}/cmd</code> 下发命令，ESP32 透传到 ARM：</p>
+<div class="json-block"><b>云端 &rarr; ESP32 MQTT</b>:
+主题: cs_inv/H1CNA00135000014/cmd
+Payload: {<span class="json-key">"topic"</span>:<span class="json-str">"ac_on"</span>,<span class="json-key">"payload"</span>:<span class="json-str">""</span>}
+
+<b>ESP32 &rarr; ARM UART</b>:
+CMD=0x03 (COMMAND_RECV)
+DATA={<span class="json-key">"topic"</span>:<span class="json-str">"ac_on"</span>,<span class="json-key">"payload"</span>:<span class="json-str">""</span>}</div>
+
+<h3>6.2 支持的控制命令</h3>
+
+<!-- 逆变器控制 -->
+<h4 id="cmd-inv">逆变器控制</h4>
+<table>
+  <tr><th>命令</th><th>Payload</th><th>说明</th></tr>
+  <tr><td><code>ac_on</code></td><td><code>""</code></td><td>交流输出开启（需先使能远程控制）</td></tr>
+  <tr><td><code>ac_off</code></td><td><code>""</code></td><td>交流输出关闭</td></tr>
+  <tr><td><code>set_power_limit</code></td><td><code>{"value":3000}</code></td><td>有功功率上限 (W)</td></tr>
+  <tr><td><code>set_reactive</code></td><td><code>{"value":500}</code></td><td>无功功率目标值 (Var)</td></tr>
+  <tr><td><code>set_pf</code></td><td><code>{"value":99}</code></td><td>目标功率因数（-100~100，对应 -1.00~1.00）</td></tr>
+  <tr><td><code>set_charge_limit</code></td><td><code>{"value":3000}</code></td><td>最大充电功率 (W)</td></tr>
+  <tr><td><code>set_discharge_limit</code></td><td><code>{"value":3000}</code></td><td>最大放电功率 (W)</td></tr>
+  <tr><td><code>set_soc_low</code></td><td><code>{"value":200}</code></td><td>放电截止 SOC（0.1%，200=20%）</td></tr>
+  <tr><td><code>set_soc_high</code></td><td><code>{"value":950}</code></td><td>充电截止 SOC（0.1%，950=95%）</td></tr>
+  <tr><td><code>force_charge</code></td><td><code>{"value":1}</code></td><td>强制充电使能：0=关闭, 1=开启</td></tr>
+  <tr><td><code>force_discharge</code></td><td><code>{"value":1}</code></td><td>强制放电使能：0=关闭, 1=开启</td></tr>
+  <tr><td><code>eco_mode</code></td><td><code>{"value":1}</code></td><td>工作模式：0=自发自用, 1=备电优先, 2=分时电价, 3=离网</td></tr>
+  <tr><td><code>restart</code></td><td><code>""</code></td><td>故障复位</td></tr>
+  <tr><td><code>pv_shutdown</code></td><td><code>{"value":3}</code></td><td>组串关断（Bit0=PV1, Bit1=PV2）</td></tr>
+  <tr><td><code>query</code></td><td><code>""</code></td><td>立即上报全量数据</td></tr>
+</table>
+
+<!-- BMS 控制 -->
+<h4 id="cmd-bms">BMS 控制</h4>
+<table>
+  <tr><th>命令</th><th>Payload</th><th>说明</th></tr>
+  <tr><td><code>bms/charge_enable</code></td><td><code>{"value":1}</code></td><td>充放电使能：0=禁止, 1=允许</td></tr>
+  <tr><td><code>bms/charge_current</code></td><td><code>{"value":500}</code></td><td>最大充电电流（0.1A，500=50A）</td></tr>
+  <tr><td><code>bms/discharge_current</code></td><td><code>{"value":1000}</code></td><td>最大放电电流（0.1A，1000=100A）</td></tr>
+  <tr><td><code>bms/charge_volt</code></td><td><code>{"value":584}</code></td><td>充电截止电压（0.1V，584=58.4V）</td></tr>
+  <tr><td><code>bms/discharge_volt</code></td><td><code>{"value":430}</code></td><td>放电截止电压（0.1V，430=43.0V）</td></tr>
+  <tr><td><code>bms/balance_enable</code></td><td><code>{"value":1}</code></td><td>均衡使能：0=禁止, 1=允许</td></tr>
+  <tr><td><code>bms/balance_threshold</code></td><td><code>{"value":50}</code></td><td>均衡启动压差 (mV)</td></tr>
+</table>
+
+<!-- MPPT 控制 -->
+<h4 id="cmd-mppt">MPPT 控制</h4>
+<table>
+  <tr><th>命令</th><th>Payload</th><th>说明</th></tr>
+  <tr><td><code>mppt_on</code></td><td><code>""</code></td><td>启用 MPPT 充电</td></tr>
+  <tr><td><code>mppt_off</code></td><td><code>""</code></td><td>禁用 MPPT 充电</td></tr>
+  <tr><td><code>mppt_power_limit</code></td><td><code>{"value":1000}</code></td><td>PV 输入功率限制 (W)</td></tr>
+</table>
+
+<h3 id="cmd-ota">6.3 OTA 远程升级</h3>
+<p>云端通过 <code>cs_inv/{sn}/ota/cmd</code> 下发 OTA 命令：</p>
+<div class="json-block">{
+  <span class="json-key">"action"</span>: <span class="json-str">"start"</span>,
+  <span class="json-key">"target"</span>: <span class="json-str">"esp"</span>,
+  <span class="json-key">"url"</span>: <span class="json-str">"http://firmware.example.com/esp32-v1.0.6.bin"</span>
+}</div>
+<table>
+  <tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr>
+  <tr><td><code>action</code></td><td>string</td><td>是</td><td>操作：<code>start</code>、<code>stop</code>、<code>query</code></td></tr>
+  <tr><td><code>target</code></td><td>string</td><td>是</td><td>目标：<code>esp</code>（ESP32/ESP8266）、<code>arm</code>（ARM芯片）</td></tr>
+  <tr><td><code>url</code></td><td>string</td><td>start 时</td><td>固件下载 URL（HTTP）</td></tr>
+</table>
+
+<h3>6.4 命令回复</h3>
+<p>ARM 执行后通过 <code>CMD=0x04</code> 回复，ESP32 转发到 <code>cs_inv/{sn}/cmd/response</code>。</p>
+
+<!-- 七、心跳与在线状态 -->
+<h2 id="heartbeat">七、心跳与在线状态</h2>
+
+<h3>7.1 ESP32 &rarr; ARM 心跳</h3>
+<div class="json-block">CMD=0x06 (HEARTBEAT)
+DATA=(空)</div>
+<p>发送间隔：10s，表示 ESP32 在线。ARM 超时 30s 未收到心跳则报警。</p>
+
+<h3>7.2 ESP32 &rarr; 云端 status 心跳</h3>
+<p>ESP32 每 60s 自动发布到 <code>cs_inv/{sn}/status</code>（QoS 1, Retain true）：</p>
+<div class="json-block">{
+  <span class="json-key">"online"</span>: <span class="json-bool">true</span>,
+  <span class="json-key">"rssi"</span>: <span class="json-num">-45</span>,
+  <span class="json-key">"ip"</span>: <span class="json-str">"192.168.1.100"</span>
+}</div>
+
+<h3>7.3 LWT 遗嘱</h3>
+<p>MQTT 连接时设置 LWT，设备异常断开时自动发布：</p>
+<div class="json-block">主题: cs_inv/{sn}/status
+Payload: {<span class="json-key">"online"</span>: <span class="json-bool">false</span>}
+Retain: true</div>
+<p>后端通过监听 <code>cs_inv/+/status</code> 的 retained 消息判断设备在线/离线。</p>
+
+</div>
+</body>
+</html>

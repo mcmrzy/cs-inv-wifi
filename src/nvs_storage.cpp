@@ -271,64 +271,6 @@ void storage_clear_ap_ssid() {
 #endif
 }
 
-// ==================== IP 定位 API URL ====================
-bool storage_get_ipgeo_config(char* host, size_t host_len,
-                               uint16_t* port, char* path, size_t path_len) {
-  bool found = false;
-#ifdef USE_PREFERENCES
-  String h = prefs.getString(KEY_IPGEO_HOST, "");
-  if (h.length() > 0) {
-    strncpy(host, h.c_str(), host_len - 1);
-    host[host_len - 1] = '\0';
-    found = true;
-  } else {
-    // 使用默认值
-    strncpy(host, IPGEO_DEFAULT_HOST, host_len - 1);
-    host[host_len - 1] = '\0';
-  }
-  
-  *port = prefs.getUShort(KEY_IPGEO_PORT, IPGEO_DEFAULT_PORT);
-  
-  String p = prefs.getString(KEY_IPGEO_PATH, "");
-  if (p.length() > 0) {
-    strncpy(path, p.c_str(), path_len - 1);
-    path[path_len - 1] = '\0';
-    if (!found) found = true;
-  } else {
-    strncpy(path, IPGEO_DEFAULT_PATH, path_len - 1);
-    path[path_len - 1] = '\0';
-  }
-#else
-  // EEPROM 模式暂不支持 ipgeo 配置，直接返回默认值
-  strncpy(host, IPGEO_DEFAULT_HOST, host_len - 1);
-  host[host_len - 1] = '\0';
-  *port = IPGEO_DEFAULT_PORT;
-  strncpy(path, IPGEO_DEFAULT_PATH, path_len - 1);
-  path[path_len - 1] = '\0';
-  found = false;
-#endif
-  return found;
-}
-
-bool storage_set_ipgeo_config(const char* host, uint16_t port, const char* path) {
-#ifdef USE_PREFERENCES
-  prefs.putString(KEY_IPGEO_HOST, host);
-  prefs.putUShort(KEY_IPGEO_PORT, port);
-  prefs.putString(KEY_IPGEO_PATH, path);
-  return true;
-#else
-  return false;
-#endif
-}
-
-void storage_clear_ipgeo_config() {
-#ifdef USE_PREFERENCES
-  prefs.remove(KEY_IPGEO_HOST);
-  prefs.remove(KEY_IPGEO_PORT);
-  prefs.remove(KEY_IPGEO_PATH);
-#endif
-}
-
 // ==================== 恢复出厂 ====================
 void storage_factory_reset() {
 #ifdef USE_PREFERENCES

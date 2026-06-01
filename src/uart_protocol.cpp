@@ -74,13 +74,11 @@ bool uart_send_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
 }
 
 bool uart_send_ack() {
-  uint8_t dummy = 0;
-  return uart_send_frame(CMD_ACK, &dummy, 1);
+  return uart_send_frame(CMD_ACK, nullptr, 0);
 }
 
 bool uart_send_nack() {
-  uint8_t dummy = 0;
-  return uart_send_frame(CMD_NACK, &dummy, 1);
+  return uart_send_frame(CMD_NACK, nullptr, 0);
 }
 
 // ==================== 接收处理 ====================

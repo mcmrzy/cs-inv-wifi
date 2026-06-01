@@ -24,7 +24,9 @@
 #include "tcp_provision.h"
 #include "mqtt_handler.h"
 #include "sn_encoder.h"
-#include "ip_geolocation.h"
+#include "ota_manager.h"
+#include "arm_ota.h"
+#include "offline_cache.h"
 #include <esp_mac.h>
 
 // min 宏定义
@@ -55,6 +57,7 @@ static int g_wifi_reconnect_attempts = 0;
 static unsigned long g_wifi_reconnect_delay = 1000;
 
 static unsigned long g_last_heartbeat = 0;
+static unsigned long g_last_uart_heartbeat = 0;
 static unsigned long g_last_led_tick = 0;
 static unsigned long g_last_debug = 0;
 
@@ -70,6 +73,103 @@ static void state_running();
 static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len);
 static void on_provision_done(const char* ssid, const char* password);
 static void on_mqtt_message(const char* topic, const char* payload, unsigned int len);
+
+// ==================== MQTT OTA 处理 ====================
+
+// OTA 进度回调（由 ota_manager 调用）
+static void ota_progress_mqtt_callback(OtaTarget target, int percent, OtaStatus status, const char* message) {
+  char payload_json[256];
+  const char* target_str = (target == OTA_TARGET_ESP) ? "esp" : "arm";
+  const char* status_str = "idle";
+
+  switch (status) {
+    case OTA_STATUS_DOWNLOADING: status_str = "downloading"; break;
+    case OTA_STATUS_WRITING:     status_str = "writing"; break;
+    case OTA_STATUS_VERIFYING:   status_str = "verifying"; break;
+    case OTA_STATUS_DONE:        status_str = "done"; break;
+    case OTA_STATUS_ERROR:       status_str = "error"; break;
+    default:                     status_str = "idle"; break;
+  }
+
+  snprintf(payload_json, sizeof(payload_json),
+           "{\"target\":\"%s\",\"progress\":%d,\"status\":\"%s\",\"message\":\"%s\"}",
+           target_str, percent, status_str, message ? message : "");
+
+  mqtt_publish("ota/status", payload_json, strlen(payload_json), 1, false);
+}
+
+// 处理 MQTT OTA 命令
+static void handle_ota_mqtt_cmd(const char* payload, unsigned int len) {
+  Serial.printf("[OTA-MQTT] Received: %.*s\n", (int)len, payload);
+
+  // 解析 JSON（简化：手动解析关键字段）
+  char action[16] = {0};
+  char target[8] = {0};
+  char url[256] = {0};
+
+  // 简单 JSON 解析（查找 "action": 的值）
+  const char* p = payload;
+  while (*p && (size_t)(p - payload) < len) {
+    // 跳过空白
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (strncmp(p, "\"action\"", 8) == 0) {
+      p += 8;
+      while (*p && *p != ':') p++;
+      if (*p == ':') p++;
+      while (*p == ' ' || *p == '"') p++;
+      char* ap = action;
+      while (*p && *p != '"' && *p != ',' && *p != '}') *ap++ = *p++;
+      *ap = '\0';
+    }
+    if (strncmp(p, "\"target\"", 8) == 0) {
+      p += 8;
+      while (*p && *p != ':') p++;
+      if (*p == ':') p++;
+      while (*p == ' ' || *p == '"') p++;
+      char* tp = target;
+      while (*p && *p != '"' && *p != ',' && *p != '}') *tp++ = *p++;
+      *tp = '\0';
+    }
+    if (strncmp(p, "\"url\"", 5) == 0) {
+      p += 5;
+      while (*p && *p != ':') p++;
+      if (*p == ':') p++;
+      while (*p == ' ' || *p == '"') p++;
+      char* up = url;
+      while (*p && *p != '"' && *p != ',' && *p != '}') *up++ = *p++;
+      *up = '\0';
+    }
+    p++;
+  }
+
+  Serial.printf("[OTA-MQTT] action=%s target=%s url=%s\n", action, target, url);
+
+  if (strcmp(action, "start") == 0) {
+    if (ota_is_busy()) {
+      Serial.println("[OTA-MQTT] OTA busy, ignored");
+      return;
+    }
+
+    if (strcmp(target, "esp") == 0 && strlen(url) > 0) {
+      Serial.printf("[OTA-MQTT] Starting ESP OTA from: %s\n", url);
+      ota_start_esp(url);
+    } else if (strcmp(target, "arm") == 0 && strlen(url) > 0) {
+      Serial.printf("[OTA-MQTT] Starting ARM OTA from: %s\n", url);
+      ota_start_arm(url);
+    } else {
+      Serial.println("[OTA-MQTT] Invalid target or URL");
+    }
+  } else if (strcmp(action, "cancel") == 0) {
+    Serial.println("[OTA-MQTT] Cancel not implemented yet");
+    // TODO: 实现取消功能
+  } else if (strcmp(action, "query") == 0) {
+    // 立即发布当前状态
+    ota_progress_mqtt_callback(ota_get_target(), ota_get_progress(),
+                               ota_get_status(), ota_get_message());
+  } else {
+    Serial.printf("[OTA-MQTT] Unknown action: %s\n", action);
+  }
+}
 static void check_button();
 static void build_ap_ssid(char* out, size_t out_len);
 
@@ -85,6 +185,7 @@ void setup() {
   storage_init();
   uart_protocol_init();
   led_init();
+  offline_cache_init();  // 初始化离线缓存
 
   pinMode(PIN_BTN, INPUT_PULLUP);
   Serial.printf("[HW] BTN=IO%d\n", PIN_BTN);
@@ -119,7 +220,8 @@ void setup() {
   }
 
   mqtt_init(on_mqtt_message);
-  ipgeo_init();  // 初始化 IP 定位模块
+  ota_manager_init();  // 初始化 OTA 管理器
+  ota_set_progress_callback(ota_progress_mqtt_callback);  // OTA 进度上报到 MQTT
 
   if (storage_has_wifi_config()) {
     storage_get_wifi(g_wifi_ssid, sizeof(g_wifi_ssid),
@@ -188,18 +290,27 @@ void loop() {
       tcp_provision_process();
       break;
     case STATE_OTA:
-      yield();
+      ota_manager_process();
+      tcp_provision_process();
       break;
   }
 
   // 5. 定期调试输出（每 60 秒）
   if (now - g_last_debug >= 60000) {
     g_last_debug = now;
-    Serial.printf("[DBG] State=%d, WiFi=%d, Heap=%d\n",
-                  g_sys_state, WiFi.status(), ESP.getFreeHeap());
+    int cached = offline_cache_count();
+    Serial.printf("[DBG] State=%d, WiFi=%d, Heap=%d, Cached=%d\n",
+                  g_sys_state, WiFi.status(), ESP.getFreeHeap(), cached);
   }
 
-  // 6. 喂狗
+  // 6. UART 心跳 (无论MQTT状态，定期发送给ARM)
+  if (now - g_last_uart_heartbeat >= 10000) {  // 10秒一次
+    g_last_uart_heartbeat = now;
+    uart_send_frame(CMD_HEARTBEAT, nullptr, 0);
+    Serial.println("[UART] HEARTBEAT sent");
+  }
+
+  // 7. 喂狗
   #ifdef CHIP_ESP32C3
   esp_task_wdt_reset();
   #endif
@@ -262,9 +373,6 @@ static void state_sta_connecting() {
                   WiFi.softAPIP().toString().c_str());
     g_wifi_reconnect_attempts = 0;
     g_wifi_reconnect_delay = 1000;
-    
-    // WiFi 连接成功后触发 IP 定位
-    ipgeo_request_update();
     
     g_sys_state = STATE_MQTT_CONNECTING;
     led1_set(LED_SOLID);       // LED1 常亮=WiFi已连
@@ -341,30 +449,18 @@ static void state_running() {
     return;
   }
   mqtt_loop();
-  
-  // 处理 IP 定位（非阻塞检查）
-  ipgeo_check_result(nullptr);
 
   // 心跳
   if (millis() - g_last_heartbeat >= HEARTBEAT_INTERVAL) {
     g_last_heartbeat = millis();
     
-    // 构建带地理位置的 status 消息
-    char location_json[256];
-    GeoLocation geo;
-    if (ipgeo_get_cached(&geo)) {
-      ipgeo_to_json(&geo, location_json, sizeof(location_json));
-    } else {
-      strncpy(location_json, "null", sizeof(location_json));
-    }
-    
-    char status_msg[512];
+    char status_msg[256];
     snprintf(status_msg, sizeof(status_msg),
-      "{\"online\":true,\"rssi\":%d,\"location\":%s}",
-      WiFi.RSSI(), location_json);
+      "{\"online\":true,\"rssi\":%d,\"ip\":\"%s\"}",
+      WiFi.RSSI(), WiFi.localIP().toString().c_str());
     
     mqtt_publish("status", status_msg, strlen(status_msg), 1, 1);
-    Serial.printf("[HB] status sent, location=%s\n", ipgeo_status_string());
+    Serial.printf("[HB] status sent, ip=%s\n", WiFi.localIP().toString().c_str());
   }
 }
 
@@ -526,6 +622,13 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
       ESP.restart();
       break;
 
+    // ARM OTA 相关命令（转发给 arm_ota 模块处理）
+    case CMD_ARM_OTA_ACK:
+    case CMD_ARM_OTA_NACK:
+    case CMD_ARM_OTA_INFO:
+      arm_ota_handle_uart(cmd, data, len);
+      break;
+
     default:
       uart_send_nack();
       break;
@@ -547,8 +650,15 @@ static void on_provision_done(const char* ssid, const char* password) {
 
 // ==================== MQTT 消息回调 (云端 → ESP32 → ARM) ====================
 static void on_mqtt_message(const char* topic, const char* payload, unsigned int len) {
+  // 查找 topic 中最后一个 / 后的子主题
   const char* sub = strrchr(topic, '/');
   if (sub) sub++; else sub = topic;
+
+  // 判断是否为 OTA 命令
+  if (strcmp(sub, "ota/cmd") == 0) {
+    handle_ota_mqtt_cmd(payload, len);
+    return;
+  }
 
   // 构造 JSON 转发给 ARM
   char json[512];

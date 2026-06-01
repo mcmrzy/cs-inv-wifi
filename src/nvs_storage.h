@@ -29,12 +29,6 @@ bool storage_get_ap_ssid(char* ssid, size_t ssid_len);
 bool storage_set_ap_ssid(const char* ssid);
 void storage_clear_ap_ssid();
 
-// ==================== IP 定位 API URL ====================
-bool storage_get_ipgeo_config(char* host, size_t host_len,
-                               uint16_t* port, char* path, size_t path_len);
-bool storage_set_ipgeo_config(const char* host, uint16_t port, const char* path);
-void storage_clear_ipgeo_config();
-
 // ==================== 恢复出厂 ====================
 void storage_factory_reset();
 

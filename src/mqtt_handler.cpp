@@ -7,6 +7,7 @@
 #include "mqtt_handler.h"
 #include "nvs_storage.h"
 #include "sn_encoder.h"
+#include "offline_cache.h"
 #include <string.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
@@ -25,6 +26,23 @@ static uint32_t g_reconnect_delay = MQTT_RECONNECT_MIN;
 static int g_reconnect_attempts = 0;
 
 static MQTTMessageHandler g_msg_handler = nullptr;
+
+// 离线缓存发送回调函数
+static void offline_send_callback(const char* topic, const char* payload, uint32_t timestamp) {
+    if (!g_mqtt_client || !g_mqtt_client->connected()) {
+        return;
+    }
+    
+    // 为payload添加时间戳
+    char full_payload[1024];
+    int len = snprintf(full_payload, sizeof(full_payload),
+        "{\"data\":%s,\"timestamp\":%u}", payload, timestamp);
+    
+    if (len > 0 && len < (int)sizeof(full_payload)) {
+        mqtt_publish(topic, full_payload, len, 1, 0);
+        Serial.printf("[OFFLINE-SEND] topic=%s, ts=%u\n", topic, timestamp);
+    }
+}
 
 // 设备信息
 char g_device_sn[SN_MAX_LEN] = {0};  // 与 main.cpp 保持一致
@@ -157,6 +175,18 @@ bool mqtt_connect(void) {
         g_mqtt_client->subscribe(cmd_topic);
         Serial.printf("[MQTT] Subscribed to: %s\n", cmd_topic);
 
+        // 订阅 OTA 命令主题
+        snprintf(cmd_topic, sizeof(cmd_topic), "cs_inv/%s/ota/cmd", g_device_sn);
+        g_mqtt_client->subscribe(cmd_topic);
+        Serial.printf("[MQTT] Subscribed to: %s\n", cmd_topic);
+
+        // 发送离线缓存数据
+        int cached_count = offline_cache_count();
+        if (cached_count > 0) {
+            Serial.printf("[MQTT] Found %d cached items, flushing...\n", cached_count);
+            offline_cache_flush_all(offline_send_callback);
+        }
+
         return true;
     } else {
         int state = g_mqtt_client->state();
@@ -184,10 +214,6 @@ void mqtt_disconnect(void) {
 
 // ==================== 发布 ====================
 int mqtt_publish(const char* sub_topic, const char* data, int len, int qos, int retain) {
-    if (!g_mqtt_client || !g_mqtt_client->connected()) {
-        return -1;
-    }
-
     if (!sub_topic || !data || len < 0) {
         return -2;
     }
@@ -197,6 +223,14 @@ int mqtt_publish(const char* sub_topic, const char* data, int len, int qos, int 
     int n = snprintf(full_topic, sizeof(full_topic), "cs_inv/%s/%s", g_device_sn, sub_topic);
     if (n < 0 || n >= (int)sizeof(full_topic)) {
         return -3;
+    }
+
+    // 如果未连接，存储到离线缓存
+    if (!g_mqtt_client || !g_mqtt_client->connected()) {
+        // 离线缓存会自动添加时间戳
+        offline_cache_add(sub_topic, data, 0);
+        Serial.printf("[MQTT] Not connected, cached: topic=%s (%d bytes)\n", sub_topic, len);
+        return -1;  // 返回-1表示未发送但已缓存
     }
 
     bool result = g_mqtt_client->publish(full_topic, (const uint8_t*)data, len, retain);
