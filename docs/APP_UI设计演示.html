@@ -1,0 +1,1231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>48V 单相离网逆变器 APP</title>
+<style>
+/* ============ CSS Reset & Variables ============ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --primary: #2E7D32;
+  --primary-light: #4CAF50;
+  --accent: #FF6F00;
+  --accent-light: #FFA040;
+  --danger: #E53935;
+  --offline: #9E9E9E;
+  --bg: #F5F5F5;
+  --card: #FFFFFF;
+  --text: #212121;
+  --text-secondary: #757575;
+  --border: #E0E0E0;
+  --green-bright: #00E676;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: #E8E8E8;
+  display: flex; justify-content: center; align-items: center;
+  min-height: 100vh; padding: 20px;
+}
+
+/* Phone Frame */
+.phone-frame {
+  width: 375px; height: 812px;
+  background: var(--bg);
+  border-radius: 36px;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3), 0 0 0 2px #333, inset 0 0 0 2px #222;
+  position: relative;
+}
+
+/* Status Bar */
+.status-bar {
+  background: var(--primary);
+  color: white; padding: 12px 24px 8px;
+  font-size: 12px; display: flex; justify-content: space-between;
+  flex-shrink: 0;
+}
+
+/* Header */
+.header {
+  background: linear-gradient(135deg, var(--primary), #1B5E20);
+  color: white; padding: 10px 16px;
+  display: flex; align-items: center; gap: 10px;
+  flex-shrink: 0;
+}
+.header .back-btn { font-size: 20px; cursor: pointer; opacity: 0.9; }
+.header .back-btn:hover { opacity: 1; }
+.header .location { font-size: 13px; font-weight: 500; }
+.header .device-id { font-size: 11px; opacity: 0.8; margin-left: auto; }
+
+/* Device Status Badge */
+.status-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 12px;
+  font-size: 12px; font-weight: 600;
+  cursor: pointer; user-select: none;
+  transition: all 0.3s;
+}
+.status-badge.running { background: #E8F5E9; color: var(--primary); }
+.status-badge.standby { background: #FFF3E0; color: var(--accent); }
+.status-badge.fault { background: #FFEBEE; color: var(--danger); }
+.status-badge.shutdown { background: #F5F5F5; color: var(--offline); }
+
+/* Status Dot Pulse */
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block;
+}
+.status-dot.green { background: var(--green-bright); animation: pulse-dot 1.5s infinite; }
+.status-dot.orange { background: var(--accent); animation: pulse-dot 2s infinite; }
+.status-dot.red { background: var(--danger); animation: pulse-dot 0.8s infinite; }
+.status-dot.gray { background: var(--offline); }
+
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.3); opacity: 0.6; }
+}
+
+/* Content Area */
+.content {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  padding: 12px 14px 8px;
+  scrollbar-width: none;
+}
+.content::-webkit-scrollbar { display: none; }
+
+/* Tab Pages */
+.tab-page {
+  display: none;
+  animation: fadeSlideIn 0.35s ease-out;
+}
+.tab-page.active { display: block; }
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Bottom Tabs */
+.bottom-tabs {
+  display: flex; background: white;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0; padding: 6px 0;
+  padding-bottom: env(safe-area-inset-bottom, 6px);
+}
+.tab-btn {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: 4px 0; cursor: pointer;
+  border: none; background: none; color: var(--text-secondary);
+  font-size: 10px; transition: color 0.3s;
+}
+.tab-btn .tab-icon { font-size: 22px; transition: transform 0.3s; }
+.tab-btn.active { color: var(--primary); }
+.tab-btn.active .tab-icon { transform: scale(1.15); }
+.tab-btn:hover { color: var(--primary-light); }
+
+/* ============ Card Styles ============ */
+.card {
+  background: var(--card); border-radius: 14px;
+  padding: 14px; margin-bottom: 10px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  transition: transform 0.25s, box-shadow 0.25s;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.card-row {
+  display: flex; gap: 10px; margin-bottom: 10px;
+}
+.card-row .card { flex: 1; margin-bottom: 0; }
+
+.card-label {
+  font-size: 11px; color: var(--text-secondary); margin-bottom: 4px;
+}
+.card-value {
+  font-size: 22px; font-weight: 700; color: var(--text);
+}
+.card-value.small { font-size: 16px; }
+.card-value.green { color: var(--primary); }
+.card-value.orange { color: var(--accent); }
+.card-value.red { color: var(--danger); }
+
+.card-unit { font-size: 12px; font-weight: 400; color: var(--text-secondary); }
+
+/* ============ Page 1: Overview ============ */
+
+/* Power Ring */
+.power-ring-container {
+  display: flex; justify-content: center; align-items: center;
+  padding: 16px 0 12px;
+  position: relative;
+}
+.power-ring-outer {
+  width: 180px; height: 180px;
+  border-radius: 50%;
+  position: relative;
+  display: flex; justify-content: center; align-items: center;
+}
+.power-ring-outer::before {
+  content: '';
+  position: absolute; inset: -6px;
+  border-radius: 50%;
+  border: 4px dashed transparent;
+  border-top-color: rgba(46,125,50,0.3);
+  border-right-color: rgba(46,125,50,0.3);
+  animation: ring-rotate 8s linear infinite;
+}
+.power-ring-outer::after {
+  content: '';
+  position: absolute; inset: -12px;
+  border-radius: 50%;
+  border: 3px dashed transparent;
+  border-bottom-color: rgba(255,111,0,0.2);
+  border-left-color: rgba(255,111,0,0.2);
+  animation: ring-rotate 12s linear infinite reverse;
+}
+@keyframes ring-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.power-ring-inner {
+  width: 160px; height: 160px;
+  border-radius: 50%;
+  display: flex; flex-direction: column;
+  justify-content: center; align-items: center;
+  background: linear-gradient(145deg, #f0faf0, #e8f5e9);
+  box-shadow: 0 0 30px rgba(46,125,50,0.15), inset 0 2px 8px rgba(255,255,255,0.6);
+}
+.power-ring-value {
+  font-size: 38px; font-weight: 800; color: var(--text);
+  letter-spacing: -1px; line-height: 1;
+}
+.power-ring-unit {
+  font-size: 14px; color: var(--text-secondary); margin-top: 2px;
+}
+
+/* Energy Flow */
+.energy-flow {
+  display: flex; align-items: center; justify-content: center;
+  gap: 4px; padding: 10px 0; flex-wrap: wrap;
+  position: relative;
+}
+.energy-node {
+  width: 44px; height: 44px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; background: white;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+  position: relative; z-index: 2;
+}
+.energy-node.inverter {
+  width: 50px; height: 50px; font-size: 26px;
+  background: linear-gradient(135deg, #E8F5E9, white);
+  box-shadow: 0 2px 10px rgba(46,125,50,0.2);
+}
+.energy-line {
+  width: 24px; height: 3px; border-radius: 2px;
+  position: relative; z-index: 1; overflow: hidden;
+  flex-shrink: 0;
+}
+.energy-line::after {
+  content: '';
+  position: absolute; top: 0; left: -100%;
+  width: 100%; height: 100%;
+  animation: flow-right 0.8s linear infinite;
+}
+@keyframes flow-right {
+  from { left: -100%; }
+  to { left: 100%; }
+}
+
+.energy-line.pv-to-inv { background: rgba(255,193,7,0.3); }
+.energy-line.pv-to-inv::after { background: linear-gradient(90deg, transparent, #FFC107, transparent); }
+
+.energy-line.inv-to-load { background: rgba(76,175,80,0.3); }
+.energy-line.inv-to-load::after { background: linear-gradient(90deg, transparent, #4CAF50, transparent); }
+
+.energy-line.inv-to-bat {
+  background: rgba(76,175,80,0.3);
+  animation: bat-line-blink 1.5s infinite;
+}
+.energy-line.inv-to-bat::after { background: linear-gradient(90deg, transparent, #4CAF50, transparent); }
+
+.energy-line.bat-to-inv {
+  background: rgba(255,111,0,0.3);
+  animation: bat-line-blink 1.5s infinite;
+}
+.energy-line.bat-to-inv::after { background: linear-gradient(90deg, transparent, #FF6F00, transparent); }
+
+@keyframes bat-line-blink {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.energy-line-vertical {
+  width: 3px; height: 22px; border-radius: 2px;
+  position: relative; overflow: hidden; flex-shrink: 0;
+  margin: 0 auto;
+}
+.energy-line-vertical::after {
+  content: '';
+  position: absolute; left: 0; top: -100%; width: 100%; height: 100%;
+  animation: flow-down 0.7s linear infinite;
+}
+@keyframes flow-down {
+  from { top: -100%; }
+  to { top: 100%; }
+}
+.energy-line-vertical.charge { background: rgba(76,175,80,0.3); }
+.energy-line-vertical.charge::after { background: linear-gradient(transparent, #4CAF50, transparent); }
+.energy-line-vertical.discharge { background: rgba(255,111,0,0.3); }
+.energy-line-vertical.discharge::after { background: linear-gradient(transparent, #FF6F00, transparent); }
+
+.energy-col {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+}
+
+/* Today Stats */
+.today-row { display: flex; gap: 10px; }
+.today-row .card { flex: 1; text-align: center; }
+
+/* ============ Page 2: BMS ============ */
+.soc-ring-container {
+  display: flex; justify-content: center; align-items: center;
+  padding: 10px 0 16px;
+  position: relative;
+}
+.soc-ring-wrapper { position: relative; width: 150px; height: 150px; }
+.soc-ring-wrapper svg { transform: rotate(-90deg); }
+.soc-ring-center {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+}
+.soc-value { font-size: 42px; font-weight: 800; line-height: 1; }
+.soc-label-text { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+
+.bms-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+.bms-grid .bms-item {
+  background: var(--card); border-radius: 10px; padding: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.bms-item .item-label { font-size: 10px; color: var(--text-secondary); }
+.bms-item .item-value { font-size: 17px; font-weight: 700; margin-top: 2px; }
+.bms-item .item-sub { font-size: 11px; color: var(--text-secondary); margin-top: 1px; }
+
+.arrow-up { color: var(--primary); display: inline-block; animation: bounce-up 0.8s infinite; }
+.arrow-down { color: var(--accent); display: inline-block; animation: bounce-down 0.8s infinite; }
+@keyframes bounce-up {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes bounce-down {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(4px); }
+}
+
+/* Temperature Bar */
+.temp-bar {
+  width: 100%; height: 8px; border-radius: 4px;
+  background: linear-gradient(90deg, #4CAF50, #FFC107, #FF6F00, #E53935);
+  position: relative; margin: 6px 0 4px;
+}
+.temp-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid white; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  position: absolute; top: -2px; transform: translateX(-50%);
+}
+
+/* ============ Page 3: AC Output ============ */
+.ac-main {
+  text-align: center; padding: 8px 0 14px;
+}
+.ac-main .ac-voltage { font-size: 48px; font-weight: 800; color: var(--text); line-height: 1.1; }
+.ac-main .ac-current { font-size: 20px; color: var(--text-secondary); margin-top: 2px; }
+
+.ac-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+.ac-item {
+  background: var(--card); border-radius: 10px; padding: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.ac-item .alabel { font-size: 10px; color: var(--text-secondary); }
+.ac-item .avalue { font-size: 18px; font-weight: 700; margin-top: 2px; }
+
+.load-bar-bg {
+  width: 100%; height: 6px; background: #eee; border-radius: 3px; margin-top: 4px;
+  overflow: hidden;
+}
+.load-bar-fill {
+  height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, #4CAF50, #FFC107, #E53935);
+  transition: width 0.5s ease;
+}
+
+.quality-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; }
+.quality-item + .quality-item { border-top: 1px solid #f0f0f0; }
+.quality-name { font-size: 13px; color: var(--text); }
+.quality-val { font-size: 14px; font-weight: 600; }
+.quality-pass { color: var(--primary); }
+
+/* ============ Page 4: MPPT ============ */
+.pv-sun {
+  display: flex; justify-content: center; padding: 8px 0;
+}
+.pv-sun-icon {
+  font-size: 52px; display: inline-block;
+  animation: sun-pulse 2s ease-in-out infinite;
+}
+@keyframes sun-pulse {
+  0%, 100% { transform: scale(1) rotate(0deg); }
+  50% { transform: scale(1.15) rotate(10deg); }
+}
+
+.pv-main {
+  text-align: center; padding-bottom: 8px;
+}
+.pv-main .pv-power { font-size: 44px; font-weight: 800; color: var(--text); }
+
+.pv-mppt-status {
+  display: inline-block; padding: 3px 12px; border-radius: 10px;
+  font-size: 12px; font-weight: 600;
+}
+.pv-mppt-status.tracking { background: #E8F5E9; color: var(--primary); }
+
+.pv-range-bar {
+  position: relative; height: 24px; margin: 8px 0;
+}
+.pv-range-track {
+  width: 100%; height: 8px; background: linear-gradient(90deg, #E53935, #FFC107, #4CAF50);
+  border-radius: 4px; position: absolute; top: 8px;
+}
+.pv-range-dot {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--primary); border: 3px solid white;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  position: absolute; top: 4px; transform: translateX(-50%);
+  animation: range-breathe 2s ease-in-out infinite;
+}
+@keyframes range-breathe {
+  0%, 100% { box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+  50% { box-shadow: 0 2px 12px rgba(46,125,50,0.4); }
+}
+.pv-range-labels { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-secondary); margin-top: 4px; }
+
+.pv-trend {
+  display: flex; align-items: flex-end; gap: 5px;
+  height: 80px; padding: 10px 0; justify-content: center;
+}
+.pv-trend-bar {
+  flex: 1; max-width: 24px; border-radius: 4px 4px 0 0;
+  background: linear-gradient(180deg, #FFC107, #FF6F00);
+  transition: height 0.6s ease;
+  animation: bar-glow 1.5s ease-in-out infinite;
+}
+@keyframes bar-glow {
+  0%, 100% { opacity: 0.85; }
+  50% { opacity: 1; }
+}
+
+/* ============ Page 5: Energy Stats ============ */
+.sub-tabs {
+  display: flex; gap: 0; margin-bottom: 10px;
+  background: #E8E8E8; border-radius: 10px; padding: 3px;
+}
+.sub-tab {
+  flex: 1; padding: 8px 0; text-align: center;
+  border-radius: 8px; cursor: pointer;
+  font-size: 13px; font-weight: 500;
+  color: var(--text-secondary); transition: all 0.3s;
+  border: none; background: transparent;
+}
+.sub-tab.active { background: white; color: var(--primary); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+
+.stat-cards {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+
+.energy-stat-visual {
+  display: flex; align-items: center; justify-content: center;
+  gap: 6px; padding: 14px 0; font-size: 15px;
+}
+.energy-stat-visual .arrow-right { font-size: 20px; color: var(--accent); }
+
+.stat-total-row { display: flex; gap: 8px; }
+.stat-total-row .card { flex: 1; text-align: center; }
+
+/* ============ Utilities ============ */
+.fade-number { transition: color 0.3s; }
+.divider { height: 1px; background: var(--border); margin: 10px 0; }
+.text-center { text-align: center; }
+.mt-2 { margin-top: 8px; }
+.mb-2 { margin-bottom: 8px; }
+.flex-center { display: flex; align-items: center; gap: 6px; }
+
+/* Responsive */
+@media (max-width: 420px) {
+  body { padding: 0; }
+  .phone-frame {
+    width: 100vw; height: 100vh; border-radius: 0;
+    box-shadow: none;
+  }
+}
+
+@media (min-width: 421px) {
+  .phone-frame { margin: 20px; }
+}
+</style>
+</head>
+<body>
+
+<div class="phone-frame">
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <span>9:41</span>
+    <span>📶 ▮▮▮▮ 🔋 85%</span>
+  </div>
+
+  <!-- Header -->
+  <div class="header">
+    <span class="back-btn">&#x2190;</span>
+    <div>
+      <div class="location">杭州</div>
+      <div class="device-id">H1CNA0001O</div>
+    </div>
+    <div style="margin-left:auto;">
+      <span class="status-badge running" id="statusBadge" onclick="toggleStatus()">
+        <span class="status-dot green"></span>
+        <span id="statusText">运行中</span>
+      </span>
+    </div>
+  </div>
+
+  <!-- Content -->
+  <div class="content" id="content">
+    <!-- ===== Tab 1: 设备概览 ===== -->
+    <div class="tab-page active" id="tab-overview">
+      <!-- Power Ring -->
+      <div class="power-ring-container">
+        <div class="power-ring-outer">
+          <div class="power-ring-inner">
+            <div class="power-ring-value" id="mainPower">1.87</div>
+            <div class="power-ring-unit">kW</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Three Cards -->
+      <div class="card-row">
+        <div class="card text-center">
+          <div class="card-label">SOC</div>
+          <div class="card-value green" id="ovSoc">78.5%</div>
+        </div>
+        <div class="card text-center">
+          <div class="card-label">电池电压</div>
+          <div class="card-value small" id="ovBattV">51.2V</div>
+        </div>
+        <div class="card text-center">
+          <div class="card-label">光伏</div>
+          <div class="card-value small orange" id="ovPv">1.07 kW</div>
+        </div>
+      </div>
+
+      <!-- Energy Flow -->
+      <div class="card">
+        <div class="card-label" style="text-align:center;margin-bottom:6px;">能量流向</div>
+        <div class="energy-flow">
+          <div class="energy-node">&#x2600;</div>
+          <div class="energy-line pv-to-inv"></div>
+          <div class="energy-node inverter">&#x26A1;</div>
+          <div class="energy-line inv-to-load"></div>
+          <div class="energy-node">&#x1F3E0;</div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:6px;">
+          <span style="font-size:10px;color:#9E9E9E;">PV 1.07kW</span>
+          <span style="font-size:10px;color:#9E9E9E;">|</span>
+          <span style="font-size:10px;color:#9E9E9E;">负载 1.87kW</span>
+        </div>
+        <div class="energy-col" style="margin-top:6px;">
+          <div class="energy-node" style="font-size:18px;width:36px;height:36px;">&#x1F50B;</div>
+          <div class="energy-line-vertical charge" id="batteryLine" style="height:18px;"></div>
+          <div style="font-size:10px;color:var(--text-secondary);">
+            充 <span id="flowBattCharge" style="color:var(--primary);">+1.31kW</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Today Stats -->
+      <div class="today-row">
+        <div class="card text-center">
+          <div class="card-label">今日发电</div>
+          <div class="card-value small green" id="ovGen">8.56 kWh</div>
+        </div>
+        <div class="card text-center">
+          <div class="card-label">今日用电</div>
+          <div class="card-value small orange" id="ovUse">6.00 kWh</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Tab 2: 电池BMS ===== -->
+    <div class="tab-page" id="tab-bms">
+      <!-- SOC Ring -->
+      <div class="soc-ring-container">
+        <div class="soc-ring-wrapper">
+          <svg width="150" height="150" viewBox="0 0 150 150">
+            <circle cx="75" cy="75" r="60" fill="none" stroke="#E8E8E8" stroke-width="10"/>
+            <circle id="socCircle" cx="75" cy="75" r="60" fill="none"
+              stroke="#4CAF50" stroke-width="10" stroke-linecap="round"
+              stroke-dasharray="377" stroke-dashoffset="81"
+              style="transition: stroke-dashoffset 0.8s ease-out, stroke 0.8s;" />
+          </svg>
+          <div class="soc-ring-center">
+            <div class="soc-value" id="bmsSoc">78.5<span style="font-size:18px;">%</span></div>
+            <div class="soc-label-text">SOC</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BMS Data Grid -->
+      <div class="bms-grid">
+        <div class="bms-item">
+          <div class="item-label">电池电压</div>
+          <div class="item-value" id="bmsVoltage">51.2<span style="font-size:12px;font-weight:400;">V</span></div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">电池电流</div>
+          <div class="item-value green">
+            <span class="arrow-up">&#x2191;</span>
+            <span id="bmsCurrent">+25.5</span><span style="font-size:12px;font-weight:400;">A</span>
+          </div>
+          <div class="item-sub green" id="bmsChargeLabel">充电中</div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">电池功率</div>
+          <div class="item-value" id="bmsPower">1.31<span style="font-size:12px;font-weight:400;">kW</span></div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">充放电状态</div>
+          <div class="item-value small green" id="bmsChargeStatus">充电中</div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">剩余容量</div>
+          <div class="item-value" id="bmsRemain">78.5<span style="font-size:12px;font-weight:400;">Ah</span></div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">额定容量</div>
+          <div class="item-value">100.0<span style="font-size:12px;font-weight:400;">Ah</span></div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">循环次数</div>
+          <div class="item-value" id="bmsCycles">152<span style="font-size:12px;font-weight:400;">次</span></div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">电池类型</div>
+          <div class="item-value small">LiFePO4</div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">最高温度</div>
+          <div class="item-value" id="bmsTempMax">28.5<span style="font-size:12px;font-weight:400;">°C</span></div>
+          <div class="temp-bar">
+            <div class="temp-dot" style="left:47.5%;background:#FFC107;" id="tempDotMax"></div>
+          </div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">最低温度</div>
+          <div class="item-value" id="bmsTempMin">25.0<span style="font-size:12px;font-weight:400;">°C</span></div>
+          <div class="temp-bar">
+            <div class="temp-dot" style="left:41.7%;background:#4CAF50;" id="tempDotMin"></div>
+          </div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">最高电芯</div>
+          <div class="item-value small" id="bmsCellMax">3.35 V</div>
+        </div>
+        <div class="bms-item">
+          <div class="item-label">最低电芯 / 压差</div>
+          <div class="item-value small">
+            <span id="bmsCellMin">3.28 V</span> / <span id="bmsCellDiff">0.07 V</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Protection Status -->
+      <div class="card mt-2" style="text-align:center;">
+        <div class="card-label">保护状态</div>
+        <div class="card-value small green" style="display:flex;align-items:center;justify-content:center;gap:6px;">
+          <span style="color:var(--green-bright);font-size:18px;">&#x2713;</span> 无保护触发
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Tab 3: 交流输出 ===== -->
+    <div class="tab-page" id="tab-ac">
+      <div class="ac-main">
+        <div class="ac-voltage" id="acVoltage">220.5<span style="font-size:20px;font-weight:400;">V</span></div>
+        <div class="ac-current">电流 <span id="acCurrent">8.52</span> A</div>
+      </div>
+      <div class="ac-grid">
+        <div class="ac-item">
+          <div class="alabel">有功功率</div>
+          <div class="avalue" id="acActivePower">1.87<span style="font-size:11px;font-weight:400;"> kW</span></div>
+        </div>
+        <div class="ac-item">
+          <div class="alabel">视在功率</div>
+          <div class="avalue" id="acApparentPower">1.88<span style="font-size:11px;font-weight:400;"> kVA</span></div>
+        </div>
+        <div class="ac-item">
+          <div class="alabel">无功功率</div>
+          <div class="avalue" id="acReactivePower">120<span style="font-size:11px;font-weight:400;"> Var</span></div>
+        </div>
+        <div class="ac-item">
+          <div class="alabel">功率因数</div>
+          <div class="avalue" id="acPF">0.997</div>
+        </div>
+        <div class="ac-item">
+          <div class="alabel">频率</div>
+          <div class="avalue" id="acFreq">50.02<span style="font-size:11px;font-weight:400;"> Hz</span></div>
+        </div>
+        <div class="ac-item">
+          <div class="alabel">负载率</div>
+          <div class="avalue" id="acLoadRate">62.4<span style="font-size:11px;font-weight:400;">%</span></div>
+          <div class="load-bar-bg">
+            <div class="load-bar-fill" id="loadBarFill" style="width:62.4%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Waveform Quality -->
+      <div class="card mt-2">
+        <div class="card-label" style="margin-bottom:6px;">波形质量</div>
+        <div class="quality-item">
+          <span class="quality-name">THD 电压</span>
+          <span class="quality-val quality-pass" id="acThdV">1.8% &#x2713;</span>
+        </div>
+        <div class="quality-item">
+          <span class="quality-name">THD 电流</span>
+          <span class="quality-val quality-pass" id="acThdI">2.5% &#x2713;</span>
+        </div>
+        <div class="quality-item">
+          <span class="quality-name">直流分量</span>
+          <span class="quality-val quality-pass" id="acDcComp">15.0 mA &#x2713;</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Tab 4: 光伏MPPT ===== -->
+    <div class="tab-page" id="tab-mppt">
+      <div class="pv-sun">
+        <span class="pv-sun-icon">&#x2600;</span>
+      </div>
+      <div class="pv-main">
+        <div class="pv-power" id="pvTotalPower">1.07<span style="font-size:18px;font-weight:400;"> kW</span></div>
+        <div style="margin-top:6px;">
+          <span class="pv-mppt-status tracking" id="mpptStatus">跟踪中</span>
+        </div>
+      </div>
+
+      <div class="card-row mt-2">
+        <div class="card text-center">
+          <div class="card-label">PV 电压</div>
+          <div class="card-value small" id="pvVoltage">85.3 V</div>
+        </div>
+        <div class="card text-center">
+          <div class="card-label">PV 电流</div>
+          <div class="card-value small" id="pvCurrent">12.5 A</div>
+        </div>
+      </div>
+
+      <!-- PV Voltage Range Bar -->
+      <div class="card">
+        <div class="card-label" style="margin-bottom:8px;">PV 电压范围</div>
+        <div class="pv-range-bar">
+          <div class="pv-range-track"></div>
+          <div class="pv-range-dot" id="pvRangeDot" style="left:56.9%;"></div>
+        </div>
+        <div class="pv-range-labels">
+          <span>0V</span><span style="color:var(--text-secondary);font-weight:600;" id="pvRangeVal">85.3V</span><span>150V</span>
+        </div>
+      </div>
+
+      <!-- PV Trend Chart -->
+      <div class="card">
+        <div class="card-label" style="margin-bottom:8px;">PV 功率趋势 (近2h)</div>
+        <div class="pv-trend" id="pvTrendChart">
+          <!-- Dynamically filled by JS -->
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary);margin-top:4px;">
+          <span>-2h</span><span>-1h</span><span>现在</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Tab 5: 能量统计 ===== -->
+    <div class="tab-page" id="tab-stats">
+      <!-- Sub Tabs -->
+      <div class="sub-tabs" id="statSubTabs">
+        <button class="sub-tab active" data-period="today">今日</button>
+        <button class="sub-tab" data-period="month">本月</button>
+        <button class="sub-tab" data-period="total">累计</button>
+      </div>
+
+      <!-- Stat Cards -->
+      <div class="stat-cards" id="statCards">
+        <div class="card text-center">
+          <div class="card-label">光伏发电</div>
+          <div class="card-value small green" id="statPvGen">8.56 kWh</div>
+        </div>
+        <div class="card text-center">
+          <div class="card-label">负载用电</div>
+          <div class="card-value small orange" id="statLoadUse">6.00 kWh</div>
+        </div>
+        <div class="card text-center">
+          <div class="card-label">电池充电</div>
+          <div class="card-value small green" id="statBatCharge">7.80 kWh</div>
+        </div>
+        <div class="card text-center">
+          <div class="card-label">电池放电</div>
+          <div class="card-value small orange" id="statBatDischarge">6.20 kWh</div>
+        </div>
+      </div>
+
+      <!-- Energy Flow Visual -->
+      <div class="card mt-2">
+        <div class="card-label" style="text-align:center;margin-bottom:8px;">能量流向概览</div>
+        <div class="energy-stat-visual">
+          <span>&#x2600;</span>
+          <span style="font-weight:700;" id="statFlowPv">8.56</span>
+          <span style="font-size:11px;">kWh</span>
+          <span class="arrow-right">&#x279C;</span>
+          <span style="font-size:22px;">&#x26A1;</span>
+          <span class="arrow-right">&#x279C;</span>
+          <span>&#x1F3E0;</span>
+          <span style="font-weight:700;" id="statFlowLoad">6.00</span>
+          <span style="font-size:11px;">kWh</span>
+        </div>
+        <div style="text-align:center;margin-top:2px;">
+          <span style="font-size:12px;color:var(--text-secondary);">
+            &#x1F50B; 充 <span style="color:var(--primary);" id="statFlowBc">+7.80</span> / 放 <span style="color:var(--accent);" id="statFlowBd">-6.20</span> kWh
+          </span>
+        </div>
+      </div>
+
+      <!-- Cumulative (shown when "累计" is selected) -->
+      <div id="statTotalSection" style="display:none;">
+        <div class="card mt-2">
+          <div class="stat-total-row">
+            <div class="card text-center" style="box-shadow:none;padding:8px;">
+              <div class="card-label">运行时间</div>
+              <div class="card-value small" id="statRunHours">8640 h</div>
+            </div>
+            <div class="card text-center" style="box-shadow:none;padding:8px;">
+              <div class="card-label">累计发电</div>
+              <div class="card-value small green" id="statTotalGen">1250.3 kWh</div>
+            </div>
+            <div class="card text-center" style="box-shadow:none;padding:8px;">
+              <div class="card-label">累计用电</div>
+              <div class="card-value small orange" id="statTotalUse">950.2 kWh</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Tabs -->
+  <div class="bottom-tabs" id="bottomTabs">
+    <button class="tab-btn active" data-tab="overview">
+      <span class="tab-icon">&#x1F3E0;</span> 概览
+    </button>
+    <button class="tab-btn" data-tab="bms">
+      <span class="tab-icon">&#x1F50B;</span> 电池
+    </button>
+    <button class="tab-btn" data-tab="ac">
+      <span class="tab-icon">&#x26A1;</span> 交流
+    </button>
+    <button class="tab-btn" data-tab="mppt">
+      <span class="tab-icon">&#x2600;</span> 光伏
+    </button>
+    <button class="tab-btn" data-tab="stats">
+      <span class="tab-icon">&#x1F4CA;</span> 统计
+    </button>
+  </div>
+</div>
+
+<script>
+// ============ Data Model ============
+const data = {
+  power: 1.87,
+  soc: 78.5,
+  battV: 51.2,
+  battA: 25.5,
+  pvPower: 1.07,
+  pvV: 85.3,
+  pvA: 12.5,
+  acV: 220.5,
+  acA: 8.52,
+  acPF: 0.997,
+  acFreq: 50.02,
+  loadRate: 62.4,
+  thdV: 1.8,
+  thdI: 2.5,
+  dcComp: 15.0,
+  tempMax: 28.5,
+  tempMin: 25.0,
+  cellMax: 3.35,
+  cellMin: 3.28,
+  cellDiff: 0.07,
+  cycles: 152,
+  remainAh: 78.5,
+  todayGen: 8.56,
+  todayUse: 6.00,
+  batCharge: 7.80,
+  batDischarge: 6.20,
+  runHours: 8640,
+  totalGen: 1250.3,
+  totalUse: 950.2,
+};
+
+const nominalAh = 100.0;
+let deviceStatus = 'running'; // running, standby, fault, shutdown
+let currentPeriod = 'today';
+
+// ============ Helper: random fluctuation ============
+function fluctuate(val, pct = 0.02) {
+  const delta = val * pct * (Math.random() * 2 - 1);
+  return val + delta;
+}
+
+// ============ Update all UI elements ============
+function updateUI() {
+  const d = data;
+  const isCharging = d.battA > 0;
+  const chargeStatus = isCharging ? '充电中' : '放电中';
+  const chargeColor = isCharging ? 'green' : 'orange';
+
+  // --- Tab 1: Overview ---
+  setText('mainPower', d.power.toFixed(2));
+  setText('ovSoc', d.soc.toFixed(1) + '%');
+  setText('ovBattV', d.battV.toFixed(1) + 'V');
+  setText('ovPv', d.pvPower.toFixed(2) + ' kW');
+  setText('ovGen', formatKWh(d.todayGen));
+  setText('ovUse', formatKWh(d.todayUse));
+  setText('flowBattCharge', (isCharging ? '+' : '') + Math.abs(d.battA * d.battV / 1000).toFixed(2) + ' kW');
+  // Battery line color
+  const batLine = document.getElementById('batteryLine');
+  if (batLine) {
+    batLine.className = 'energy-line-vertical ' + (isCharging ? 'charge' : 'discharge');
+  }
+
+  // --- Tab 2: BMS ---
+  setText('bmsSoc', d.soc.toFixed(1) + '<span style="font-size:18px;">%</span>');
+  setText('bmsVoltage', d.battV.toFixed(1) + '<span style="font-size:12px;font-weight:400;">V</span>');
+  setText('bmsCurrentHtml', (isCharging ? '+' : '') + d.battA.toFixed(1));
+  document.getElementById('bmsCurrent').textContent = (isCharging ? '+' : '') + d.battA.toFixed(1);
+  setText('bmsChargeLabel', chargeStatus);
+  setText('bmsPower', (Math.abs(d.battA * d.battV / 1000)).toFixed(2) + '<span style="font-size:12px;font-weight:400;">kW</span>');
+  setText('bmsChargeStatus', chargeStatus);
+  setText('bmsRemain', d.remainAh.toFixed(1) + '<span style="font-size:12px;font-weight:400;">Ah</span>');
+  setText('bmsCycles', d.cycles + '<span style="font-size:12px;font-weight:400;">次</span>');
+  setText('bmsTempMax', d.tempMax.toFixed(1) + '<span style="font-size:12px;font-weight:400;">°C</span>');
+  setText('bmsTempMin', d.tempMin.toFixed(1) + '<span style="font-size:12px;font-weight:400;">°C</span>');
+  setText('bmsCellMax', d.cellMax.toFixed(2) + ' V');
+  setText('bmsCellMin', d.cellMin.toFixed(2) + ' V');
+  setText('bmsCellDiff', d.cellDiff.toFixed(2) + ' V');
+
+  // Update temp dots
+  const tempDotMax = document.getElementById('tempDotMax');
+  const tempDotMin = document.getElementById('tempDotMin');
+  if (tempDotMax) tempDotMax.style.left = Math.min(95, (d.tempMax / 60 * 100)) + '%';
+  if (tempDotMin) tempDotMin.style.left = Math.min(95, (d.tempMin / 60 * 100)) + '%';
+
+  // BMS current color
+  const bmsCurrEl = document.getElementById('bmsCurrent');
+  const bmsLabelEl = document.getElementById('bmsChargeLabel');
+  if (isCharging) {
+    bmsCurrEl.parentElement.className = 'item-value green';
+    bmsLabelEl.className = 'item-sub green';
+  } else {
+    bmsCurrEl.parentElement.className = 'item-value orange';
+    bmsLabelEl.className = 'item-sub orange';
+  }
+
+  // Update SOC ring
+  const socPct = d.soc;
+  const circle = document.getElementById('socCircle');
+  const circumference = 2 * Math.PI * 60; // ~377
+  const offset = circumference * (1 - socPct / 100);
+  circle.setAttribute('stroke-dashoffset', offset);
+  // Color gradient: green > orange > red
+  if (socPct > 60) circle.setAttribute('stroke', '#4CAF50');
+  else if (socPct > 30) circle.setAttribute('stroke', '#FF9800');
+  else if (socPct > 20) circle.setAttribute('stroke', '#FF6F00');
+  else circle.setAttribute('stroke', '#E53935');
+
+  // --- Tab 3: AC Output ---
+  setText('acVoltage', d.acV.toFixed(1) + '<span style="font-size:20px;font-weight:400;">V</span>');
+  setText('acCurrent', d.acA.toFixed(2));
+  setText('acActivePower', d.power.toFixed(2) + '<span style="font-size:11px;font-weight:400;"> kW</span>');
+  const apparent = d.acV * d.acA / 1000;
+  setText('acApparentPower', apparent.toFixed(2) + '<span style="font-size:11px;font-weight:400;"> kVA</span>');
+  const reactive = Math.sqrt(Math.max(0, apparent * apparent - d.power * d.power));
+  setText('acReactivePower', Math.round(reactive * 1000) + '<span style="font-size:11px;font-weight:400;"> Var</span>');
+  setText('acPF', d.acPF.toFixed(3));
+  setText('acFreq', d.acFreq.toFixed(2) + '<span style="font-size:11px;font-weight:400;"> Hz</span>');
+  setText('acLoadRate', d.loadRate.toFixed(1) + '<span style="font-size:11px;font-weight:400;">%</span>');
+  document.getElementById('loadBarFill').style.width = d.loadRate + '%';
+  setText('acThdV', d.thdV.toFixed(1) + '% &#x2713;');
+  setText('acThdI', d.thdI.toFixed(1) + '% &#x2713;');
+  setText('acDcComp', d.dcComp.toFixed(1) + ' mA &#x2713;');
+
+  // --- Tab 4: MPPT ---
+  setText('pvTotalPower', d.pvPower.toFixed(2) + '<span style="font-size:18px;font-weight:400;"> kW</span>');
+  setText('pvVoltage', d.pvV.toFixed(1) + ' V');
+  setText('pvCurrent', d.pvA.toFixed(1) + ' A');
+  setText('pvRangeVal', d.pvV.toFixed(1) + 'V');
+  document.getElementById('pvRangeDot').style.left = Math.min(95, (d.pvV / 150 * 100)) + '%';
+
+  // --- Tab 5: Stats ---
+  updateStatDisplay();
+
+  // Update power ring inner glow color
+  updatePowerRingColor(d.power);
+}
+
+function updatePowerRingColor(power) {
+  const ring = document.querySelector('.power-ring-inner');
+  if (!ring) return;
+  // Power: 0 ~ 3kW max; 0-33% green, 33-66% yellow/orange, >66% red-ish
+  const ratio = Math.min(power / 3.0, 1);
+  let c1, c2;
+  if (ratio < 0.33) { c1 = '#e8f5e9'; c2 = '#c8e6c9'; }
+  else if (ratio < 0.66) { c1 = '#fff8e1'; c2 = '#ffecb3'; }
+  else { c1 = '#ffebee'; c2 = '#ffcdd2'; }
+  ring.style.background = `linear-gradient(145deg, ${c1}, ${c2})`;
+}
+
+function updateStatDisplay() {
+  let pvGen, loadUse, batCharge, batDischarge;
+  if (currentPeriod === 'today') {
+    pvGen = data.todayGen; loadUse = data.todayUse;
+    batCharge = data.batCharge; batDischarge = data.batDischarge;
+  } else if (currentPeriod === 'month') {
+    pvGen = data.todayGen * 28 + (Math.random() * 20 - 10);
+    loadUse = data.todayUse * 26 + (Math.random() * 15 - 7);
+    batCharge = data.batCharge * 27 + (Math.random() * 18 - 9);
+    batDischarge = data.batDischarge * 25 + (Math.random() * 16 - 8);
+  } else { // total
+    pvGen = data.totalGen; loadUse = data.totalUse;
+    batCharge = data.totalGen * 0.65; batDischarge = data.totalUse * 0.7;
+  }
+  document.getElementById('statPvGen').textContent = pvGen.toFixed(2) + ' kWh';
+  document.getElementById('statLoadUse').textContent = loadUse.toFixed(2) + ' kWh';
+  document.getElementById('statBatCharge').textContent = batCharge.toFixed(2) + ' kWh';
+  document.getElementById('statBatDischarge').textContent = batDischarge.toFixed(2) + ' kWh';
+  document.getElementById('statFlowPv').textContent = pvGen.toFixed(2);
+  document.getElementById('statFlowLoad').textContent = loadUse.toFixed(2);
+  document.getElementById('statFlowBc').textContent = '+' + batCharge.toFixed(2);
+  document.getElementById('statFlowBd').textContent = '-' + batDischarge.toFixed(2);
+
+  // Show/hide total section
+  document.getElementById('statTotalSection').style.display = currentPeriod === 'total' ? 'block' : 'none';
+}
+
+function setText(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
+function formatKWh(val) { return val.toFixed(2) + ' kWh'; }
+
+// ============ Data Refresh ============
+function refreshData() {
+  // If shutdown, don't fluctuate most values
+  if (deviceStatus === 'shutdown') {
+    data.power = 0; data.battA = 0; data.pvPower = 0; data.acV = 0; data.acA = 0;
+    data.loadRate = 0; data.pvA = 0;
+  } else if (deviceStatus === 'standby') {
+    data.power = 0; data.battA = fluctuate(1.5, 0.1); data.pvPower = fluctuate(0.3, 0.1);
+    data.acV = 220; data.acA = 0; data.loadRate = 0; data.pvA = data.pvPower * 1000 / Math.max(data.pvV, 1);
+  } else if (deviceStatus === 'fault') {
+    data.power = 0; data.acV = fluctuate(220, 0.01); data.acA = 0; data.loadRate = 0;
+  } else {
+    // Running: fluctuate all values
+    data.power = fluctuate(1.87, 0.02);
+    data.soc = Math.max(1, Math.min(100, fluctuate(78.5, 0.008)));
+    data.battV = fluctuate(51.2, 0.005);
+    data.battA = fluctuate(25.5, 0.05);
+    data.pvPower = Math.max(0, fluctuate(1.07, 0.05));
+    data.pvV = fluctuate(85.3, 0.02);
+    data.pvA = data.pvPower * 1000 / Math.max(data.pvV, 1);
+    data.acV = fluctuate(220.5, 0.003);
+    data.acA = data.power * 1000 / Math.max(data.acV, 1);
+    data.acPF = Math.min(1, Math.max(0.95, fluctuate(0.997, 0.002)));
+    data.acFreq = fluctuate(50.02, 0.001);
+    data.loadRate = (data.power / 3.0 * 100);
+    data.loadRate = Math.max(0, Math.min(100, data.loadRate));
+    data.thdV = Math.max(0.5, fluctuate(1.8, 0.05));
+    data.thdI = Math.max(0.5, fluctuate(2.5, 0.05));
+    data.dcComp = Math.max(5, fluctuate(15.0, 0.08));
+    data.tempMax = fluctuate(28.5, 0.02);
+    data.tempMin = fluctuate(25.0, 0.01);
+    data.cellMax = fluctuate(3.35, 0.005);
+    data.cellMin = fluctuate(3.28, 0.005);
+    data.cellDiff = Math.abs(data.cellMax - data.cellMin);
+    data.remainAh = data.soc / 100 * nominalAh;
+    data.cycles = Math.max(152, data.cycles + (Math.random() < 0.1 ? 1 : 0));
+    data.todayGen = fluctuate(8.56, 0.01);
+    data.todayUse = fluctuate(6.00, 0.01);
+    data.batCharge = fluctuate(7.80, 0.01);
+    data.batDischarge = fluctuate(6.20, 0.01);
+    data.runHours = 8640 + Math.floor(data.cycles * 0.5);
+    data.totalGen = fluctuate(1250.3, 0.002);
+    data.totalUse = fluctuate(950.2, 0.002);
+  }
+
+  // Ensure non-negative
+  for (const k of ['power','soc','battV','pvPower','pvV','acV','loadRate','thdV','thdI','dcComp','tempMax','tempMin','cellMax','cellMin','cellDiff','remainAh','todayGen','todayUse','batCharge','batDischarge']) {
+    if (data[k] < 0) data[k] = 0;
+  }
+
+  updateUI();
+}
+
+// ============ Tab Switching ============
+const tabMap = { overview: 0, bms: 1, ac: 2, mppt: 3, stats: 4 };
+
+function switchTab(tabName) {
+  // Update content tabs
+  document.querySelectorAll('.tab-page').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + tabName).classList.add('active');
+
+  // Update bottom tabs
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+
+  // Scroll to top
+  document.getElementById('content').scrollTop = 0;
+}
+
+document.getElementById('bottomTabs').addEventListener('click', function(e) {
+  const btn = e.target.closest('.tab-btn');
+  if (!btn) return;
+  const tabName = btn.dataset.tab;
+  switchTab(tabName);
+});
+
+// ============ Status Toggle ============
+const statusCycle = ['running', 'standby', 'fault', 'shutdown'];
+const statusTexts = { running: '运行中', standby: '待机中', fault: '故障', shutdown: '已关机' };
+const statusClasses = { running: 'running', standby: 'standby', fault: 'fault', shutdown: 'shutdown' };
+const dotClasses = { running: 'green', standby: 'orange', fault: 'red', shutdown: 'gray' };
+
+function toggleStatus() {
+  const idx = statusCycle.indexOf(deviceStatus);
+  deviceStatus = statusCycle[(idx + 1) % statusCycle.length];
+
+  const badge = document.getElementById('statusBadge');
+  badge.className = 'status-badge ' + statusClasses[deviceStatus];
+  document.getElementById('statusText').textContent = statusTexts[deviceStatus];
+
+  const dot = badge.querySelector('.status-dot');
+  dot.className = 'status-dot ' + dotClasses[deviceStatus];
+
+  refreshData();
+}
+
+// ============ Stats Sub-Tab Switching ============
+document.getElementById('statSubTabs').addEventListener('click', function(e) {
+  const btn = e.target.closest('.sub-tab');
+  if (!btn) return;
+  document.querySelectorAll('#statSubTabs .sub-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentPeriod = btn.dataset.period;
+  updateStatDisplay();
+});
+
+// ============ PV Trend Chart Init ============
+function initPvTrend() {
+  const chart = document.getElementById('pvTrendChart');
+  if (!chart) return;
+  chart.innerHTML = '';
+  const bars = 20;
+  for (let i = 0; i < bars; i++) {
+    const h = 15 + Math.random() * 55;
+    const bar = document.createElement('div');
+    bar.className = 'pv-trend-bar';
+    bar.style.height = h + 'px';
+    bar.style.animationDelay = (i * 0.08) + 's';
+    chart.appendChild(bar);
+  }
+}
+
+function refreshPvTrend() {
+  const chart = document.getElementById('pvTrendChart');
+  if (!chart) return;
+  const bars = chart.children;
+  for (let i = 0; i < bars.length; i++) {
+    const newH = 15 + (data.pvPower / 2) * (0.6 + Math.random() * 0.4) * 55;
+    bars[i].style.height = newH + 'px';
+  }
+}
+
+// ============ Init ============
+function init() {
+  updateUI();
+  initPvTrend();
+}
+
+init();
+
+// Periodic refresh every 4 seconds
+setInterval(function() {
+  refreshData();
+  if (currentPeriod === 'today' && deviceStatus === 'running') {
+    // Slow accumulation
+    data.todayGen += 0.001 * (Math.random() * 2);
+    data.todayUse += 0.001 * (Math.random() * 1.5);
+  }
+  refreshPvTrend();
+}, 4000);
+
+// Slower PV trend refresh
+setInterval(refreshPvTrend, 6000);
+
+// ============ Handle status badge color for AC voltage during fault ============
+// Already handled in refreshData()
+
+// Initial MPPT status color
+function updateMpptStatus() {
+  const mpptEl = document.getElementById('mpptStatus');
+  if (!mpptEl) return;
+  if (deviceStatus !== 'running') {
+    mpptEl.textContent = '待机';
+    mpptEl.className = 'pv-mppt-status';
+    mpptEl.style.background = '#FFF3E0'; mpptEl.style.color = '#FF6F00';
+  } else {
+    mpptEl.textContent = '跟踪中';
+    mpptEl.className = 'pv-mppt-status tracking';
+  }
+}
+
+// Override refreshData to also update MPPT status
+const origRefresh = refreshData;
+refreshData = function() {
+  origRefresh();
+  updateMpptStatus();
+};
+
+updateMpptStatus();
+</script>
+
+</body>
+</html>
