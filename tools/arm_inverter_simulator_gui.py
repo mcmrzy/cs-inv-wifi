@@ -762,6 +762,7 @@ class InverterController:
         # ========== 告警状态 ==========
         self.active_alarms = []  # 当前活动告警列表
         self._alarm_cooldown = {}  # {code: cooldown_end_time} 告警冷却期
+        self._manual_alarms = set()  # 手动触发的告警，不会被 _check_alarms 自动清除
         self._last_alarm_pub = 0  # 上次告警上报时间
         self._alarm_pub_callback = None  # 告警上报回调
         self.alarm_history = []  # 告警历史记录
@@ -857,8 +858,11 @@ class InverterController:
         12: {'level': 'info', 'message': '恢复并网运行'},
     }
     
-    def _add_alarm(self, code):
-        """添加告警"""
+    def _add_alarm(self, code, manual=False):
+        """添加告警
+        :param code: 告警代码
+        :param manual: 是否手动触发（手动触发的告警不会被 _check_alarms 自动清除）
+        """
         now = time.time()
         # 冷却期内不重复触发
         if code in self._alarm_cooldown and now < self._alarm_cooldown[code]:
@@ -866,6 +870,8 @@ class InverterController:
         if code not in self.active_alarms:
             alarm_info = self.ALARM_DEFINITIONS.get(code, {'level': 'info', 'message': f'未知告警 {code}'})
             self.active_alarms.append(code)
+            if manual:
+                self._manual_alarms.add(code)
             alarm_record = {
                 'code': code,
                 'level': alarm_info['level'],
@@ -891,6 +897,7 @@ class InverterController:
         """清除告警"""
         if code in self.active_alarms:
             self.active_alarms.remove(code)
+            self._manual_alarms.discard(code)  # 从手动告警集合中移除
             # 设置冷却期，10秒内不重复触发
             self._alarm_cooldown[code] = time.time() + 10
             for alarm in self.alarm_history:
@@ -908,6 +915,7 @@ class InverterController:
         """清除所有告警"""
         for code in list(self.active_alarms):
             self._remove_alarm(code)
+        self._manual_alarms.clear()  # 清空手动告警集合
     
     def _check_alarms(self):
         """检查告警条件"""
@@ -918,37 +926,43 @@ class InverterController:
         if self.temp_inv > self.alarm_config['overtemp_threshold']:
             self._add_alarm(1)
         elif self.temp_inv < self.alarm_config['overtemp_threshold'] - 5:
-            self._remove_alarm(1)
+            if 1 not in self._manual_alarms:  # 手动触发的告警不自动清除
+                self._remove_alarm(1)
         
         # 电池过压检测
         if self.battery_v > self.alarm_config['overvolt_threshold']:
             self._add_alarm(2)
         elif self.battery_v < self.alarm_config['overvolt_threshold'] - 2:
-            self._remove_alarm(2)
+            if 2 not in self._manual_alarms:
+                self._remove_alarm(2)
         
         # 电池欠压检测
         if self.battery_v < self.alarm_config['undervolt_threshold']:
             self._add_alarm(3)
         elif self.battery_v > self.alarm_config['undervolt_threshold'] + 2:
-            self._remove_alarm(3)
+            if 3 not in self._manual_alarms:
+                self._remove_alarm(3)
         
         # 过载检测
         if self.load_percent > self.alarm_config['overload_threshold'] * 100:
             self._add_alarm(4)
         elif self.load_percent < self.alarm_config['overload_threshold'] * 100 - 5:
-            self._remove_alarm(4)
+            if 4 not in self._manual_alarms:
+                self._remove_alarm(4)
         
         # 温度过高警告
         if self.temp_inv > 55 and self.temp_inv <= self.alarm_config['overtemp_threshold']:
             self._add_alarm(6)
         elif self.temp_inv < 50:
-            self._remove_alarm(6)
+            if 6 not in self._manual_alarms:
+                self._remove_alarm(6)
         
         # SOC过低警告
         if self.soc < 25:
             self._add_alarm(7)
         elif self.soc > 35:
-            self._remove_alarm(7)
+            if 7 not in self._manual_alarms:
+                self._remove_alarm(7)
         
         # 随机告警（带自动清除）
         if random.random() < self.sim_params.get('alarm_probability', 0):
@@ -1666,7 +1680,7 @@ class GD32F303Chip:
                 # 手动设置告警
                 alarm_code = params.get('code', 0)
                 if alarm_code > 0:
-                    self.inverter._add_alarm(alarm_code)
+                    self.inverter._add_alarm(alarm_code, manual=True)  # 标记为手动触发
                     self._log(f"远程触发告警: {alarm_code}")
                     self.serial_send(CMD_ACK, b'')
                     self._send_cmd_result(task_id, cmd_type, True, f"已触发告警 {alarm_code}")
