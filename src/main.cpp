@@ -522,10 +522,38 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
       }
 
       if (strlen(topic) > 0) {
-        mqtt_publish(topic, payload, strlen(payload), 0, 0);
+        // 替换 payload 中的 firmware_esp 为实际版本号
+        const char* send_payload = payload;
+        char final_payload[FRAME_DATA_MAX - 80];
+        const char* esp_ver = ota_get_esp_version();
+        char* esp_pos = strstr(payload, "\"firmware_esp\"");
+        if (esp_pos) {
+          // 找到 "firmware_esp":"xxx" 并替换版本号
+          char* ver_start = strchr(esp_pos + 14, ':');
+          if (ver_start) {
+            ver_start = strchr(ver_start + 1, '"');
+            if (ver_start) {
+              char* ver_end = strchr(ver_start + 1, '"');
+              if (ver_end) {
+                // 构建新 payload: 前部分 + "新版本号" + 后部分
+                int prefix_len = ver_start + 1 - payload;
+                int suffix_len = strlen(ver_end);
+                int ver_len = strlen(esp_ver);
+                if (prefix_len + ver_len + suffix_len < sizeof(final_payload)) {
+                  memcpy(final_payload, payload, prefix_len);
+                  memcpy(final_payload + prefix_len, esp_ver, ver_len);
+                  strcpy(final_payload + prefix_len + ver_len, ver_end);
+                  send_payload = final_payload;
+                  Serial.printf("[UART] Replaced firmware_esp with %s\n", esp_ver);
+                }
+              }
+            }
+          }
+        }
+        mqtt_publish(topic, send_payload, strlen(send_payload), 0, 0);
         led_signal_data();    // LED2 短暂闪一下表示有数据活动
         Serial.printf("[UART] PUBLISH -> cs_inv/%s/%s (%d bytes)\n",
-                      g_device_sn, topic, strlen(payload));
+                      g_device_sn, topic, strlen(send_payload));
       } else {
         Serial.println("[UART] PUBLISH error: topic empty");
       }

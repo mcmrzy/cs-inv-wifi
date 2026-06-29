@@ -113,7 +113,8 @@ enum SystemState {
 #define OFFLINE_CACHE_ENABLED      1     // 1=启用离线缓存, 0=禁用
 
 // ==================== 固件版本 ====================
-#define FIRMWARE_VERSION "1.2.0"
+// 版本格式: V主版本.次版本.补丁.日期
+#define FIRMWARE_VERSION "V1.2.0.20260629"
 
 // ==================== 宏工具 ====================
 #define SN_MAX_LEN 32      // 兼容旧代码的最大缓冲区 (标准 SN 为 16 字符)
