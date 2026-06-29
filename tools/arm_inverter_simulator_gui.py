@@ -1823,7 +1823,7 @@ class SimulatorGUI:
         self.root.title("CS-I10-6k2 ARM模拟器 (GD32F303 完整芯片仿真)")
         self.root.geometry("1500x920"); self.root.configure(fg_color=C['bg'])
         self.current_group = "概览"; self.param_labels = {}
-        self.auto_sim = True; self.auto_pub = True; self.pub_interval = 5.0
+        self.auto_sim = True; self.auto_pub = True; self.pub_interval = 180.0
         self._last_pub = 0; self._pub_topic_index = 0
         self._pub_topics = ['info', 'ac', 'battery', 'pv', 'status', 'energy', 'cells', 'control']
         self._first_pub_done = False
