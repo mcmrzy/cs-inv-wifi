@@ -639,6 +639,18 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
       arm_ota_handle_uart(cmd, data, len);
       break;
 
+    // ARM 命令执行结果，转发到 MQTT
+    case CMD_COMMAND_SEND: {
+      char json[FRAME_DATA_MAX];
+      size_t copy_len = (len < sizeof(json) - 1) ? len : sizeof(json) - 1;
+      memcpy(json, data, copy_len);
+      json[copy_len] = '\0';
+      mqtt_publish("cmd_result", json, copy_len, 1, 0);
+      Serial.printf("[ARM→MQTT] cmd_result: %s\n", json);
+      uart_send_ack();
+      break;
+    }
+
     default:
       uart_send_nack();
       break;

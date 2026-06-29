@@ -1629,14 +1629,21 @@ class GD32F303Chip:
             cmd_data = json.loads(data.decode('utf-8'))
             cmd_type = cmd_data.get('cmd', '')
             params = cmd_data.get('params', {})
+            task_id = cmd_data.get('task_id', '')
             
             if cmd_type == 'set_control':
                 # 设置远程控制参数
+                results = {}
                 for key, value in params.items():
                     if key in self.inverter.remote_controls:
                         self.inverter.set_remote_control(key, value)
+                        results[key] = True
                         self._log(f"远程设置 {key} = {value}")
+                    else:
+                        results[key] = False
                 self.serial_send(CMD_ACK, b'')
+                # 发送执行结果给ESP32，转发到MQTT
+                self._send_cmd_result(task_id, cmd_type, True, "控制参数已设置", results)
             
             elif cmd_type == 'set_alarm':
                 # 手动设置告警
@@ -1644,18 +1651,24 @@ class GD32F303Chip:
                 if alarm_code > 0:
                     self.inverter._add_alarm(alarm_code)
                     self._log(f"远程触发告警: {alarm_code}")
+                    self.serial_send(CMD_ACK, b'')
+                    self._send_cmd_result(task_id, cmd_type, True, f"已触发告警 {alarm_code}")
                 else:
                     self.inverter._clear_all_alarms()
                     self._log("远程清除所有告警")
-                self.serial_send(CMD_ACK, b'')
+                    self.serial_send(CMD_ACK, b'')
+                    self._send_cmd_result(task_id, cmd_type, True, "已清除所有告警")
             
             elif cmd_type == 'set_sim_param':
                 # 设置模拟参数
+                results = {}
                 for key, value in params.items():
                     if key in self.inverter.sim_params:
                         self.inverter.set_sim_param(key, value)
+                        results[key] = value
                         self._log(f"远程设置模拟参数 {key} = {value}")
                 self.serial_send(CMD_ACK, b'')
+                self._send_cmd_result(task_id, cmd_type, True, "模拟参数已设置", results)
             
             elif cmd_type == 'reset':
                 # 重置逆变器
@@ -1664,14 +1677,32 @@ class GD32F303Chip:
                 self.inverter.state = 'inverting'
                 self._log("远程重置逆变器")
                 self.serial_send(CMD_ACK, b'')
+                self._send_cmd_result(task_id, cmd_type, True, "逆变器已重置")
             
             else:
                 self._log(f"未知远程命令: {cmd_type}")
                 self.serial_send(CMD_NACK, b'')
+                self._send_cmd_result(task_id, cmd_type, False, f"未知命令: {cmd_type}")
                 
         except Exception as e:
             self._log(f"远程命令处理错误: {e}")
             self.serial_send(CMD_NACK, b'')
+            self._send_cmd_result("", "unknown", False, f"处理错误: {e}")
+    
+    def _send_cmd_result(self, task_id, cmd_type, success, message, data=None):
+        """发送命令执行结果给ESP32"""
+        result = {
+            'task_id': task_id,
+            'cmd': cmd_type,
+            'success': success,
+            'message': message,
+            'timestamp': int(time.time())
+        }
+        if data:
+            result['data'] = data
+        result_json = json.dumps(result, ensure_ascii=False).encode('utf-8')
+        self.serial_send(CMD_COMMAND_SEND, result_json)
+        self._log(f"[TX] CMD_RESULT: {cmd_type} {'成功' if success else '失败'}")
 
     def _handle_publish(self, data):
         try:
