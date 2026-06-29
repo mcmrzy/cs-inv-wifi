@@ -904,8 +904,12 @@ class InverterController:
                 if not any(self.ALARM_DEFINITIONS.get(a, {}).get('level') == 'fault' for a in self.active_alarms):
                     self.state = 'inverting'
             
-            # 所有告警都清除后，触发一次上报（故障恢复）
-            if not self.active_alarms:
+            # 只有 fault 或 warning 级别告警全部清除时，才触发恢复上报
+            has_critical = any(
+                self.ALARM_DEFINITIONS.get(a, {}).get('level') in ('fault', 'warning')
+                for a in self.active_alarms
+            )
+            if not has_critical:
                 now = time.time()
                 if (hasattr(self, '_alarm_pub_callback') and self._alarm_pub_callback
                         and now - getattr(self, '_last_alarm_pub', 0) >= 2):
@@ -1473,22 +1477,30 @@ class InverterController:
                     'voltages': [round(v, 3) for v in self.cell_voltages],
                     'temps': [round(t, 1) for t in self.cell_temps]}
         elif topic == 'alarm':
-            if self.active_alarms:
+            # 只有 fault 或 warning 级别的告警才上报
+            critical_alarms = [
+                code for code in self.active_alarms
+                if self.ALARM_DEFINITIONS.get(code, {}).get('level') in ('fault', 'warning')
+            ]
+            if critical_alarms:
                 alarms = []
-                for code in self.active_alarms:
+                for code in critical_alarms:
                     info = self.ALARM_DEFINITIONS.get(code, {})
                     alarms.append({
                         'code': code,
                         'level': info.get('level', 'info'),
                         'message': info.get('message', f'未知告警 {code}')
                     })
-                alarm_info = self.ALARM_DEFINITIONS.get(self.alarm_code, {})
-                return {'code': self.alarm_code,
+                # 主告警码取第一个 fault/warning 级别的
+                main_code = critical_alarms[0]
+                alarm_info = self.ALARM_DEFINITIONS.get(main_code, {})
+                return {'code': main_code,
                         'level': alarm_info.get('level', 'info'),
                         'message': alarm_info.get('message', '未知告警'),
-                        'count': len(self.active_alarms),
+                        'count': len(critical_alarms),
                         'alarms': alarms,
                         'timestamp': int(time.time())}
+            # 无故障/警告时返回恢复状态
             return {'code': 0, 'level': 'normal', 'message': '故障恢复，系统正常',
                     'count': 0, 'alarms': [], 'timestamp': int(time.time())}
         elif topic == 'parallel':
