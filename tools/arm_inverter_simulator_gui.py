@@ -748,7 +748,7 @@ class InverterController:
             'initial_soc': 75.0,         # 初始SOC (%)
             'battery_capacity': 100.0,   # 电池容量 (Ah)
             'auto_alarm_enable': True,    # 是否启用自动告警
-            'alarm_probability': 0.001,   # 随机告警概率
+            'alarm_probability': 0.0001,  # 随机告警概率（降低到0.01%）
         }
         
         # ========== 告警配置 ==========
@@ -950,12 +950,26 @@ class InverterController:
         elif self.soc > 35:
             self._remove_alarm(7)
         
-        # 随机告警
+        # 随机告警（带自动清除）
         if random.random() < self.sim_params.get('alarm_probability', 0):
             random_codes = [8, 9, 10, 11, 12]
             code = random.choice(random_codes)
             if code not in self.active_alarms:
                 self._add_alarm(code)
+                # 设置30秒后自动清除随机告警
+                clear_time = time.time() + 30
+                if not hasattr(self, '_random_alarm_clear_time'):
+                    self._random_alarm_clear_time = {}
+                self._random_alarm_clear_time[code] = clear_time
+        
+        # 检查并清除过期的随机告警
+        if hasattr(self, '_random_alarm_clear_time'):
+            now = time.time()
+            expired = [code for code, clear_time in self._random_alarm_clear_time.items() 
+                      if now >= clear_time and code in self.active_alarms]
+            for code in expired:
+                self._remove_alarm(code)
+                del self._random_alarm_clear_time[code]
     
     def set_remote_control(self, key, value):
         """设置远程控制参数"""
