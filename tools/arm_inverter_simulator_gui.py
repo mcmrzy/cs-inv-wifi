@@ -903,6 +903,14 @@ class InverterController:
                 self.fault_code = 0
                 if not any(self.ALARM_DEFINITIONS.get(a, {}).get('level') == 'fault' for a in self.active_alarms):
                     self.state = 'inverting'
+            
+            # 所有告警都清除后，触发一次上报（故障恢复）
+            if not self.active_alarms:
+                now = time.time()
+                if (hasattr(self, '_alarm_pub_callback') and self._alarm_pub_callback
+                        and now - getattr(self, '_last_alarm_pub', 0) >= 2):
+                    self._last_alarm_pub = now
+                    self._alarm_pub_callback()
     
     def _clear_all_alarms(self):
         """清除所有告警"""
@@ -1481,7 +1489,8 @@ class InverterController:
                         'count': len(self.active_alarms),
                         'alarms': alarms,
                         'timestamp': int(time.time())}
-            return {}
+            return {'code': 0, 'level': 'normal', 'message': '故障恢复，系统正常',
+                    'count': 0, 'alarms': [], 'timestamp': int(time.time())}
         elif topic == 'parallel':
             return {'mode': 'standalone', 'count': 1, 'total_rated_power': self.rated_power,
                     'total_active_power': round(self.power, 1), 'sync_state': 'synced', 'machines': []}
