@@ -903,18 +903,6 @@ class InverterController:
                 self.fault_code = 0
                 if not any(self.ALARM_DEFINITIONS.get(a, {}).get('level') == 'fault' for a in self.active_alarms):
                     self.state = 'inverting'
-            
-            # 只有 fault 或 warning 级别告警全部清除时，才触发恢复上报
-            has_critical = any(
-                self.ALARM_DEFINITIONS.get(a, {}).get('level') in ('fault', 'warning')
-                for a in self.active_alarms
-            )
-            if not has_critical:
-                now = time.time()
-                if (hasattr(self, '_alarm_pub_callback') and self._alarm_pub_callback
-                        and now - getattr(self, '_last_alarm_pub', 0) >= 2):
-                    self._last_alarm_pub = now
-                    self._alarm_pub_callback()
     
     def _clear_all_alarms(self):
         """清除所有告警"""
@@ -982,6 +970,23 @@ class InverterController:
             for code in expired:
                 self._remove_alarm(code)
                 del self._random_alarm_clear_time[code]
+        
+        # 检查是否需要发送恢复消息
+        # 当前没有 fault/warning 级别告警
+        has_critical = any(
+            self.ALARM_DEFINITIONS.get(a, {}).get('level') in ('fault', 'warning')
+            for a in self.active_alarms
+        )
+        # 之前有 fault/warning 告警，现在没有了 -> 发送恢复
+        if not has_critical and getattr(self, '_had_critical_alarm', False):
+            self._had_critical_alarm = False
+            now = time.time()
+            if (hasattr(self, '_alarm_pub_callback') and self._alarm_pub_callback
+                    and now - getattr(self, '_last_alarm_pub', 0) >= 2):
+                self._last_alarm_pub = now
+                self._alarm_pub_callback()
+        elif has_critical:
+            self._had_critical_alarm = True
     
     def set_remote_control(self, key, value):
         """设置远程控制参数"""
