@@ -256,21 +256,23 @@ class SimulatorProvider extends ChangeNotifier {
     }
   }
 
-  /// 发布所有主题
-  void _publishAllTopics() {
+  /// 发布所有主题（逐个发送，每条之间加延迟让ESP32处理）
+  Future<void> _publishAllTopics() async {
     if (!_firstPubDone) {
       _firstPubDone = true;
-      _publishTopic('info');
+      await _publishTopic('info');
+      await Future.delayed(const Duration(milliseconds: 200));
     }
 
     final topics = ['ac', 'battery', 'pv', 'status', 'energy', 'cells', 'alarm'];
     for (var topic in topics) {
-      _publishTopic(topic);
+      await _publishTopic(topic);
+      await Future.delayed(const Duration(milliseconds: 200));
     }
   }
 
   /// 发布单个主题
-  void _publishTopic(String topic) {
+  Future<void> _publishTopic(String topic) async {
     final payload = _inverterData.toJson(topic);
     payload['sn'] = _sn;
 
@@ -288,7 +290,7 @@ class SimulatorProvider extends ChangeNotifier {
     };
 
     final data = utf8.encode(jsonEncode(obj));
-    _uartService.sendFrame(CommandCodes.publish, Uint8List.fromList(data));
+    await _uartService.sendFrame(CommandCodes.publish, Uint8List.fromList(data));
     _addLog('[TX] PUBLISH data/$topic');
   }
 
