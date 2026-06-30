@@ -151,6 +151,11 @@ class InverterData {
   // 活动故障
   final Map<String, ActiveFault> _activeFaults = {};
 
+  // 四舍五入辅助函数，返回数字类型（与Python round()一致）
+  static double _r1(double v) => double.parse(v.toStringAsFixed(1));
+  static double _r2(double v) => double.parse(v.toStringAsFixed(2));
+  static double _r3(double v) => double.parse(v.toStringAsFixed(3));
+
   Map<String, dynamic> toJson(String topic) {
     switch (topic) {
       case 'info':
@@ -161,6 +166,7 @@ class InverterData {
           'firmware_arm': 'V1.2.3.20240510',
           'firmware_esp': 'V1.2.0.20260629',
           'firmware_dsp': 'V1.1.0.20240508',
+          'firmware_bms': 'V2.0.1',
           'type': '离网逆变器',
           'rated_power': ratedPower,
           'rated_voltage': ratedVoltage,
@@ -168,55 +174,62 @@ class InverterData {
           'battery_voltage': batteryVoltage,
           'battery_type': batteryType,
           'cell_count': cellCount,
+          'parallel_mode': 'standalone',
+          'parallel_role': 'standalone',
+          'parallel_phase': null,
         };
       case 'ac':
         return {
-          'voltage': voltage.toStringAsFixed(1),
-          'current': current.toStringAsFixed(2),
-          'power': power.toStringAsFixed(1),
-          'apparent': (voltage * current).toStringAsFixed(1),
-          'frequency': frequency.toStringAsFixed(2),
-          'pf': (power / (voltage * current)).clamp(0, 1).toStringAsFixed(2),
-          'load_percent': loadPercent.toStringAsFixed(1),
+          'voltage': _r1(voltage),
+          'current': _r2(current),
+          'power': _r1(power),
+          'apparent': _r1(voltage * current),
+          'frequency': _r2(frequency),
+          'pf': _r2((power / (voltage * current)).clamp(0, 1)),
+          'load_percent': _r1(loadPercent),
+          'thd_v': _r1(2.5),
         };
       case 'battery':
+        final cellVoltMax = cellVoltages.reduce((a, b) => a > b ? a : b);
+        final cellVoltMin = cellVoltages.reduce((a, b) => a < b ? a : b);
+        final tempMax = cellTemps.reduce((a, b) => a > b ? a : b);
+        final tempMin = cellTemps.reduce((a, b) => a < b ? a : b);
         return {
-          'soc': soc.toStringAsFixed(1),
-          'soh': soh.toStringAsFixed(1),
-          'voltage': batteryVoltage.toStringAsFixed(2),
-          'current': batteryCurrent.toStringAsFixed(2),
-          'power': (batteryVoltage * batteryCurrent).toStringAsFixed(1),
-          'capacity_remain': (soc / 100 * batteryCapacity).toStringAsFixed(1),
+          'soc': _r1(soc),
+          'soh': _r1(soh),
+          'voltage': _r2(batteryVoltage),
+          'current': _r2(batteryCurrent),
+          'power': _r1(batteryVoltage * batteryCurrent),
+          'capacity_remain': _r1(soc / 100 * batteryCapacity),
           'capacity_total': batteryCapacity,
           'cycle_count': cycleCount,
-          'temp_max': cellTemps.reduce((a, b) => a > b ? a : b).toStringAsFixed(1),
-          'temp_min': cellTemps.reduce((a, b) => a < b ? a : b).toStringAsFixed(1),
-          'cell_volt_max': cellVoltages.reduce((a, b) => a > b ? a : b).toStringAsFixed(3),
-          'cell_volt_min': cellVoltages.reduce((a, b) => a < b ? a : b).toStringAsFixed(3),
-          'cell_volt_diff': (cellVoltages.reduce((a, b) => a > b ? a : b) -
-              cellVoltages.reduce((a, b) => a < b ? a : b)).toStringAsFixed(3),
+          'temp_max': _r1(tempMax),
+          'temp_min': _r1(tempMin),
+          'cell_volt_max': _r3(cellVoltMax),
+          'cell_volt_min': _r3(cellVoltMin),
+          'cell_volt_diff': _r3(cellVoltMax - cellVoltMin),
           'charge_state': chargeState,
           'protect_status': 0,
           'bms_fault_code': 0,
-          'max_chg_current': remoteControls['max_charge_current'],
-          'max_dischg_current': remoteControls['max_discharge_current'],
+          'max_chg_current': 60.0,
+          'max_dischg_current': 120.0,
           'charge_volt_ref': 54.6,
           'dischg_cut_volt': 44.0,
-          'temp_battery': cellTemps.isEmpty ? 25.0 : (cellTemps.reduce((a, b) => a + b) / cellTemps.length).toStringAsFixed(1),
+          'temp_battery': _r1(cellTemps.isEmpty ? 25.0 : cellTemps.reduce((a, b) => a + b) / cellTemps.length),
         };
       case 'pv':
         return {
-          'pv1_voltage': pv1Voltage.toStringAsFixed(1),
-          'pv1_current': pv1Current.toStringAsFixed(2),
-          'pv1_power': pv1Power.toStringAsFixed(1),
-          'pv1_voltage_max': pv1VoltageMax.toStringAsFixed(1),
-          'pv1_power_max': pv1PowerMax.toStringAsFixed(1),
-          'pv2_voltage': pv2Voltage.toStringAsFixed(1),
-          'pv2_current': pv2Current.toStringAsFixed(2),
-          'pv2_power': pv2Power.toStringAsFixed(1),
-          'pv2_voltage_max': pv2VoltageMax.toStringAsFixed(1),
-          'pv2_power_max': pv2PowerMax.toStringAsFixed(1),
-          'pv_power_total': (pv1Power + pv2Power).toStringAsFixed(1),
+          'pv1_voltage': _r1(pv1Voltage),
+          'pv1_current': _r2(pv1Current),
+          'pv1_power': _r1(pv1Power),
+          'pv1_voltage_max': _r1(pv1VoltageMax),
+          'pv1_power_max': _r1(pv1PowerMax),
+          'pv2_voltage': _r1(pv2Voltage),
+          'pv2_current': _r2(pv2Current),
+          'pv2_power': _r1(pv2Power),
+          'pv2_voltage_max': _r1(pv2VoltageMax),
+          'pv2_power_max': _r1(pv2PowerMax),
+          'pv_power_total': _r1(pv1Power + pv2Power),
           'mppt_state': mpptState,
         };
       case 'status':
@@ -224,31 +237,31 @@ class InverterData {
           'state': mode.name,
           'fault_code': faultCode,
           'alarm_code': alarmCode,
-          'temp_inv': tempInv.toStringAsFixed(1),
-          'temp_mos': tempMos.toStringAsFixed(1),
-          'temp_ambient': tempAmbient.toStringAsFixed(1),
-          'dc_bus_voltage': (batteryVoltage * 1.2).toStringAsFixed(1),
-          'efficiency': efficiency.toStringAsFixed(1),
-          'runtime_hours': runtimeHours.toStringAsFixed(1),
+          'temp_inv': _r1(tempInv),
+          'temp_mos': _r1(tempMos),
+          'temp_ambient': _r1(tempAmbient),
+          'dc_bus_voltage': _r1(batteryVoltage * 1.2),
+          'efficiency': _r1(efficiency),
+          'runtime_hours': _r1(runtimeHours),
           'fan_speed': fanSpeed,
         };
       case 'energy':
         return {
-          'daily_pv': dailyPv.toStringAsFixed(2),
-          'total_pv': totalPv.toStringAsFixed(1),
-          'daily_charge': dailyCharge.toStringAsFixed(2),
-          'total_charge': totalCharge.toStringAsFixed(1),
-          'daily_discharge': dailyDischarge.toStringAsFixed(2),
-          'total_discharge': totalDischarge.toStringAsFixed(1),
-          'daily_load': dailyLoad.toStringAsFixed(2),
-          'total_load': totalLoad.toStringAsFixed(1),
-          'runtime_hours': runtimeHours.toStringAsFixed(1),
+          'daily_pv': _r2(dailyPv),
+          'total_pv': _r1(totalPv),
+          'daily_charge': _r2(dailyCharge),
+          'total_charge': _r1(totalCharge),
+          'daily_discharge': _r2(dailyDischarge),
+          'total_discharge': _r1(totalDischarge),
+          'daily_load': _r2(dailyLoad),
+          'total_load': _r1(totalLoad),
+          'runtime_hours': _r1(runtimeHours),
         };
       case 'cells':
         return {
           'cell_count': cellCount,
-          'voltages': cellVoltages.map((v) => double.parse(v.toStringAsFixed(3))).toList(),
-          'temps': cellTemps.map((t) => double.parse(t.toStringAsFixed(1))).toList(),
+          'voltages': cellVoltages.map((v) => _r3(v)).toList(),
+          'temps': cellTemps.map((t) => _r1(t)).toList(),
         };
       default:
         return {};
