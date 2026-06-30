@@ -585,15 +585,59 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
                   const SizedBox(height: 16),
                   SizedBox(
                     width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: provider.isConnected
-                          ? () => provider.disconnect()
-                          : () => provider.connect(),
-                      icon: Icon(provider.isConnected ? Icons.usb_off : Icons.usb),
-                      label: Text(provider.isConnected ? '断开连接' : '连接串口'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: provider.isConnected ? Colors.red : Colors.green,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
+                    height: 48,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 300),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: provider.isConnected
+                              ? [Colors.red.shade700, Colors.red.shade500]
+                              : [Colors.green.shade700, Colors.green.shade500],
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: (provider.isConnected ? Colors.red : Colors.green).withOpacity(0.3),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: provider.isConnected
+                              ? () => provider.disconnect()
+                              : () => provider.connect(),
+                          borderRadius: BorderRadius.circular(8),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 300),
+                                child: Icon(
+                                  provider.isConnected ? Icons.usb_off : Icons.usb,
+                                  key: ValueKey(provider.isConnected),
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 300),
+                                child: Text(
+                                  provider.isConnected ? '断开连接' : '连接串口',
+                                  key: ValueKey(provider.isConnected),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ),
