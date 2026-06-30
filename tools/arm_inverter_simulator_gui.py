@@ -1394,8 +1394,8 @@ class InverterController:
         self.runtime_hours += dt / 3600.0
         
         # ========== 13. 告警检查 ==========
-        if self.state != 'fault':  # 故障状态下不检查新告警
-            self._check_alarms()
+        # 始终检查告警（包括故障状态），以便发送恢复消息
+        self._check_alarms()
         
         # ========== 14. 故障效果应用 ==========
         self._apply_faults()
