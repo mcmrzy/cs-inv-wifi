@@ -31,6 +31,9 @@ class SimulatorProvider extends ChangeNotifier {
   final Map<int, DateTime> _randomAlarmClearTime = {};
   double _alarmProbability = 0.0001;
 
+  // ACK等待机制
+  Completer<void>? _ackCompleter;
+
   // 串口
   List<String> _availablePorts = [];
   String? _selectedPort;
@@ -256,22 +259,20 @@ class SimulatorProvider extends ChangeNotifier {
     }
   }
 
-  /// 发布所有主题（逐个发送，每条之间加延迟让ESP32处理）
+  /// 发布所有主题（逐个发送，每条等待ACK后再发下一条）
   Future<void> _publishAllTopics() async {
     if (!_firstPubDone) {
       _firstPubDone = true;
       await _publishTopic('info');
-      await Future.delayed(const Duration(milliseconds: 200));
     }
 
     final topics = ['ac', 'battery', 'pv', 'status', 'energy', 'cells', 'alarm'];
     for (var topic in topics) {
       await _publishTopic(topic);
-      await Future.delayed(const Duration(milliseconds: 200));
     }
   }
 
-  /// 发布单个主题
+  /// 发布单个主题，发送后等待ESP32回复ACK
   Future<void> _publishTopic(String topic) async {
     final payload = _inverterData.toJson(topic);
     payload['sn'] = _sn;
@@ -279,7 +280,7 @@ class SimulatorProvider extends ChangeNotifier {
     // 告警数据特殊处理
     if (topic == 'alarm') {
       final alarmJson = _alarmSystem.getAlarmJson();
-      if (alarmJson == null) return; // 无告警，不发送
+      if (alarmJson == null) return;
       payload.addAll(alarmJson);
     }
 
@@ -290,8 +291,20 @@ class SimulatorProvider extends ChangeNotifier {
     };
 
     final data = utf8.encode(jsonEncode(obj));
+
+    // 创建ACK等待器
+    _ackCompleter = Completer<void>();
+
     await _uartService.sendFrame(CommandCodes.publish, Uint8List.fromList(data));
     _addLog('[TX] PUBLISH data/$topic');
+
+    // 等待ACK，超时500ms后继续
+    try {
+      await _ackCompleter!.future.timeout(const Duration(milliseconds: 500));
+    } on TimeoutException {
+      _addLog('[WARN] ACK timeout for data/$topic');
+    }
+    _ackCompleter = null;
   }
 
   /// 处理接收到的帧
@@ -329,6 +342,10 @@ class SimulatorProvider extends ChangeNotifier {
         break;
       case CommandCodes.ack:
       case CommandCodes.nack:
+        // 完成等待ACK的Completer
+        if (_ackCompleter != null && !_ackCompleter!.isCompleted) {
+          _ackCompleter!.complete();
+        }
         break;
       default:
         _uartService.sendNack();
