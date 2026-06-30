@@ -603,19 +603,49 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
           ]),
           const SizedBox(height: 16),
           _buildSettingsCard('模拟控制', [
-            SwitchListTile(
-              title: const Text('自动模拟'),
-              subtitle: const Text('自动更新逆变器参数'),
-              value: provider.autoSimulate,
-              onChanged: (v) => provider.setAutoSimulate(v),
-              tileColor: Colors.transparent,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('自动模拟', style: TextStyle(fontSize: 16)),
+                      Text(
+                        '自动更新逆变器参数',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                      ),
+                    ],
+                  ),
+                  Switch(
+                    value: provider.autoSimulate,
+                    onChanged: (v) => provider.setAutoSimulate(v),
+                  ),
+                ],
+              ),
             ),
-            SwitchListTile(
-              title: const Text('自动发布'),
-              subtitle: const Text('定时通过UART发送数据'),
-              value: provider.autoPublish,
-              onChanged: (v) => provider.setAutoPublish(v),
-              tileColor: Colors.transparent,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('自动发布', style: TextStyle(fontSize: 16)),
+                      Text(
+                        '定时通过UART发送数据',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                      ),
+                    ],
+                  ),
+                  Switch(
+                    value: provider.autoPublish,
+                    onChanged: (v) => provider.setAutoPublish(v),
+                  ),
+                ],
+              ),
             ),
           ]),
           const SizedBox(height: 16),
