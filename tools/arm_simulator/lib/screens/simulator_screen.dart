@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/simulator_provider.dart';
 import '../models/inverter_state.dart';
@@ -743,6 +744,30 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
           ]),
           const SizedBox(height: 16),
           _buildSettingsCard('通信日志', [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: Row(
+                children: [
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () {
+                      final text = provider.logs.reversed.join('\n');
+                      Clipboard.setData(ClipboardData(text: text));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('已复制到剪贴板'), duration: Duration(seconds: 1)),
+                      );
+                    },
+                    icon: const Icon(Icons.copy, size: 16),
+                    label: const Text('复制全部', style: TextStyle(fontSize: 12)),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => provider.clearLogs(),
+                    icon: const Icon(Icons.delete_outline, size: 16),
+                    label: const Text('清空', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+            ),
             Container(
               height: 300,
               margin: const EdgeInsets.all(16),
@@ -756,7 +781,7 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
                 itemCount: provider.logs.length,
                 itemBuilder: (context, index) {
                   final log = provider.logs[index];
-                  return Text(
+                  return SelectableText(
                     log,
                     style: TextStyle(
                       fontFamily: 'Consolas',

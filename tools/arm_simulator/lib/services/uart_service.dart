@@ -76,8 +76,6 @@ class UartService {
     final lenLow = len & 0xFF;
     final xor = _calcXor(command, lenHigh, lenLow, data.toList());
     
-    _log('[DEBUG] 构建帧: cmd=0x${command.toRadixString(16)} len=$len xor=0x${xor.toRadixString(16)}');
-    
     final buffer = BytesBuilder();
     buffer.addByte(frameHeader);
     _writeEscaped(buffer, command);
@@ -87,18 +85,19 @@ class UartService {
       _writeEscaped(buffer, byte);
     }
     _writeEscaped(buffer, xor);
-    
-    final result = buffer.toBytes();
-    _log('[DEBUG] 发送字节: ${result.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
-    return result;
+    return buffer.toBytes();
   }
 
   Future<bool> sendFrame(int command, Uint8List data) async {
-    if (_writeCallback == null) return false;
+    if (_writeCallback == null) {
+      _log('[WARN] 未设置串口写入回调');
+      return false;
+    }
     try {
       final frame = _buildFrame(command, data);
       _writeCallback!(frame);
-      _log('TX: CMD=0x${command.toRadixString(16).padLeft(2, '0')} LEN=${data.length}');
+      final hexStr = frame.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+      _log('TX: CMD=0x${command.toRadixString(16).padLeft(2, '0')} LEN=${data.length} [$hexStr]');
       return true;
     } catch (e) {
       _log('[ERR] 发送失败: $e');
@@ -110,6 +109,8 @@ class UartService {
   Future<bool> sendNack() => sendFrame(CommandCodes.nack, Uint8List(0));
 
   void processReceivedData(Uint8List data) {
+    final hexStr = data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    _log('RX: [$hexStr]');
     for (var byte in data) {
       _processByte(byte);
     }

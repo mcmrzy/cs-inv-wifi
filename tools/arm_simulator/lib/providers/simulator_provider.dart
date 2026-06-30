@@ -88,12 +88,13 @@ class SimulatorProvider extends ChangeNotifier {
         return;
       }
 
-      // 配置串口参数
-      _serialPort!.config = SerialPortConfig()
-        ..baudRate = 115200
-        ..bits = 8
-        ..stopBits = 1
-        ..parity = SerialPortParity.none;
+      // 配置串口参数（必须获取当前配置再修改）
+      final config = _serialPort!.config;
+      config.baudRate = 115200;
+      config.bits = 8;
+      config.stopBits = 1;
+      config.parity = SerialPortParity.none;
+      _serialPort!.config = config;
 
       // 监听数据
       final reader = SerialPortReader(_serialPort!);
@@ -104,7 +105,14 @@ class SimulatorProvider extends ChangeNotifier {
       // 设置写入回调
       _uartService.setWriteCallback((Uint8List data) {
         if (_serialPort != null && _serialPort!.isOpen) {
-          _serialPort!.write(data);
+          try {
+            final written = _serialPort!.write(data, timeout: 1000);
+            if (written != data.length) {
+              _addLog('[WARN] 写入不完整: ${written}/${data.length}');
+            }
+          } catch (e) {
+            _addLog('[ERR] 写入异常: $e');
+          }
         }
       });
 
@@ -493,6 +501,11 @@ class SimulatorProvider extends ChangeNotifier {
 
   void setAlarmProbability(double value) {
     _alarmProbability = value;
+    notifyListeners();
+  }
+
+  void clearLogs() {
+    _logs.clear();
     notifyListeners();
   }
 
