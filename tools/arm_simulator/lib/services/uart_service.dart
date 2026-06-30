@@ -76,6 +76,8 @@ class UartService {
     final lenLow = len & 0xFF;
     final xor = _calcXor(command, lenHigh, lenLow, data.toList());
     
+    _log('[DEBUG] 构建帧: cmd=0x${command.toRadixString(16)} len=$len xor=0x${xor.toRadixString(16)}');
+    
     final buffer = BytesBuilder();
     buffer.addByte(frameHeader);
     _writeEscaped(buffer, command);
@@ -85,7 +87,10 @@ class UartService {
       _writeEscaped(buffer, byte);
     }
     _writeEscaped(buffer, xor);
-    return buffer.toBytes();
+    
+    final result = buffer.toBytes();
+    _log('[DEBUG] 发送字节: ${result.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
+    return result;
   }
 
   Future<bool> sendFrame(int command, Uint8List data) async {
