@@ -66,6 +66,20 @@ static unsigned long g_last_debug = 0;
 static bool g_btn_pressed = false;
 static unsigned long g_btn_press_start = 0;
 
+// ==================== UART PUBLISH 队列 ====================
+// mqtt_publish(TLS) 阻塞时间长，不能在 UART 回调中调用，否则 UART 缓冲区溢出
+#define PUB_QUEUE_SIZE 8
+#define PUB_TOPIC_LEN 64
+#define PUB_PAYLOAD_LEN 600
+struct PubQueueItem {
+  char topic[PUB_TOPIC_LEN];
+  char payload[PUB_PAYLOAD_LEN];
+  bool used;
+};
+static PubQueueItem g_pub_queue[PUB_QUEUE_SIZE] = {};
+static int g_pub_queue_head = 0;
+static int g_pub_queue_tail = 0;
+
 // ==================== 前向声明 ====================
 static void init_wifi_sta();
 static void state_ap_provision();
@@ -88,6 +102,31 @@ static void ota_progress_mqtt_callback(OtaTarget target, int percent, OtaStatus 
 }
 
 // ==================== 前向声明（结束） ====================
+
+// ==================== 队列辅助函数 ====================
+static bool pub_queue_push(const char* topic, const char* payload) {
+  int next = (g_pub_queue_head + 1) % PUB_QUEUE_SIZE;
+  if (next == g_pub_queue_tail) {
+    Serial.println("[PUB-Q] Queue full, dropping message");
+    return false;
+  }
+  strncpy(g_pub_queue[g_pub_queue_head].topic, topic, PUB_TOPIC_LEN - 1);
+  strncpy(g_pub_queue[g_pub_queue_head].payload, payload, PUB_PAYLOAD_LEN - 1);
+  g_pub_queue[g_pub_queue_head].used = true;
+  g_pub_queue_head = next;
+  return true;
+}
+
+static void pub_queue_process() {
+  if (g_pub_queue_tail == g_pub_queue_head) return; // 空队列
+  PubQueueItem* item = &g_pub_queue[g_pub_queue_tail];
+  if (item->used) {
+    mqtt_publish(item->topic, item->payload, strlen(item->payload), 0, 0);
+    Serial.printf("[PUB-Q] Sent %s (%d bytes)\n", item->topic, strlen(item->payload));
+    item->used = false;
+  }
+  g_pub_queue_tail = (g_pub_queue_tail + 1) % PUB_QUEUE_SIZE;
+}
 
 // ==================== SmartConfig ====================
 #ifdef CHIP_ESP32C3
@@ -194,6 +233,9 @@ void loop() {
 
   // 1. UART 数据处理（最优先）
   uart_protocol_process();
+
+  // 1.5 处理 UART 发布队列（mqtt_publish 阻塞，不能在 UART 回调中调用）
+  pub_queue_process();
 
   // 2. 按键检测
   check_button();
@@ -523,9 +565,9 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
 
       if (strlen(topic) > 0) {
         // 替换 payload 中的 firmware_esp 为实际版本号
-        const char* send_payload = payload;
         char final_payload[FRAME_DATA_MAX - 80];
         const char* esp_ver = ota_get_esp_version();
+        const char* send_payload = payload;
         char* esp_pos = strstr(payload, "\"firmware_esp\"");
         if (esp_pos) {
           // 找到 "firmware_esp":"xxx" 并替换版本号
@@ -550,14 +592,16 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
             }
           }
         }
-        mqtt_publish(topic, send_payload, strlen(send_payload), 0, 0);
+        // 先回复 ACK，再入队（mqtt_publish 会阻塞 TLS，不能在 UART 回调中调用）
+        uart_send_ack();
+        pub_queue_push(topic, send_payload);
         led_signal_data();    // LED2 短暂闪一下表示有数据活动
-        Serial.printf("[UART] PUBLISH -> cs_inv/%s/%s (%d bytes)\n",
+        Serial.printf("[UART] PUBLISH queued -> cs_inv/%s/%s (%d bytes)\n",
                       g_device_sn, topic, strlen(send_payload));
       } else {
         Serial.println("[UART] PUBLISH error: topic empty");
+        uart_send_ack();
       }
-      uart_send_ack();
       break;
     }
 
