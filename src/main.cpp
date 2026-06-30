@@ -639,6 +639,11 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
       arm_ota_handle_uart(cmd, data, len);
       break;
 
+    // ARM 回复的 ACK/NACK，忽略不处理
+    case CMD_ACK:
+    case CMD_NACK:
+      break;
+
     // ARM 命令执行结果，转发到 MQTT
     case CMD_COMMAND_SEND: {
       char json[FRAME_DATA_MAX];
