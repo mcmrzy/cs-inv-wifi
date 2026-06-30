@@ -102,7 +102,7 @@ class SimulatorProvider extends ChangeNotifier {
         _uartService.processReceivedData(Uint8List.fromList(data));
       });
 
-      // 设置写入回调（循环写入直到全部发送）
+      // 设置写入回调（循环写入，每批之间加延迟防止ESP32 FIFO溢出）
       _uartService.setWriteCallback((Uint8List data) {
         if (_serialPort != null && _serialPort!.isOpen) {
           try {
@@ -115,6 +115,10 @@ class SimulatorProvider extends ChangeNotifier {
                 break;
               }
               offset += written;
+              // 大帧分批写入，给ESP32 UART FIFO腾出空间
+              if (offset < data.length) {
+                Future.delayed(const Duration(milliseconds: 5));
+              }
             }
           } catch (e) {
             _addLog('[ERR] 写入异常: $e');
