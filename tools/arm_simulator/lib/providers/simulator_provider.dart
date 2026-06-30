@@ -102,13 +102,19 @@ class SimulatorProvider extends ChangeNotifier {
         _uartService.processReceivedData(Uint8List.fromList(data));
       });
 
-      // 设置写入回调
+      // 设置写入回调（循环写入直到全部发送）
       _uartService.setWriteCallback((Uint8List data) {
         if (_serialPort != null && _serialPort!.isOpen) {
           try {
-            final written = _serialPort!.write(data, timeout: 1000);
-            if (written != data.length) {
-              _addLog('[WARN] 写入不完整: ${written}/${data.length}');
+            int offset = 0;
+            while (offset < data.length) {
+              final chunk = data.sublist(offset);
+              final written = _serialPort!.write(chunk, timeout: 1000);
+              if (written <= 0) {
+                _addLog('[ERR] 写入失败: 已写${offset}/${data.length}');
+                break;
+              }
+              offset += written;
             }
           } catch (e) {
             _addLog('[ERR] 写入异常: $e');
