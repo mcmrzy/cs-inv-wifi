@@ -26,6 +26,7 @@ static bool     g_rx_esc_next = false;  // 下一个字节需要转义解码
 // ==================== 初始化 ====================
 void uart_protocol_init() {
 #ifdef CHIP_ESP32C3
+  Serial1.setRxBufferSize(2048);  // 增大接收缓冲区，防止大帧溢出
   Serial1.begin(UART_BAUDRATE, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
   Serial.printf("[UART] ESP32-C3: Serial1 TX=GPIO%d, RX=GPIO%d, baud=%d\n", 
                 PIN_UART_TX, PIN_UART_RX, UART_BAUDRATE);
@@ -98,7 +99,6 @@ void uart_protocol_process() {
       } else if (b == FRAME_ESC_ESCAPE) {
         b = FRAME_ESCAPE;
       }
-      // 不在此处计算 XOR，由状态机统一处理（避免双重 XOR）
     }
 
     switch (g_rx_state) {
@@ -152,8 +152,8 @@ void uart_protocol_process() {
             g_frame_callback(g_rx_cmd, g_rx_data_buf, g_rx_data_len);
           }
         } else {
-          Serial.printf("[UART] XOR error: got 0x%02X, expected 0x%02X, cmd=0x%02X\n",
-                        b, g_rx_xor, g_rx_cmd);
+          Serial.printf("[UART] XOR error: got=0x%02X expected=0x%02X cmd=0x%02X len=%d\n",
+                        b, g_rx_xor, g_rx_cmd, g_rx_data_len);
         }
         break;
     }
