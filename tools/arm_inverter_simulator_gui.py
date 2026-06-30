@@ -2448,9 +2448,12 @@ class SimulatorGUI:
             now = time.time()
             if now - self._last_pub >= self.pub_interval:
                 self._last_pub = now
-                if not self._first_pub_done: self._first_pub_done = True; self._pub_topic('info')
-                topic = self._pub_topics[self._pub_topic_index % len(self._pub_topics)]
-                self._pub_topic_index += 1; self._pub_topic(topic)
+                if not self._first_pub_done:
+                    self._first_pub_done = True
+                    self._pub_topic('info')
+                # 一次发送所有主题
+                for topic in self._pub_topics:
+                    self._pub_topic(topic)
         for name, (lbl, getter) in self.param_labels.items():
             try: lbl.configure(text=getter())
             except: pass
