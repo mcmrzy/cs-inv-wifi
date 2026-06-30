@@ -325,6 +325,9 @@ class SimulatorProvider extends ChangeNotifier {
       case CommandCodes.armOtaEnd:
         _handleOtaEnd();
         break;
+      case CommandCodes.ack:
+      case CommandCodes.nack:
+        break;
       default:
         _uartService.sendNack();
     }
