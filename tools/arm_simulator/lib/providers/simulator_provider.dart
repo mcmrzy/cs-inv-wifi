@@ -102,24 +102,13 @@ class SimulatorProvider extends ChangeNotifier {
         _uartService.processReceivedData(Uint8List.fromList(data));
       });
 
-      // 设置写入回调（异步逐批写入+延迟，防止USB串口驱动丢数据）
+      // 设置写入回调（逐字节写入，彻底排除USB串口驱动缓冲区问题）
       _uartService.setWriteCallback((Uint8List data) async {
         if (_serialPort != null && _serialPort!.isOpen) {
           try {
-            const chunkSize = 50;
-            int offset = 0;
-            while (offset < data.length) {
-              final end = (offset + chunkSize < data.length) ? offset + chunkSize : data.length;
-              final chunk = data.sublist(offset, end);
-              final written = _serialPort!.write(chunk, timeout: 1000);
-              if (written <= 0) {
-                _addLog('[ERR] 写入失败: 已写${offset}/${data.length}');
-                break;
-              }
-              offset += written;
-              if (offset < data.length) {
-                await Future.delayed(const Duration(milliseconds: 2));
-              }
+            for (int i = 0; i < data.length; i++) {
+              final singleByte = Uint8List.fromList([data[i]]);
+              _serialPort!.write(singleByte, timeout: 1000);
             }
           } catch (e) {
             _addLog('[ERR] 写入异常: $e');
