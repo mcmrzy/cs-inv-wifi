@@ -44,9 +44,9 @@ class UartService {
   final List<int> _rxBuffer = [];
   bool _rxEscNext = false;
 
-  Function(Uint8List)? _writeCallback;
+  FutureOr<void> Function(Uint8List)? _writeCallback;
 
-  void setWriteCallback(Function(Uint8List)? callback) {
+  void setWriteCallback(FutureOr<void> Function(Uint8List)? callback) {
     _writeCallback = callback;
   }
 
@@ -95,7 +95,7 @@ class UartService {
     }
     try {
       final frame = _buildFrame(command, data);
-      _writeCallback!(frame);
+      await _writeCallback!(frame);
       final hexStr = frame.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
       _log('TX: CMD=0x${command.toRadixString(16).padLeft(2, '0')} LEN=${data.length} [$hexStr]');
       return true;

@@ -102,22 +102,23 @@ class SimulatorProvider extends ChangeNotifier {
         _uartService.processReceivedData(Uint8List.fromList(data));
       });
 
-      // 设置写入回调（循环写入，每批之间加延迟防止ESP32 FIFO溢出）
-      _uartService.setWriteCallback((Uint8List data) {
+      // 设置写入回调（异步逐批写入+延迟，防止USB串口驱动丢数据）
+      _uartService.setWriteCallback((Uint8List data) async {
         if (_serialPort != null && _serialPort!.isOpen) {
           try {
+            const chunkSize = 50;
             int offset = 0;
             while (offset < data.length) {
-              final chunk = data.sublist(offset);
+              final end = (offset + chunkSize < data.length) ? offset + chunkSize : data.length;
+              final chunk = data.sublist(offset, end);
               final written = _serialPort!.write(chunk, timeout: 1000);
               if (written <= 0) {
                 _addLog('[ERR] 写入失败: 已写${offset}/${data.length}');
                 break;
               }
               offset += written;
-              // 大帧分批写入，给ESP32 UART FIFO腾出空间
               if (offset < data.length) {
-                Future.delayed(const Duration(milliseconds: 5));
+                await Future.delayed(const Duration(milliseconds: 2));
               }
             }
           } catch (e) {
