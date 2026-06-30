@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-// 命令码定义
 class CommandCodes {
   static const int setBroker = 0x01;
   static const int publish = 0x02;
@@ -25,46 +24,33 @@ class CommandCodes {
 class UartFrame {
   final int command;
   final Uint8List data;
-
   UartFrame({required this.command, required this.data});
 }
 
-enum RxState { waitHeader, waitData }
-
 class UartService {
-  // 协议常量 (与ESP32一致)
   static const int frameHeader = 0xAA;
   static const int frameEscape = 0x01;
-  static const int escHeader = 0x01;   // 0xAA -> 0x01 0x01
-  static const int escEscape = 0x00;   // 0x01 -> 0x01 0x00
+  static const int escHeader = 0x01;
+  static const int escEscape = 0x00;
   static const int maxDataLen = 1024;
 
-  // 数据流控制器
   final _frameController = StreamController<UartFrame>.broadcast();
   final _logController = StreamController<String>.broadcast();
   
   Stream<UartFrame> get frameStream => _frameController.stream;
   Stream<String> get logStream => _logController.stream;
 
-  // 接收状态机
-  RxState _rxState = RxState.waitHeader;
-  int _rxCmd = 0;
-  int _rxDataLen = 0;
-  int _rxDataIdx = 0;
-  List<int> _rxDataBuf = [];
-  int _rxXor = 0;
+  // 接收缓冲区（直接存储原始字节，最后统一解析）
+  final List<int> _rxBuffer = [];
   bool _rxEscNext = false;
 
-  // 串口写入回调
   Function(Uint8List)? _writeCallback;
 
-  /// 设置串口写入回调
   void setWriteCallback(Function(Uint8List)? callback) {
     _writeCallback = callback;
   }
 
-  /// 计算XOR校验 (与ESP32一致: 包括header)
-  int _calcXor(int cmd, int lenHigh, int lenLow, Uint8List data) {
+  int _calcXor(int cmd, int lenHigh, int lenLow, List<int> data) {
     int x = frameHeader ^ cmd ^ lenHigh ^ lenLow;
     for (var byte in data) {
       x ^= byte;
@@ -72,7 +58,6 @@ class UartService {
     return x & 0xFF;
   }
 
-  /// 写入转义字节
   void _writeEscaped(BytesBuilder buffer, int b) {
     if (b == frameHeader) {
       buffer.addByte(frameEscape);
@@ -85,40 +70,26 @@ class UartService {
     }
   }
 
-  /// 构建帧 (带转义)
   Uint8List _buildFrame(int command, Uint8List data) {
     final len = data.length;
     final lenHigh = (len >> 8) & 0xFF;
     final lenLow = len & 0xFF;
-    final xor = _calcXor(command, lenHigh, lenLow, data);
+    final xor = _calcXor(command, lenHigh, lenLow, data.toList());
     
     final buffer = BytesBuilder();
-    
-    // Header (不转义)
     buffer.addByte(frameHeader);
-    // Command (转义)
     _writeEscaped(buffer, command);
-    // Length high (转义)
     _writeEscaped(buffer, lenHigh);
-    // Length low (转义)
     _writeEscaped(buffer, lenLow);
-    // Data (转义)
     for (var byte in data) {
       _writeEscaped(buffer, byte);
     }
-    // XOR (转义)
     _writeEscaped(buffer, xor);
-
     return buffer.toBytes();
   }
 
-  /// 发送帧
   Future<bool> sendFrame(int command, Uint8List data) async {
-    if (_writeCallback == null) {
-      _log('[WARN] 未设置串口写入回调');
-      return false;
-    }
-
+    if (_writeCallback == null) return false;
     try {
       final frame = _buildFrame(command, data);
       _writeCallback!(frame);
@@ -130,103 +101,68 @@ class UartService {
     }
   }
 
-  /// 发送ACK
-  Future<bool> sendAck() async {
-    return sendFrame(CommandCodes.ack, Uint8List(0));
-  }
+  Future<bool> sendAck() => sendFrame(CommandCodes.ack, Uint8List(0));
+  Future<bool> sendNack() => sendFrame(CommandCodes.nack, Uint8List(0));
 
-  /// 发送NACK
-  Future<bool> sendNack() async {
-    return sendFrame(CommandCodes.nack, Uint8List(0));
-  }
-
-  /// 处理接收到的数据 (带转义解码)
   void processReceivedData(Uint8List data) {
     for (var byte in data) {
       _processByte(byte);
     }
   }
 
-  /// 处理单个字节
   void _processByte(int b) {
-    // 转义解码 (在非等待帧头状态下)
-    if (_rxState != RxState.waitHeader && !_rxEscNext && b == frameEscape) {
+    // 转义处理
+    if (_rxEscNext) {
+      _rxEscNext = false;
+      if (b == escHeader) b = frameHeader;
+      else if (b == escEscape) b = frameEscape;
+    } else if (b == frameEscape) {
       _rxEscNext = true;
       return;
     }
-    
-    if (_rxEscNext) {
-      _rxEscNext = false;
-      if (b == escHeader) {
-        b = frameHeader;
-      } else if (b == escEscape) {
-        b = frameEscape;
-      }
+
+    // 查找帧头
+    if (b == frameHeader) {
+      _rxBuffer.clear();
+      return;
     }
 
-    switch (_rxState) {
-      case RxState.waitHeader:
-        if (b == frameHeader) {
-          _rxState = RxState.waitData;
-          _rxEscNext = false;
-        }
-        break;
+    // 收集数据
+    _rxBuffer.add(b);
 
-      case RxState.waitData:
-        // 第1个字节: 命令码
-        if (_rxCmd == 0 && _rxDataLen == 0 && _rxDataIdx == 0) {
-          _rxCmd = b;
-        }
-        // 第2个字节: 长度高字节
-        else if (_rxDataLen == 0 && _rxDataIdx == 0) {
-          _rxDataLen = b << 8;
-        }
-        // 第3个字节: 长度低字节
-        else if (_rxDataIdx == 0) {
-          _rxDataLen |= b;
-          if (_rxDataLen > maxDataLen) {
-            _resetRxState();
-            _log('[WARN] 数据长度超限: $_rxDataLen');
-          }
-        }
-        // 数据字节
-        else if (_rxDataIdx < _rxDataLen) {
-          _rxDataBuf.add(b);
-          _rxDataIdx++;
-        }
-        // XOR校验字节
-        else {
-          _rxXor = b;
-          _validateFrame();
-        }
-        break;
+    // 检查是否收到完整帧: cmd(1) + len_h(1) + len_l(1) + data(N) + xor(1) = N+4
+    if (_rxBuffer.length < 4) return;
+
+    final cmd = _rxBuffer[0];
+    final lenHigh = _rxBuffer[1];
+    final lenLow = _rxBuffer[2];
+    final dataLen = (lenHigh << 8) | lenLow;
+
+    // 数据长度检查
+    if (dataLen > maxDataLen) {
+      _log('[WARN] 数据长度超限: $dataLen');
+      _rxBuffer.clear();
+      return;
     }
-  }
 
-  /// 验证帧
-  void _validateFrame() {
-    final data = Uint8List.fromList(_rxDataBuf);
-    final expectedXor = _calcXor(_rxCmd, (_rxDataLen >> 8) & 0xFF, _rxDataLen & 0xFF, data);
+    // 检查是否收齐
+    if (_rxBuffer.length < dataLen + 4) return;
+
+    // 提取数据和XOR
+    final dataList = _rxBuffer.sublist(3, 3 + dataLen);
+    final receivedXor = _rxBuffer[3 + dataLen];
+
+    // 验证XOR
+    final expectedXor = _calcXor(cmd, lenHigh, lenLow, dataList);
     
-    if (_rxXor == expectedXor) {
-      _frameController.add(UartFrame(command: _rxCmd, data: data));
-      _log('RX: CMD=0x${_rxCmd.toRadixString(16).padLeft(2, '0')} LEN=$_rxDataLen');
+    if (receivedXor == expectedXor) {
+      _frameController.add(UartFrame(command: cmd, data: Uint8List.fromList(dataList)));
+      _log('RX: CMD=0x${cmd.toRadixString(16).padLeft(2, '0')} LEN=$dataLen');
     } else {
-      _log('[WARN] XOR校验失败: 期望=0x${expectedXor.toRadixString(16)} 收到=0x${_rxXor.toRadixString(16)}');
+      _log('[WARN] XOR校验失败: 期望=0x${expectedXor.toRadixString(16)} 收到=0x${receivedXor.toRadixString(16)}');
     }
-    
-    _resetRxState();
-  }
 
-  /// 重置接收状态
-  void _resetRxState() {
-    _rxState = RxState.waitHeader;
-    _rxCmd = 0;
-    _rxDataLen = 0;
-    _rxDataIdx = 0;
-    _rxDataBuf = [];
-    _rxXor = 0;
-    _rxEscNext = false;
+    _rxBuffer.clear();
   }
 
   void _log(String message) {
