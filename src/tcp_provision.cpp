@@ -813,6 +813,10 @@ static void handle_ota_upload(HttpClientSlot& slot) {
 
   bool is_esp = (strcmp(target, "esp") == 0);
 
+  // 上报OTA开始状态
+  ota_set_status(is_esp ? OTA_STATUS_DOWNLOADING : OTA_STATUS_WRITING, 0, 
+    is_esp ? "准备ESP升级" : "准备ARM升级");
+
   if (is_esp) {
     if (!Update.begin(estimated_size)) {
       send_http_response(client, 500, "application/json",
@@ -860,6 +864,8 @@ static void handle_ota_upload(HttpClientSlot& slot) {
   unsigned long timeout_start = millis();
   int stream_buf_len = 0;
   bool found_end = false;
+  int last_progress = 0;
+  int total_size = estimated_size;
 
   while (remaining > 0 && !found_end && (millis() - timeout_start) < 60000) {
     if (client.available()) {
@@ -879,6 +885,15 @@ static void handle_ota_upload(HttpClientSlot& slot) {
                 arm_ota_feed(g_ota_stream_buf, i);
               }
               written += i;
+              // 更新进度
+              if (total_size > 0) {
+                int progress = (written * 100) / total_size;
+                if (progress >= last_progress + 10) {
+                  last_progress = progress;
+                  ota_set_status(OTA_STATUS_WRITING, progress,
+                    String(String(is_esp ? "ESP" : "ARM") + " 写入中: " + String(progress) + "%").c_str());
+                }
+              }
             }
             found_end = true;
             break;
@@ -919,11 +934,13 @@ static void handle_ota_upload(HttpClientSlot& slot) {
   if (is_esp) {
     if (!Update.end(true)) {
       led1_set(LED_OFF);
+      ota_set_status(OTA_STATUS_ERROR, 0, "ESP固件校验失败");
       send_http_response(client, 500, "application/json",
                          "{\"result\":\"error\",\"message\":\"校验失败\"}");
       return;
     }
     led1_set(LED_OFF);
+    ota_set_status(OTA_STATUS_DONE, 100, "ESP升级成功，重启中");
     send_http_response(client, 200, "application/json",
                        "{\"result\":\"ok\",\"message\":\"ESP OTA 成功，重启中\"}");
     delay(1000);
@@ -931,6 +948,7 @@ static void handle_ota_upload(HttpClientSlot& slot) {
   } else {
     arm_ota_end_streaming();
     led1_set(LED_OFF);
+    ota_set_status(OTA_STATUS_VERIFYING, 100, "ARM固件已传输，等待校验");
     send_http_response(client, 200, "application/json",
                        "{\"result\":\"ok\",\"message\":\"ARM 固件已传输，等待校验\"}");
   }
