@@ -525,15 +525,20 @@ static void handle_ota_page(WiFiClient& client) {
 
 // GET /ota/progress - 查询 OTA 进度
 static void handle_ota_progress(WiFiClient& client) {
-  char resp[256];
+  char resp[512];
 
   // 首次请求时检查NVS是否有保存的OTA结果（ESP重启后）
   if (!g_ota_result_served) {
     OtaResult saved;
     if (ota_result_load(&saved)) {
       snprintf(resp, sizeof(resp),
-               "{\"target\":\"esp\",\"progress\":100,\"status\":\"%s\",\"message\":\"%s\",\"version\":\"%s\"}",
-               saved.status, saved.message, saved.version);
+               "{\"status\":\"%s\",\"progress\":100,\"message\":\"%s\","
+               "\"version\":\"%s\",\"target_chip\":\"esp\","
+               "\"firmware_esp\":\"%s\",\"firmware_arm\":\"%s\","
+               "\"main_version\":\"%s\"}",
+               saved.status, saved.message, saved.version,
+               ota_get_esp_version(), ota_get_arm_version(),
+               ota_get_esp_version());
       send_http_response(client, 200, "application/json", resp);
       ota_result_clear();
       g_ota_result_served = true;
@@ -565,23 +570,28 @@ static void handle_ota_progress(WiFiClient& client) {
   }
 
   snprintf(resp, sizeof(resp),
-           "{\"target\":\"%s\",\"progress\":%d,\"status\":\"%s\",\"message\":\"%s\"}",
-           target_str, ota_get_progress(), status_str, ota_get_message());
+           "{\"status\":\"%s\",\"progress\":%d,\"message\":\"%s\","
+           "\"target_chip\":\"%s\"}",
+           status_str, ota_get_progress(), ota_get_message(), target_str);
   send_http_response(client, 200, "application/json", resp);
 }
 
 // GET /ota/info - 查询设备固件信息
 static void handle_ota_info(WiFiClient& client) {
-  char resp[256];
+  char resp[512];
   snprintf(resp, sizeof(resp),
-           "{\"esp_version\":\"%s\",\"arm_version\":\"%s\",\"free_heap\":%d,\"chip\":\"%s\"}",
-           ota_get_esp_version(), ota_get_arm_version(), ESP.getFreeHeap(),
-#ifdef CHIP_ESP32C3
-           "ESP32-C3"
-#else
-           "ESP8266"
-#endif
-  );
+           "{\"model\":\"CS-I10-6k2\","
+           "\"sn\":\"%s\","
+           "\"manufacturer\":\"CSKJ\","
+           "\"firmware_esp\":\"%s\","
+           "\"firmware_arm\":\"%s\","
+           "\"main_version\":\"%s\","
+           "\"hardware_version\":\"V1.0\","
+           "\"protocol_version\":2}",
+           g_device_sn,
+           ota_get_esp_version(),
+           ota_get_arm_version(),
+           ota_get_esp_version());
   send_http_response(client, 200, "application/json", resp);
 }
 
@@ -962,9 +972,12 @@ static void handle_ota_upload(HttpClientSlot& slot) {
     }
     led1_set(LED_OFF);
     ota_set_status(OTA_STATUS_DONE, 100, "ESP升级成功，重启中");
+    // 保存结果到NVS，重启后APP轮询时可读取
+    ota_result_save("done", FIRMWARE_VERSION, "ESP升级完成");
+    Serial.printf("[OTA] Result saved to NVS: version=%s\n", FIRMWARE_VERSION);
     send_http_response(client, 200, "application/json",
                        "{\"result\":\"ok\",\"message\":\"ESP OTA 成功，重启中\"}");
-    delay(500);  // 等HTTP响应发出
+    delay(500);
     ESP.restart();
   } else {
     arm_ota_end_streaming();

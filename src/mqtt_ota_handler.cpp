@@ -527,12 +527,10 @@ void mqtt_ota_report_status(const char* target, const char* state, int progress,
                             const char* detail) {
 
   StaticJsonDocument<256> doc;
-  doc["device_id"] = mqtt_get_client_id();
-  doc["current_version"] = FIRMWARE_VERSION;
+  doc["target"] = target;
   doc["state"] = state;
   doc["progress"] = progress;
-  doc["status_message"] = detail;
-  doc["error_message"] = "";
+  doc["message"] = detail;
 
   String payload;
   serializeJson(doc, payload);
