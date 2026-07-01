@@ -524,24 +524,21 @@ static void handle_ota_page(WiFiClient& client) {
 // GET /ota/progress - 查询 OTA 进度
 static void handle_ota_progress(WiFiClient& client) {
   char resp[256];
-  const char* target_str = "none";
+  const char* target_str = ota_get_esp_version();  // 返回当前版本号
   const char* status_str = "idle";
 
   if (ota_is_busy()) {
-    target_str = (ota_get_target() == OTA_TARGET_ESP) ? "esp" : "arm";    
     switch (ota_get_status()) {
       case OTA_STATUS_DOWNLOADING: status_str = "downloading"; break;
-      case OTA_STATUS_WRITING:     status_str = "writing"; break;
+      case OTA_STATUS_WRITING:     status_str = "uploading"; break;  // APP期望uploading
       case OTA_STATUS_VERIFYING:   status_str = "verifying"; break;
       case OTA_STATUS_DONE:        status_str = "done"; break;
       case OTA_STATUS_ERROR:       status_str = "error"; break;
       default:                     status_str = "idle"; break;
     }
   } else if (ota_get_status() == OTA_STATUS_DONE) {
-    target_str = (ota_get_target() == OTA_TARGET_ESP) ? "esp" : "arm";
     status_str = "done";
   } else if (ota_get_status() == OTA_STATUS_ERROR) {
-    target_str = (ota_get_target() == OTA_TARGET_ESP) ? "esp" : "arm";
     status_str = "error";
   }
 
