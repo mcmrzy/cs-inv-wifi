@@ -728,6 +728,14 @@ bool ota_is_busy() {
   return g_esp_ota_active || g_arm_ota_active;
 }
 
+void ota_set_status(OtaStatus status, int progress, const char* message) {
+  set_state(status, message);
+  g_ota_progress = progress;
+  g_ota_target = OTA_TARGET_ESP;
+  g_esp_ota_active = (status != OTA_STATUS_IDLE && status != OTA_STATUS_DONE && status != OTA_STATUS_ERROR);
+  notify_callback(OTA_TARGET_ESP, progress, status, message);
+}
+
 const char* ota_get_esp_version() {
   return FIRMWARE_VERSION;
 }

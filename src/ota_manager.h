@@ -49,6 +49,9 @@ void ota_manager_process();
 // 检查是否正在 OTA
 bool ota_is_busy();
 
+// 外部设置 OTA 状态和进度（用于 HTTP 本地 OTA）
+void ota_set_status(OtaStatus status, int progress, const char* message);
+
 // 获取设备固件信息
 const char* ota_get_esp_version();
 const char* ota_get_arm_version();
