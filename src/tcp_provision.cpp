@@ -943,8 +943,7 @@ static void handle_ota_upload(HttpClientSlot& slot) {
     ota_set_status(OTA_STATUS_DONE, 100, "ESP升级成功，重启中");
     send_http_response(client, 200, "application/json",
                        "{\"result\":\"ok\",\"message\":\"ESP OTA 成功，重启中\"}");
-    // 等待5秒让APP轮询到done状态，然后重启
-    delay(5000);
+    delay(500);  // 等HTTP响应发出
     ESP.restart();
   } else {
     arm_ota_end_streaming();
