@@ -120,6 +120,7 @@ class SimulatorProvider extends ChangeNotifier {
       });
 
       _addLog('[SYS] 已连接到 $_selectedPort (115200 8N1)');
+      _updatePubTimer();  // 启动发布定时器
       notifyListeners();
     } catch (e) {
       _addLog('[ERR] 连接失败: $e');
@@ -134,6 +135,7 @@ class SimulatorProvider extends ChangeNotifier {
       _uartService.setWriteCallback(null);
       _serialPort!.close();
       _serialPort = null;
+      _updatePubTimer();  // 停止发布定时器
       _addLog('[SYS] 已断开连接');
       notifyListeners();
     }
