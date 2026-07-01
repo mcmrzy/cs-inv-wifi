@@ -10,6 +10,7 @@
 #include "arm_ota.h"
 #include "led_status.h"
 #include "uart_protocol.h"
+#include "ota_result.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -411,6 +412,9 @@ static void handle_esp_ota_download(HTTPClient* http, int content_length,
 
   Serial.println("[MQTT-OTA-ESP] 升级成功，设备即将重启");
   mqtt_ota_report_status("esp", "done", 100, "升级成功，重启中");
+  // 保存结果到NVS，重启后APP可通过HTTP轮询读取
+  ota_result_save("done", FIRMWARE_VERSION, "ESP升级完成");
+  Serial.printf("[MQTT-OTA] Result saved to NVS\n");
   led1_set(LED_OFF);
 
   // 重启前等待消息发送
