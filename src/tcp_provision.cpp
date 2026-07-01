@@ -4,6 +4,7 @@
 #include "ota_manager.h"
 #include "arm_ota.h"
 #include "led_status.h"
+#include "ota_result.h"
 #include <string.h>
 #include <Arduino.h>
 #include <Update.h>
@@ -12,6 +13,7 @@ extern char g_device_sn[];
 
 static WiFiServer* g_server = nullptr;
 static ProvisionCallback g_cb = nullptr;
+static bool g_ota_result_served = false;  // 首次查询后置true
 
 // 多连接支持：同时处理多个 HTTP 请求（浏览器常并行发起多个请求）
 #define MAX_HTTP_CLIENTS 4
@@ -524,6 +526,23 @@ static void handle_ota_page(WiFiClient& client) {
 // GET /ota/progress - 查询 OTA 进度
 static void handle_ota_progress(WiFiClient& client) {
   char resp[256];
+
+  // 首次请求时检查NVS是否有保存的OTA结果（ESP重启后）
+  if (!g_ota_result_served) {
+    OtaResult saved;
+    if (ota_result_load(&saved)) {
+      snprintf(resp, sizeof(resp),
+               "{\"target\":\"esp\",\"progress\":100,\"status\":\"%s\",\"message\":\"%s\",\"version\":\"%s\"}",
+               saved.status, saved.message, saved.version);
+      send_http_response(client, 200, "application/json", resp);
+      ota_result_clear();
+      g_ota_result_served = true;
+      return;
+    }
+    g_ota_result_served = true;
+  }
+
+  // 正常返回实时进度
   const char* target_str = "none";
   const char* status_str = "idle";
 
@@ -696,10 +715,12 @@ static void handle_ota_upload(HttpClientSlot& slot) {
     }
 
     led1_set(LED_OFF);
-    ota_set_status(OTA_STATUS_DONE, 100, "升级成功，重启中");
+    ota_set_status(OTA_STATUS_DONE, 100, "ESP升级成功，重启中");
+    // 保存结果到NVS，重启后APP轮询时可读取
+    ota_result_save("done", FIRMWARE_VERSION, "ESP升级完成");
     send_http_response(client, 200, "application/json",
                        "{\"result\":\"ok\",\"message\":\"ESP OTA 成功，重启中\"}");
-    delay(1000);
+    delay(500);
     ESP.restart();
     return;
   }
