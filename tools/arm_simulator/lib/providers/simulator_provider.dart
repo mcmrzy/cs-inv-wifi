@@ -368,7 +368,7 @@ class SimulatorProvider extends ChangeNotifier {
   void _handleCommand(Uint8List data) {
     try {
       final json = jsonDecode(utf8.decode(data));
-      final cmd = json['cmd'] as String;
+      final cmd = (json['cmd'] ?? json['command'] ?? '') as String;
       final params = json['params'] as Map<String, dynamic>? ?? {};
       final taskId = json['task_id'] as String? ?? '';
 
@@ -386,6 +386,12 @@ class SimulatorProvider extends ChangeNotifier {
           break;
         case 'reset':
           _handleReset(taskId);
+          break;
+        case 'get_params':
+          _handleGetParams(taskId);
+          break;
+        case 'set_params':
+          _handleSetParams(params, taskId);
           break;
         default:
           _addLog('[WARN] 未知命令: $cmd');
@@ -432,6 +438,57 @@ class SimulatorProvider extends ChangeNotifier {
     _sendCmdResult(taskId, 'reset', true, '逆变器已重置');
   }
 
+  void _handleGetParams(String taskId) {
+    // 返回当前设备参数
+    final data = {
+      'soc': _inverterData.soc,
+      'soh': _inverterData.soh,
+      'voltage': _inverterData.voltage,
+      'current': _inverterData.current,
+      'power': _inverterData.power,
+      'frequency': _inverterData.frequency,
+      'load_percent': _inverterData.loadPercent,
+      'temp_inv': _inverterData.tempInv,
+      'temp_mos': _inverterData.tempMos,
+      'battery_voltage': _inverterData.batteryVoltage,
+      'battery_current': _inverterData.batteryCurrent,
+      'pv1_power': _inverterData.pv1Power,
+      'pv2_power': _inverterData.pv2Power,
+      'runtime_hours': _inverterData.runtimeHours,
+      'state': _inverterData.mode.name,
+      'fault_code': _inverterData.faultCode,
+      'alarm_code': _inverterData.alarmCode,
+    };
+    _addLog('[RX] get_params');
+    _uartService.sendAck();
+    _sendCmdResult(taskId, 'get_params', true, '参数已获取', data);
+  }
+
+  void _handleSetParams(Map<String, dynamic> params, String taskId) {
+    // 应用远程控制参数
+    _addLog('[RX] set_params: $params');
+    
+    // 处理充电控制等参数
+    if (params.containsKey('charge_control')) {
+      _inverterData.remoteControls['charge_enable'] = params['charge_control'];
+    }
+    if (params.containsKey('discharge_control')) {
+      _inverterData.remoteControls['discharge_enable'] = params['discharge_control'];
+    }
+    if (params.containsKey('power_limit')) {
+      _inverterData.remoteControls['power_limit'] = params['power_limit'];
+    }
+    if (params.containsKey('max_charge_current')) {
+      _inverterData.remoteControls['max_charge_current'] = params['max_charge_current'];
+    }
+    if (params.containsKey('max_discharge_current')) {
+      _inverterData.remoteControls['max_discharge_current'] = params['max_discharge_current'];
+    }
+    
+    _uartService.sendAck();
+    _sendCmdResult(taskId, 'set_params', true, '参数已设置');
+  }
+
   void _handleSetSn(Uint8List data) {
     try {
       final sn = utf8.decode(data);
@@ -473,7 +530,7 @@ class SimulatorProvider extends ChangeNotifier {
     _uartService.sendFrame(CommandCodes.armOtaAck, Uint8List(0));
   }
 
-  void _sendCmdResult(String taskId, String cmd, bool success, String message) {
+  void _sendCmdResult(String taskId, String cmd, bool success, String message, [Map<String, dynamic>? data]) {
     final result = {
       'task_id': taskId,
       'cmd': cmd,
@@ -481,8 +538,11 @@ class SimulatorProvider extends ChangeNotifier {
       'message': message,
       'timestamp': DateTime.now().millisecondsSinceEpoch ~/ 1000,
     };
-    final data = utf8.encode(jsonEncode(result));
-    _uartService.sendFrame(CommandCodes.commandSend, Uint8List.fromList(data));
+    if (data != null) {
+      result['data'] = data;
+    }
+    final encoded = utf8.encode(jsonEncode(result));
+    _uartService.sendFrame(CommandCodes.commandSend, Uint8List.fromList(encoded));
     _addLog('[TX] CMD_RESULT: $cmd ${success ? "成功" : "失败"}');
   }
 

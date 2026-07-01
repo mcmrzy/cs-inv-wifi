@@ -738,11 +738,8 @@ static void on_mqtt_message(const char* topic, const char* payload, unsigned int
     }
   }
 
-  // 构造 JSON 转发给 ARM
-  char json[512];
-  int jslen = snprintf(json, sizeof(json),
-    "{\"topic\":\"%s\",\"payload\":\"%.*s\"}", sub, (int)len, payload);
-  uart_send_frame(CMD_COMMAND_RECV, (const uint8_t*)json, jslen);
+  // 直接转发原始 MQTT payload 给 ARM（不包装 JSON，避免嵌套引号问题）
+  uart_send_frame(CMD_COMMAND_RECV, (const uint8_t*)payload, len);
   Serial.printf("[MQTT→ARM] topic=%s len=%d\n", sub, len);
   Serial.printf("[MQTT→ARM] Payload: %.*s\n", (int)len, payload);
 }
