@@ -4,6 +4,7 @@
 #include "ota_manager.h"
 #include "arm_ota.h"
 #include "led_status.h"
+#include "mqtt_ota_handler.h"
 #include <string.h>
 #include <Arduino.h>
 #include <Update.h>
@@ -624,6 +625,9 @@ static void handle_ota_upload(HttpClientSlot& slot) {
 
     Serial.printf("[OTA-UPLOAD] ESP raw binary, size=%d\n", content_length);
 
+    // 上报OTA开始状态
+    mqtt_ota_report_status("esp", "preparing", 0, "准备升级");
+
     if (!Update.begin(content_length)) {
       send_http_response(client, 500, "application/json",
                          "{\"result\":\"error\",\"message\":\"Update 初始化失败\"}");
@@ -650,6 +654,10 @@ static void handle_ota_upload(HttpClientSlot& slot) {
     if (remaining < 0) remaining = 0;
 
     unsigned long timeout_start = millis();
+    int last_progress = 0;
+
+    // 上报下载中状态
+    mqtt_ota_report_status("esp", "downloading", 0, "正在写入固件");
 
     while (written < content_length && (millis() - timeout_start) < 60000) {
       if (client.available()) {
@@ -660,6 +668,13 @@ static void handle_ota_upload(HttpClientSlot& slot) {
         if (bytes_read > 0) {
           size_t w = Update.write(g_ota_stream_buf, bytes_read);
           written += w;
+          // 每10%上报一次进度
+          int progress = (written * 100) / content_length;
+          if (progress >= last_progress + 10) {
+            last_progress = progress;
+            mqtt_ota_report_status("esp", "downloading", progress, 
+              String("写入中: " + String(progress) + "%").c_str());
+          }
         }
       } else {
         delay(1);
@@ -678,12 +693,14 @@ static void handle_ota_upload(HttpClientSlot& slot) {
 
     if (!Update.end(true)) {
       led1_set(LED_OFF);
+      mqtt_ota_report_error("esp", "VERIFY_FAILED", "固件校验失败");
       send_http_response(client, 500, "application/json",
                          "{\"result\":\"error\",\"message\":\"校验失败\"}");
       return;
     }
 
     led1_set(LED_OFF);
+    mqtt_ota_report_status("esp", "done", 100, "升级成功，重启中");
     send_http_response(client, 200, "application/json",
                        "{\"result\":\"ok\",\"message\":\"ESP OTA 成功，重启中\"}");
     delay(1000);
