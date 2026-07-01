@@ -68,7 +68,7 @@ static unsigned long g_btn_press_start = 0;
 
 // ==================== UART PUBLISH 队列 ====================
 // mqtt_publish(TLS) 阻塞时间长，不能在 UART 回调中调用，否则 UART 缓冲区溢出
-#define PUB_QUEUE_SIZE 8
+#define PUB_QUEUE_SIZE 16
 #define PUB_TOPIC_LEN 64
 #define PUB_PAYLOAD_LEN 600
 struct PubQueueItem {
