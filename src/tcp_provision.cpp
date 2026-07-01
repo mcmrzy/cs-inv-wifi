@@ -37,9 +37,7 @@ static void handle_wifi_scan(WiFiClient& client);
 static void handle_status_page(WiFiClient& client);
 static void process_http_request(HttpClientSlot& slot);
 
-// ==================== 配网网页 HTML ====================
-// %SN_DISP% → 页面显示的 SN 文本
-// %DEV_LABEL% → 设备标签（真实SN显示完整，MAC显示CS_INV_xxxxxx）
+// ==================== 配网网页 HTML (精简版) ====================
 static const char PROVISION_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -48,183 +46,81 @@ static const char PROVISION_HTML[] PROGMEM = R"rawliteral(
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>逆变器配网</title>
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; 
-       background:linear-gradient(135deg,#0f2027,#203a43,#2c5364); min-height:100vh;
-       display:flex; align-items:center; justify-content:center; }
-.card { background:#fff; border-radius:16px; padding:30px 24px; width:92%; max-width:380px;
-        box-shadow:0 20px 60px rgba(0,0,0,.3); }
-.logo { text-align:center; margin-bottom:8px; }
-.logo .icon { font-size:42px; }
-.logo h2 { font-size:18px; color:#2c5364; margin-top:4px; }
-.sn { text-align:center; font-size:12px; color:#999; margin-bottom:20px; }
-.form-group { margin-bottom:16px; }
-.form-group label { display:block; font-size:13px; color:#555; margin-bottom:6px; font-weight:500; }
-.form-group input { width:100%; padding:12px 14px; border:2px solid #e0e0e0; border-radius:10px;
-                    font-size:15px; transition:border .2s; outline:none; }
-.form-group input:focus { border-color:#2c5364; }
-.form-group input.valid { border-color:#27ae60; background:#f0faf4; }
-.form-group input.invalid { border-color:#e74c3c; background:#fef5f5; }
-.sn-check { font-size:11px; margin-top:4px; min-height:16px; }
-.sn-check.ok { color:#27ae60; }
-.sn-check.err { color:#e74c3c; }
-.sn-hint { font-size:11px; color:#aaa; margin-top:2px; }
-.btn { width:100%; padding:14px; background:linear-gradient(135deg,#2c5364,#203a43);
-       color:#fff; border:none; border-radius:10px; font-size:16px; font-weight:600;
-       cursor:pointer; transition:opacity .2s; margin-top:6px; }
-.btn:active { opacity:.85; }
-.btn:disabled { opacity:.5; cursor:not-allowed; }
-.msg { text-align:center; font-size:13px; margin-top:14px; min-height:20px; }
-.msg.ok { color:#27ae60; }
-.msg.err { color:#e74c3c; }
-.hint { text-align:center; font-size:11px; color:#bbb; margin-top:12px; }
-.spinner { display:none; width:20px; height:20px; border:3px solid #ddd;
-           border-top-color:#2c5364; border-radius:50%; animation:spin .7s linear infinite;
-           margin:10px auto 0; }
-@keyframes spin { to{transform:rotate(360deg);} }
-.wifi-list { margin-bottom:14px; max-height:160px; overflow-y:auto; background:#f9f9f9;
-             border-radius:8px; padding:4px; }
-.wifi-item { display:flex; align-items:center; padding:10px 12px; cursor:pointer;
-             border-bottom:1px solid #eee; font-size:14px; color:#333; }
-.wifi-item:last-child { border-bottom:none; }
-.wifi-item:active { background:#e0eef5; }
-.wifi-item .rssi { margin-left:auto; font-size:11px; color:#999; }
-.wifi-item .lock { font-size:12px; margin-left:6px; }
-.scan-btn { width:100%; padding:10px; background:none; border:1px dashed #aaa; 
-            border-radius:8px; color:#777; font-size:13px; cursor:pointer; margin-bottom:14px; }
-.scan-btn:disabled { opacity:.5; }
-.status-link { display:block; text-align:center; padding:12px; margin-top:16px; 
-               background:linear-gradient(135deg,#f8f9fa,#e9ecef); color:#2c5364; 
-               font-size:14px; font-weight:500; text-decoration:none; 
-               border:2px solid #2c5364; border-radius:10px; }
-.status-link:active { background:#e0eef5; }
+body{font-family:-apple-system,sans-serif;background:#1a2a3a;color:#fff;margin:0;padding:20px;display:flex;justify-content:center;min-height:100vh}
+.c{background:#fff;color:#333;border-radius:12px;padding:24px;width:100%;max-width:360px}
+h2{text-align:center;color:#2c5364;margin-bottom:4px}
+.sn{text-align:center;font-size:12px;color:#999;margin-bottom:16px}
+.btn{width:100%;padding:12px;border:none;border-radius:8px;font-size:15px;cursor:pointer;margin-top:8px}
+.btn-p{background:#2c5364;color:#fff}
+.btn-s{background:none;border:1px dashed #aaa;color:#666}
+.btn:disabled{opacity:.5}
+input{width:100%;padding:10px;border:2px solid #ddd;border-radius:8px;font-size:14px;outline:none;box-sizing:border-box}
+input:focus{border-color:#2c5364}
+label{font-size:13px;color:#555;margin-bottom:4px;display:block}
+.msg{text-align:center;font-size:13px;margin-top:10px;min-height:18px}
+.ok{color:#27ae60}.err{color:#e74c3c}
+.wl{max-height:150px;overflow-y:auto;margin:8px 0;background:#f5f5f5;border-radius:8px}
+.wi{padding:10px 12px;cursor:pointer;border-bottom:1px solid #eee;font-size:14px;display:flex}
+.wi:last-child{border:none}
+.wi:active{background:#e0eef5}
+.wi span:last-child{margin-left:auto;font-size:11px;color:#999}
+a{display:block;text-align:center;padding:10px;margin-top:12px;color:#2c5364;text-decoration:none;border:1px solid #2c5364;border-radius:8px;font-size:14px}
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="logo">
-    <div class="icon">☀️</div>
-    <h2>辰烁科技逆变器 WiFi 配网</h2>
-  </div>
-  <div class="sn" id="snLine">%DEV_LABEL%</div>
-  <button class="scan-btn" id="scanBtn" onclick="scanWiFi()">📡 扫描附近 WiFi</button>
-  <div class="wifi-list" id="wifiList" style="display:none"></div>
-  <form id="configForm">
-    <div class="form-group">
-      <label>WiFi 名称 (SSID)</label>
-      <input type="text" id="ssid" placeholder="请输入 WiFi 名称" required autocomplete="off">
-    </div>
-    <div class="form-group">
-      <label>WiFi 密码</label>
-      <input type="password" id="pass" placeholder="请输入 WiFi 密码" autocomplete="off">
-    </div>
-    <button type="submit" class="btn" id="submitBtn">⚡ 保存并连接</button>
-  </form>
-  <div class="spinner" id="spinner"></div>
-  <div class="msg" id="msg"></div>
-  <a href="/status" class="status-link">📊 查看网络连接状态</a>
-  <a href="/ota" class="status-link" style="margin-top:8px;background:linear-gradient(135deg,#fff3e0,#ffe0b2);border-color:#e65100;color:#e65100;">🔄 固件升级</a>
-  <div class="hint">也可通过 辰烁科技App 配网</div>
+<div class="c">
+<h2>WiFi 配网</h2>
+<div class="sn">%DEV_LABEL%</div>
+<button class="btn btn-s" id="scanBtn" onclick="scan()">扫描 WiFi</button>
+<div class="wl" id="wl" style="display:none"></div>
+<form onsubmit="return cfg(this)">
+<label>WiFi 名称</label>
+<input name="s" placeholder="SSID" required autocomplete="off" style="margin-bottom:8px">
+<label>WiFi 密码</label>
+<input name="p" type="password" placeholder="密码" autocomplete="off">
+<button type="submit" class="btn btn-p" id="sub">保存并连接</button>
+</form>
+<div class="msg" id="msg"></div>
+<a href="/status">设备状态</a>
+<a href="/ota">固件升级</a>
 </div>
 <script>
-// ====== 原有功能 ======
-function showMsg(text, isOk) {
-  var m = document.getElementById('msg');
-  m.textContent = text;
-  m.className = 'msg ' + (isOk ? 'ok' : 'err');
+function msg(t,o){var m=document.getElementById('msg');m.textContent=t;m.className='msg '+(o?'ok':'err')}
+async function scan(){
+var b=document.getElementById('scanBtn'),l=document.getElementById('wl');
+b.disabled=true;b.textContent='扫描中...';l.style.display='none';l.innerHTML='';
+try{
+var r=await fetch('/scan'),d=await r.json();
+if(d.status==='scanning'){await new Promise(function(s){setTimeout(s,3000)});r=await fetch('/scan');d=await r.json()}
+if(d.networks&&d.networks.length>0){
+d.networks.sort(function(a,b){return b.rssi-a.rssi});
+d.networks.forEach(function(n){
+var div=document.createElement('div');div.className='wi';
+div.innerHTML='<span>'+(n.enc?'\uD83D\uDD12 ':'')+n.ssid+'</span><span>'+n.rssi+'dBm</span>';
+div.onclick=function(){document.querySelector('[name=s]').value=n.ssid;document.querySelector('[name=p]').focus()};
+l.appendChild(div)});
+l.style.display='block';msg('点击名称自动填入',true);
+}else{msg('未扫描到WiFi',false)}
+}catch(e){msg('扫描失败: '+e,false)}
+b.disabled=false;b.textContent='扫描 WiFi'
 }
-
-async function scanWiFi() {
-  var btn = document.getElementById('scanBtn');
-  var list = document.getElementById('wifiList');
-  btn.disabled = true;
-  btn.textContent = '\u23f3 正在扫描...';
-  showMsg('WiFi 扫描中，请稍候...', true);
-  list.style.display = 'none';
-  list.innerHTML = '';
-  try {
-    var r = await fetch('/scan');
-    var data = await r.json();
-    if (data.status === 'scanning') {
-      // 服务端还在扫描，再等一会轮询一次
-      await new Promise(function(resolve) { setTimeout(resolve, 2500); });
-      r = await fetch('/scan');
-      data = await r.json();
-    }
-    if (data.networks && data.networks.length > 0) {
-      data.networks.sort(function(a,b) { return b.rssi - a.rssi; });
-      data.networks.forEach(function(n) {
-        var div = document.createElement('div');
-        div.className = 'wifi-item';
-        var icon = n.enc ? '\uD83D\uDD12 ' : '';
-        div.innerHTML = '<span>' + icon + n.ssid + '</span><span class="rssi">' + n.rssi + 'dBm</span>';
-        div.onclick = function() {
-          document.getElementById('ssid').value = n.ssid;
-          document.getElementById('pass').focus();
-        };
-        list.appendChild(div);
-      });
-      list.style.display = 'block';
-      showMsg('点击 WiFi \u540d\u79f0\u81ea\u52a8\u586b\u5165', true);
-    } else {
-      showMsg('\u672a\u626b\u63cf\u5230 WiFi\uff0c\u8bf7\u624b\u52a8\u8f93\u5165', false);
-    }
-  } catch(e) {
-    showMsg('\u626b\u63cf\u5931\u8d25\uff0c\u8bf7\u624b\u52a8\u8f93\u5165', false);
-  }
-  btn.disabled = false;
-  btn.textContent = '\uD83D\uDCE1 \u626b\u63cf\u9644\u8fd1 WiFi';
-}
-
-document.getElementById('configForm').onsubmit = async function(e) {
-  e.preventDefault();
-  var ssid = document.getElementById('ssid').value.trim();
-  var pass = document.getElementById('pass').value;
-
-  if (!ssid) { showMsg('请输入 WiFi 名称', false); return; }
-  document.getElementById('submitBtn').disabled = true;
-  document.getElementById('spinner').style.display = 'block';
-  showMsg('正在配置...', true);
-  try {
-    var r = await fetch('/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ssid: ssid, password: pass })
-    });
-    var data = await r.json();
-    if (data.result === 'ok') {
-      showMsg('\u2705 \u914d\u7f6e\u6210\u529f! \u6b63\u5728\u68c0\u67e5 WiFi \u8fde\u63a5...', true);
-      // 轮询检查 WiFi 连接状态，最多等待 20 秒
-      var checkCount = 0;
-      var checkInterval = setInterval(async function() {
-        checkCount++;
-        try {
-          var resp = await fetch('/wifi_status');
-          var status = await resp.json();
-          if (status.connected) {
-            clearInterval(checkInterval);
-            showMsg('\u2705 WiFi \u8fde\u63a5\u6210\u529f! SSID: ' + status.ssid + ' IP: ' + status.ip, true);
-            // 3 秒后跳转到状态页
-            setTimeout(function() { window.location.href = '/status'; }, 3000);
-          } else if (checkCount >= 20) {
-            clearInterval(checkInterval);
-            showMsg('\u26a0 WiFi \u8fde\u63a5\u8d85\u65f6\uff0c\u8bf7\u68c0\u67e5\u5bc6\u7801\u662f\u5426\u6b63\u786e', false);
-            document.getElementById('submitBtn').disabled = false;
-            document.getElementById('spinner').style.display = 'none';
-          }
-        } catch(e) {}
-      }, 1000);
-    } else {
-      showMsg('\u274c ' + (data.message || '\u914d\u7f6e\u5931\u8d25'), false);
-      document.getElementById('submitBtn').disabled = false;
-      document.getElementById('spinner').style.display = 'none';
-    }
-  } catch(e) {
-    showMsg('\u274c \u8bf7\u6c42\u5931\u8d25', false);
-    document.getElementById('submitBtn').disabled = false;
-    document.getElementById('spinner').style.display = 'none';
-  }
-};
+async function cfg(f){
+var s=f.s.value.trim(),p=f.p.value;
+if(!s){msg('请输入SSID',false);return false}
+document.getElementById('sub').disabled=true;msg('连接中...',true);
+try{
+var r=await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:s,password:p})});
+var d=await r.json();
+if(d.result==='ok'){
+var n=0,t=setInterval(async function(){
+n++;try{var r=await fetch('/wifi_status'),s=await r.json();
+if(s.connected){clearInterval(t);msg('连接成功! '+s.ip,true);setTimeout(function(){location.href='/status'},3000)}
+else if(n>=20){clearInterval(t);msg('连接超时，请检查密码',false);document.getElementById('sub').disabled=false}
+}catch(e){}
+},1000);
+}else{msg(d.message||'配置失败',false);document.getElementById('sub').disabled=false}
+}catch(e){msg('请求失败',false);document.getElementById('sub').disabled=false}
+return false}
 </script>
 </body>
 </html>
