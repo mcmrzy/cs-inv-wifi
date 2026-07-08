@@ -1,9 +1,9 @@
 # ARM 与 ESP32 通信协议文档
 
-> **文档版本**: v3.0  
+> **文档版本**: v3.1  
 > **适用产品**: CS-I10-6k2 48V 单相离网逆变器  
 > **适用对象**: ARM 端开发人员  
-> **最后更新**: 2026-05-20  
+> **最后更新**: 2026-06-30  
 > **相关文档**: `系统参数规范_48V离网逆变器.md`、`MQTT协议文档.md`、`BMS_ARM_Communication_Protocol.md`
 
 ---
@@ -15,6 +15,7 @@
 3. [命令码定义](#3-命令码定义)
 4. [详细命令说明](#4-详细命令说明)
 5. [MQTT 数据上报格式](#5-mqtt-数据上报格式)
+   - [5.10 离线数据缓存机制](#510-离线数据缓存机制)
 6. [控制命令处理](#6-控制命令处理)
 7. [示例代码](#7-示例代码)
 8. [接收数据流程](#8-接收数据流程)
@@ -58,7 +59,7 @@ GND ──────────── GND
 | 功能 | 说明 |
 |------|------|
 | 数据透传 | 不解析 ARM payload 内容，只做 SN 校验 + 主题路由 |
-| status 心跳 | 每 60s 自动上报 `{"online":true,"rssi":-45,"location":{...}}` |
+| status 心跳 | 每 60s 自动上报 `{"online":true,"rssi":-45,"ip":"192.168.1.100"}` |
 | LWT 遗嘱 | 异常断开时自动发布 `{"online":false}` |
 | SN 校验 | 校验 CS-SN-STD-001 V1.1 格式，无效 SN 返回 NACK |
 
@@ -81,7 +82,7 @@ GND ──────────── GND
 | CMD | 1B | 命令码，见第3节 |
 | LEN_H | 1B | 数据长度高字节 (len >> 8) |
 | LEN_L | 1B | 数据长度低字节 (len & 0xFF) |
-| DATA | n B | 数据负载，最大 512 字节 |
+| DATA | n B | 数据负载，最大 1024 字节 |
 | XOR | 1B | 校验和，计算方式见下文 |
 
 ### 2.2 校验和计算
@@ -129,6 +130,12 @@ uint8_t calc_xor(uint8_t cmd, uint16_t len, const uint8_t* data) {
 | 0x08 | CMD_SET_SN | ARM → ESP32 | 设置设备序列号 |
 | 0x09 | CMD_SET_KEY | ARM → ESP32 | 设置设备密钥 |
 | 0x0A | CMD_SET_AP_SSID | ARM → ESP32 | 设置热点名称 |
+| 0x10 | CMD_ARM_OTA_START | ESP32 → ARM | ARM OTA 开始，通知进入 IAP 模式 |
+| 0x11 | CMD_ARM_OTA_DATA | ESP32 → ARM | ARM OTA 数据包 |
+| 0x12 | CMD_ARM_OTA_END | ESP32 → ARM | ARM OTA 结束，校验跳转 |
+| 0x13 | CMD_ARM_OTA_ACK | ARM → ESP32 | ARM OTA 确认收到 |
+| 0x14 | CMD_ARM_OTA_NACK | ARM → ESP32 | ARM OTA 请求重传 |
+| 0x15 | CMD_ARM_OTA_INFO | ARM → ESP32 | ARM OTA 固件信息查询 |
 | 0xFE | CMD_ACK | ESP32 → ARM | 确认响应 |
 | 0xFF | CMD_NACK | ESP32 → ARM | 否定响应 |
 
@@ -147,6 +154,12 @@ uint8_t calc_xor(uint8_t cmd, uint16_t len, const uint8_t* data) {
 **不需要等待 ACK 的命令**：
 - CMD_PUBLISH (0x02)：发送后即可继续其他操作
 - CMD_COMMAND_SEND (0x04)：单向通知
+
+**OTA 命令响应**：
+- CMD_ARM_OTA_START (0x10)：等待 CMD_ARM_OTA_ACK (0x13) 或 CMD_ARM_OTA_NACK (0x14)
+- CMD_ARM_OTA_DATA (0x11)：等待 CMD_ARM_OTA_ACK (0x13) 或 CMD_ARM_OTA_NACK (0x14)
+- CMD_ARM_OTA_END (0x12)：等待 CMD_ARM_OTA_ACK (0x13) 或 CMD_ARM_OTA_NACK (0x14)
+- CMD_ARM_OTA_INFO (0x15)：ARM 返回固件信息
 
 ---
 
@@ -418,6 +431,153 @@ MM-CC-PPPP-YW-SSSSS-C
 
 ---
 
+### 4.10 CMD_ARM_OTA_START (0x10) — ARM OTA 开始
+
+**方向**: ESP32 → ARM  
+**DATA 内容**: `[total_size:4B][md5:16B][version_len:1B][version_str:nB]`
+
+**完整帧示例**（固件大小 102400 字节，版本 "V1.2.3"）：
+
+```
+┌────────┬────────┬────────┬────────┬──────────────────────────────────┬────────┐
+│ HEADER │  CMD   │ LEN_H  │ LEN_L  │           DATA (22字节)           │  XOR   │
+│  0xAA  │  0x10  │  0x00  │  0x16  │ 00 00 F9 00 [16B MD5] 05 56 31  │ 0xXX   │
+│        │        │        │        │ 2E 32 2E 33                      │        │
+└────────┴────────┴────────┴────────┴──────────────────────────────────┴────────┘
+```
+
+**数据格式**:
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| total_size | 4B | 固件总大小（字节） |
+| md5 | 16B | 固件 MD5 校验值 |
+| version_len | 1B | 版本字符串长度 |
+| version_str | nB | 版本字符串（ASCII） |
+
+**说明**:
+- ESP32 通知 ARM 进入 IAP 模式
+- ARM 收到后回复 CMD_ARM_OTA_ACK (0x13) 或 CMD_ARM_OTA_NACK (0x14)
+- 超时时间：5 秒
+
+---
+
+### 4.11 CMD_ARM_OTA_DATA (0x11) — ARM OTA 数据包
+
+**方向**: ESP32 → ARM  
+**DATA 内容**: `[packet_index:2B][data:480B]`
+
+**完整帧示例**（第 0 包数据）：
+
+```
+┌────────┬────────┬────────┬────────┬──────────────────────────────────┬────────┐
+│ HEADER │  CMD   │ LEN_H  │ LEN_L  │        DATA (482字节)             │  XOR   │
+│  0xAA  │  0x11  │  0x01  │  0xE2  │ 00 00 [480字节固件数据]           │ 0xXX   │
+└────────┴────────┴────────┴────────┴──────────────────────────────────┴────────┘
+```
+
+**数据格式**:
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| packet_index | 2B | 包序号（从 0 开始） |
+| data | 480B | 固件数据（最大 480 字节） |
+
+**说明**:
+- 每包最大 480 字节数据
+- 发送间隔：5ms
+- 等待 ACK 超时：2 秒
+- 最大重传次数：3 次
+
+---
+
+### 4.12 CMD_ARM_OTA_END (0x12) — ARM OTA 结束
+
+**方向**: ESP32 → ARM  
+**DATA 内容**: `[total_packets:2B][total_size:4B][md5:16B]`
+
+**完整帧示例**：
+
+```
+┌────────┬────────┬────────┬────────┬──────────────────────────────────┬────────┐
+│ HEADER │  CMD   │ LEN_H  │ LEN_L  │        DATA (22字节)              │  XOR   │
+│  0xAA  │  0x12  │  0x00  │  0x16  │ 00 D5 00 01 8F A0 [16B MD5]      │ 0xXX   │
+└────────┴────────┴────────┴────────┴──────────────────────────────────┴────────┘
+```
+
+**数据格式**:
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| total_packets | 2B | 总包数 |
+| total_size | 4B | 固件总大小（字节） |
+| md5 | 16B | 固件 MD5 校验值 |
+
+**说明**:
+- 通知 ARM 所有数据已传输完成
+- ARM 进行固件校验
+- 校验成功后回复 CMD_ARM_OTA_ACK，跳转到新固件
+- 校验失败回复 CMD_ARM_OTA_NACK
+
+---
+
+### 4.13 CMD_ARM_OTA_ACK (0x13) — ARM OTA 确认
+
+**方向**: ARM → ESP32  
+**DATA 内容**: 可选（长度为 0 或包含状态信息）
+
+**完整帧示例**：
+
+```
+┌────────┬────────┬────────┬────────┬────────┐
+│ HEADER │  CMD   │ LEN_H  │ LEN_L  │  XOR   │
+│  0xAA  │  0x13  │  0x00  │  0x00  │  0xB6  │
+└────────┴────────┴────────┴────────┴────────┘
+```
+
+**说明**:
+- ARM 确认收到 OTA 命令
+- 用于 CMD_ARM_OTA_START、CMD_ARM_OTA_DATA、CMD_ARM_OTA_END 的响应
+
+---
+
+### 4.14 CMD_ARM_OTA_NACK (0x14) — ARM OTA 否认
+
+**方向**: ARM → ESP32  
+**DATA 内容**: 可选（长度为 0 或包含错误信息）
+
+**完整帧示例**：
+
+```
+┌────────┬────────┬────────┬────────┬────────┐
+│ HEADER │  CMD   │ LEN_H  │ LEN_L  │  XOR   │
+│  0xAA  │  0x14  │  0x00  │  0x00  │  0xB7  │
+└────────┴────────┴────────┴────────┴────────┘
+```
+
+**说明**:
+- ARM 请求重传或报告错误
+- ESP32 收到后应重传对应数据包
+
+---
+
+### 4.15 CMD_ARM_OTA_INFO (0x15) — ARM 固件信息查询
+
+**方向**: ESP32 → ARM  
+**DATA 内容**: 无数据（长度为 0）
+
+**完整帧示例**：
+
+```
+┌────────┬────────┬────────┬────────┬────────┐
+│ HEADER │  CMD   │ LEN_H  │ LEN_L  │  XOR   │
+│  0xAA  │  0x15  │  0x00  │  0x00  │  0xBE  │
+└────────┴────────┴────────┴────────┴────────┘
+```
+
+**说明**:
+- ESP32 查询 ARM 当前固件信息
+- ARM 返回固件版本、大小、MD5 等信息
+
+---
+
 ## 5. MQTT 数据上报格式
 
 ARM 通过 CMD_PUBLISH 上报数据，ESP32 透传到 MQTT。以下是各主题的 payload 格式：
@@ -442,22 +602,22 @@ ARM 通过 CMD_PUBLISH 上报数据，ESP32 透传到 MQTT。以下是各主题�
 ```json
 {
     "sn": "H1CNA0013500001O",
-    "model": "CS1P3K-48",
+    "model": "CS-I10-6k2",
     "manufacturer": "辰烁科技",
-    "firmware_arm": "V1.0.0",
-    "firmware_esp": "V1.0.0",
-    "type": "off_grid",
-    "phase": "single",
-    "rated_power": 3000,
+    "firmware_arm": "V1.2.3.20240510",
+    "firmware_esp": "V1.0.5.20240420",
+    "firmware_dsp": "V1.1.0.20240508",
+    "firmware_bms": "V2.0.1.20240415",
+    "type": "离网逆变器",
+    "rated_power": 6200,
     "rated_voltage": 220,
-    "rated_freq": 50,
-    "battery_voltage": 48,
-    "battery_types": ["LiFePO4", "NCM", "LeadAcid"],
-    "mppt_count": 1,
-    "pv_max_voltage": 150,
-    "pv_max_power": 2000,
-    "bms_count": 1,
-    "cell_count": 16
+    "rated_freq": 50.0,
+    "battery_voltage": 51.2,
+    "battery_type": "LiFePO4",
+    "cell_count": 16,
+    "parallel_mode": "standalone",
+    "parallel_role": "standalone",
+    "parallel_phase": null
 }
 ```
 
@@ -466,16 +626,13 @@ ARM 通过 CMD_PUBLISH 上报数据，ESP32 透传到 MQTT。以下是各主题�
 ```json
 {
     "voltage": 220.5,
-    "current": 8.52,
-    "power": 1870.3,
-    "apparent": 1875.6,
-    "reactive": 120.5,
+    "current": 28.2,
+    "power": 6200.0,
+    "apparent": 6210.5,
     "frequency": 50.02,
-    "pf": 0.997,
-    "load_percent": 62.4,
-    "thd_v": 1.8,
-    "thd_i": 2.5,
-    "dc_injection": 15.0
+    "pf": 0.998,
+    "load_percent": 100.0,
+    "thd_v": 1.8
 }
 ```
 
@@ -496,10 +653,14 @@ ARM 通过 CMD_PUBLISH 上报数据，ESP32 透传到 MQTT。以下是各主题�
     "cell_volt_max": 3.35,
     "cell_volt_min": 3.28,
     "cell_volt_diff": 0.07,
-    "charge_state": "charging",
-    "battery_type": "LiFePO4",
-    "protect_status1": 0,
-    "protect_status2": 0
+    "charge_state": 1,
+    "protect_status": 0,
+    "bms_fault_code": 0,
+    "max_chg_current": 60.0,
+    "max_dischg_current": 120.0,
+    "charge_volt_ref": 54.6,
+    "dischg_cut_volt": 44.0,
+    "temp_battery": 26.5
 }
 ```
 
@@ -507,9 +668,17 @@ ARM 通过 CMD_PUBLISH 上报数据，ESP32 透传到 MQTT。以下是各主题�
 
 ```json
 {
-    "pv_voltage": 85.3,
-    "pv_current": 12.5,
-    "pv_power": 1066.3,
+    "pv1_voltage": 85.3,
+    "pv1_current": 12.5,
+    "pv1_power": 1066.3,
+    "pv1_voltage_max": 92.5,
+    "pv1_power_max": 1150.0,
+    "pv2_voltage": 82.1,
+    "pv2_current": 11.8,
+    "pv2_power": 969.0,
+    "pv2_voltage_max": 88.2,
+    "pv2_power_max": 1050.0,
+    "pv_power_total": 2035.3,
     "mppt_state": "tracking"
 }
 ```
@@ -525,6 +694,7 @@ ARM 通过 CMD_PUBLISH 上报数据，ESP32 透传到 MQTT。以下是各主题�
     "temp_mos": 55.2,
     "temp_ambient": 32.0,
     "dc_bus_voltage": 380.0,
+    "runtime_hours": 8640,
     "fan_speed": 60,
     "efficiency": 94.6
 }
@@ -551,10 +721,10 @@ ARM 通过 CMD_PUBLISH 上报数据，ESP32 透传到 MQTT。以下是各主题�
 ```json
 {
     "cell_count": 16,
-    "voltages": [3.32, 3.33, 3.31, 3.32, 3.35, 3.30, 3.32, 3.31, 3.33, 3.32, 3.31, 3.32, 3.34, 3.29, 3.32, 3.31],
-    "temps": [26.5, 26.8, 26.2, 26.5, 27.0, 26.0, 26.5, 26.3, 26.8, 26.5, 26.2, 26.5, 26.9, 25.8, 26.5, 26.4],
-    "charge_ah_total": 12580.3,
-    "discharge_ah_total": 12450.6
+    "voltages": [3.32, 3.33, 3.31, 3.32, 3.35, 3.30, 3.32, 3.31,
+                 3.33, 3.32, 3.31, 3.32, 3.34, 3.29, 3.32, 3.31],
+    "temps": [26.5, 26.8, 26.2, 26.5, 27.0, 26.0, 26.5, 26.3,
+              26.8, 26.5, 26.2, 26.5, 26.9, 25.8, 26.5, 26.4]
 }
 ```
 
@@ -562,19 +732,95 @@ ARM 通过 CMD_PUBLISH 上报数据，ESP32 透传到 MQTT。以下是各主题�
 
 ```json
 {
-    "event": "alarm",
-    "timestamp": 1715000000,
-    "source": "bms",
-    "fault_code": 257,
-    "fault_desc": "单体过压保护",
-    "alarm_code": 0,
-    "trigger": {
-        "cell_no": 5,
-        "cell_voltage": 3.65,
-        "threshold": 3.60
-    }
+    "code": 8,
+    "level": "fault",
+    "message": "过温保护",
+    "timestamp": 1716800000
 }
 ```
+
+---
+
+### 5.10 离线数据缓存机制
+
+### 5.10.1 概述
+
+当设备网络断开（WiFi 断开或 MQTT 服务器不可达）时，ESP32 自动将 ARM 上报的数据缓存到本地 NVS（非易失性存储），待网络恢复后自动补发。
+
+```
+正常状态:
+  ARM → UART → ESP32 → MQTT 云端
+
+网络断开:
+  ARM → UART → ESP32 → NVS 缓存（带时间戳）
+
+网络恢复:
+  ESP32 → MQTT 云端（补发全部缓存数据）
+```
+
+### 5.10.2 缓存配置
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| 最大缓存条数 | 1000 | 超过后丢弃最旧数据（FIFO） |
+| 数据保留时间 | 7 天 | 超过 7 天的数据在启动时自动清理 |
+| 存储位置 | ESP32 NVS (Flash) | 断电不丢失 |
+| 时间戳来源 | NTP（`ntp.aliyun.com`） | NTP 未同步时时间戳为 0 |
+
+### 5.10.3 缓存触发条件
+
+以下情况 ESP32 会将数据存入缓存而非直接发送：
+
+1. **WiFi 未连接**（设备处于 AP 配网模式或 WiFi 连接中）
+2. **MQTT 未连接**（WiFi 已连但 MQTT Broker 不可达）
+3. **MQTT 连接中断**（运行中网络丢失）
+
+### 5.10.4 数据时间戳
+
+ESP32 会为所有 ARM 上报的数据自动添加 Unix 时间戳（秒），最终上传到 MQTT 云端的数据格式如下：
+
+```json
+{
+  "data": { /* 原始数据内容 */ },
+  "timestamp": 1716800000
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `data` | object | ARM 上报的原始数据 |
+| `timestamp` | int | Unix 时间戳（秒），由 ESP32 NTP 同步提供 |
+
+**说明**：
+- 在线发送和离线缓存发送的数据格式完全统一，均包含时间戳
+- NTP 未同步时时间戳可能为 0，后端需做容错处理
+- 后端应优先使用消息中的 `timestamp` 字段作为数据采集时间
+
+### 5.10.5 补发流程
+
+```
+MQTT 连接成功
+    │
+    ├─ 1. 发布 online 状态
+    ├─ 2. 订阅 cmd / ota/cmd 主题
+    ├─ 3. 检查离线缓存数量
+    │     │
+    │     ├─ 有缓存 → 逐条发送（QoS 1）
+    │     │           发送完毕后清空缓存
+    │     │
+    │     └─ 无缓存 → 正常运行
+    │
+    └─ 进入正常运行状态
+```
+
+### 5.10.6 缓存管理
+
+| 操作 | 触发条件 | 说明 |
+|------|----------|------|
+| 自动清理过期数据 | 每次启动时 | 删除超过 7 天的数据 |
+| FIFO 溢出处理 | 缓存满（1000条） | 自动丢弃最旧的一条 |
+| 全量清空 | 补发完成后 | 所有缓存数据发送成功后清空 |
+| 恢复出厂 | `CMD=0x05` 或按键 | 清除所有缓存数据 |
 
 ---
 
@@ -590,25 +836,25 @@ ARM 收到 CMD_COMMAND_RECV 后，需解析 topic 并执行相应操作：
 |-------|---------|------|
 | `ac_on` | `""` | 交流输出开启 |
 | `ac_off` | `""` | 交流输出关闭 |
-| `set_voltage` | `{"value":220}` | 设定输出电压 (V) |
-| `set_freq` | `{"value":50}` | 设定输出频率 (Hz) |
-| `set_power_limit` | `{"value":80}` | 功率限制（额定功率百分比 0~100） |
-| `eco_mode` | `{"value":1}` | 节能模式：0=关, 1=开 |
-| `restart` | `""` | 软重启 |
-| `set_report_interval` | `{"value":5}` | 上报间隔 (秒) |
+| `set_power_limit` | `{"value":6200}` | 有功功率上限 (W) |
+| `set_charge_limit` | `{"value":6200}` | 最大充电功率 (W) |
+| `set_discharge_limit` | `{"value":6200}` | 最大放电功率 (W) |
+| `set_soc_low` | `{"value":200}` | 放电截止 SOC（0.1%，200=20%） |
+| `set_soc_high` | `{"value":950}` | 充电截止 SOC（0.1%，950=95%） |
+| `force_charge` | `{"value":1}` | 强制充电：0=关, 1=开 |
+| `force_discharge` | `{"value":1}` | 强制放电：0=关, 1=开 |
+| `restart` | `""` | 故障复位 |
 | `query` | `""` | 立即上报全量数据 |
 
 #### BMS 控制（ARM 转发到 Modbus）
 
-| topic | payload | BMS 寄存器 | 说明 |
-|-------|---------|-----------|------|
-| `bms/charge_enable` | `{"value":1}` | 0x1200 | 充放电使能 |
-| `bms/charge_current` | `{"value":500}` | 0x1201 | 最大充电电流（×0.1A） |
-| `bms/discharge_current` | `{"value":1000}` | 0x1202 | 最大放电电流（×0.1A） |
-| `bms/charge_volt` | `{"value":584}` | 0x1203 | 充电截止电压（×0.1V） |
-| `bms/discharge_volt` | `{"value":430}` | 0x1204 | 放电截止电压（×0.1V） |
-| `bms/balance_enable` | `{"value":1}` | 0x1205 | 均衡使能 |
-| `bms/balance_threshold` | `{"value":50}` | 0x1206 | 均衡启动压差 (mV) |
+| topic | payload | 说明 |
+|-------|---------|------|
+| `bms/charge_enable` | `{"value":1}` | 充放电使能：0=禁止, 1=允许 |
+| `bms/charge_current` | `{"value":500}` | 最大充电电流（0.1A，500=50A） |
+| `bms/discharge_current` | `{"value":1000}` | 最大放电电流（0.1A，1000=100A） |
+| `bms/charge_volt` | `{"value":584}` | 充电截止电压（0.1V，584=58.4V） |
+| `bms/discharge_volt` | `{"value":430}` | 放电截止电压（0.1V，430=43.0V） |
 
 #### MPPT 控制
 
@@ -617,6 +863,13 @@ ARM 收到 CMD_COMMAND_RECV 后，需解析 topic 并执行相应操作：
 | `mppt_on` | `""` | 启用 MPPT |
 | `mppt_off` | `""` | 禁用 MPPT |
 | `mppt_power_limit` | `{"value":1000}` | PV 功率限制 (W) |
+
+#### OTA 控制
+
+| topic | payload | 说明 |
+|-------|---------|------|
+| `ota/arm` | `""` | 触发 ARM 固件升级 |
+| `ota/query` | `""` | 查询当前 OTA 状态 |
 
 ### 6.2 命令处理流程
 
@@ -634,8 +887,8 @@ ARM 收到 CMD_COMMAND_RECV 后，需解析 topic 并执行相应操作：
 ```json
 {
     "result": "ok",
-    "cmd": "bms/charge_current",
-    "message": "充电电流已设置为 50.0A",
+    "cmd": "set_charge_limit",
+    "message": "充电功率已设置为 6200W",
     "timestamp": 1715000000
 }
 ```
@@ -644,8 +897,8 @@ ARM 收到 CMD_COMMAND_RECV 后，需解析 topic 并执行相应操作：
 ```json
 {
     "result": "error",
-    "cmd": "set_voltage",
-    "message": "电压值超出范围（200-250V）",
+    "cmd": "set_power_limit",
+    "message": "功率值超出范围（0-6200W）",
     "timestamp": 1715000000
 }
 ```
@@ -664,7 +917,7 @@ ARM 收到 CMD_COMMAND_RECV 后，需解析 topic 并执行相应操作：
 #define FRAME_ESCAPE     0x55
 #define FRAME_ESC_HEADER 0x01
 #define FRAME_ESC_ESCAPE 0x00
-#define FRAME_DATA_MAX   512
+#define FRAME_DATA_MAX   1024
 
 // 命令码
 #define CMD_SET_BROKER      0x01
@@ -676,6 +929,15 @@ ARM 收到 CMD_COMMAND_RECV 后，需解析 topic 并执行相应操作：
 #define CMD_SET_SN          0x08
 #define CMD_SET_KEY         0x09
 #define CMD_SET_AP_SSID     0x0A
+
+// OTA 命令码（ARM 串口升级）
+#define CMD_ARM_OTA_START    0x10
+#define CMD_ARM_OTA_DATA     0x11
+#define CMD_ARM_OTA_END      0x12
+#define CMD_ARM_OTA_ACK      0x13
+#define CMD_ARM_OTA_NACK     0x14
+#define CMD_ARM_OTA_INFO     0x15
+
 #define CMD_ACK             0xFE
 #define CMD_NACK            0xFF
 
@@ -731,7 +993,7 @@ void send_frame(uint8_t cmd, const uint8_t* data, uint16_t len,
 // 示例：发布 AC 数据
 void publish_ac_data(void (*send_byte)(uint8_t)) {
     // 构造 payload
-    const char* payload = "{\"voltage\":220.5,\"current\":8.52,\"power\":1870.3}";
+    const char* payload = "{\"voltage\":220.5,\"current\":28.2,\"power\":6200.0}";
     
     // 构造完整 JSON
     char json[256];
@@ -804,10 +1066,10 @@ if __name__ == "__main__":
     # 发布 AC 数据
     publish_data(ser, "data/ac", {
         "voltage": 220.5,
-        "current": 8.52,
-        "power": 1870.3,
+        "current": 28.2,
+        "power": 6200.0,
         "frequency": 50.02,
-        "pf": 0.997
+        "pf": 0.998
     })
     
     ser.close()
@@ -919,7 +1181,7 @@ int rx_process_byte(RxContext* ctx, uint8_t b, void (*on_frame)(uint8_t cmd, con
 
 1. **波特率**: 必须使用 115200，双方需保持一致
 2. **帧间隔**: 建议两帧之间间隔至少 10ms
-3. **数据长度**: 单帧数据最大 512 字节，超过需分帧
+3. **数据长度**: 单帧数据最大 1024 字节，超过需分帧
 4. **JSON 格式**: CMD_PUBLISH 的数据必须是有效的 JSON 字符串，**key 必须用双引号包裹**
 5. **ACK 超时**: 对于需要 ACK 的命令，建议设置 1-2 秒超时
 
@@ -930,10 +1192,10 @@ ARM 端应确保发送的电气数据在合理物理范围内：
 | 参数 | 最小值 | 最大值 | 说明 |
 |------|--------|--------|------|
 | AC 电压 | 200V | 250V | 单相离网输出 |
-| AC 功率 | 0W | 额定功率 | 不超过逆变器额定值 |
+| AC 功率 | 0W | 6200W | 不超过逆变器额定值 |
 | 频率 | 49.5Hz | 50.5Hz | 离网自生成频率 |
 | 功率因数 | 0.0 | 1.0 | **严禁超过 1.0** |
-| PV 电压 | 0V | 150V | 48V 系统 MPPT 范围 |
+| PV 电压 | 60V | 150V | 48V 系统 MPPT 范围 |
 | 电池电压 | 40V | 60V | 16S LiFePO4 典型范围 |
 | SOC | 0% | 100% | - |
 | 温度 | -20°C | 85°C | 设备工作温度 |
@@ -953,6 +1215,22 @@ ARM 端应确保发送的电气数据在合理物理范围内：
 5. 确认字节转义逻辑无误
 6. 验证 JSON 格式是否标准（可使用在线 JSON 校验工具）
 
+### 9.5 OTA 升级注意事项
+
+1. **OTA 期间不要断电**：ARM OTA 升级过程中断电可能导致固件损坏
+2. **等待 ACK**：每个 OTA 数据包都需要等待 ARM 回复 ACK，超时 2 秒
+3. **重传机制**：如果收到 NACK 或超时，ESP32 会重传数据包（最多 3 次）
+4. **固件校验**：ARM 会在收到 END 命令后校验 MD5，校验失败会回复 NACK
+5. **流式模式**：ESP8266 等内存有限的平台使用流式模式，固件数据通过 `arm_ota_feed()` 逐块传入
+
+### 9.6 离线缓存注意事项
+
+1. **缓存容量**：默认最多缓存 1000 条数据，保留 7 天
+2. **时间戳**：NTP 未同步时时间戳为 0，后端需做容错处理
+3. **补发顺序**：缓存数据按时间顺序从旧到新补发
+4. **缓存清理**：恢复出厂设置会清除所有缓存数据
+5. **网络恢复**：MQTT 重连成功后会自动补发缓存数据
+
 ---
 
 ## 附录：MQTT 主题规范
@@ -961,7 +1239,7 @@ ESP32 会自动订阅和发布以下主题：
 
 | 主题 | 方向 | 说明 |
 |------|------|------|
-| `cs_inv/{sn}/status` | ESP32 → 云端 | 在线状态 + RSSI + IP 定位（ESP32 自动生成） |
+| `cs_inv/{sn}/status` | ESP32 → 云端 | 在线状态 + RSSI + IP（ESP32 自动生成） |
 | `cs_inv/{sn}/info` | ARM → 云端 | 设备信息（ARM 上报） |
 | `cs_inv/{sn}/data/ac` | ARM → 云端 | 交流输出数据 |
 | `cs_inv/{sn}/data/battery` | ARM → 云端 | 电池 BMS 数据 |
@@ -972,7 +1250,9 @@ ESP32 会自动订阅和发布以下主题：
 | `cs_inv/{sn}/data/alarm` | ARM → 云端 | 告警/故障事件 |
 | `cs_inv/{sn}/cmd` | 云端 → ARM | 控制命令下发 |
 | `cs_inv/{sn}/cmd/response` | ARM → 云端 | 命令执行结果 |
+| `cs_inv/{sn}/ota/cmd` | 云端 → ESP32 | OTA 升级命令 |
+| `cs_inv/{sn}/ota/status` | ESP32 → 云端 | OTA 升级状态 |
 
 其中 `{sn}` 为设备序列号，如 `H1CNA0013500001O`。
 
-> **注意**: `status` 主题由 ESP32 自动生成，ARM 无需上报。包含 `online`、`rssi`、`location` 字段。
+> **注意**: `status` 主题由 ESP32 自动生成，ARM 无需上报。包含 `online`、`rssi`、`ip` 字段。

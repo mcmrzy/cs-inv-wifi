@@ -1,0 +1,20 @@
+{
+  "version": "V1.3.0.20260702",
+  "size_bytes": 65536,
+  "size_kb": 64,
+  "md5": "a305e5bbca0554d381b313090fc2cee9",
+  "sha256": "a3d21004b3c96477d431f8c73813b2d672613693003fb0e40acef19bc16bddba",
+  "header": {
+    "magic": "47443332",
+    "magic_valid": true,
+    "header_version": 1,
+    "flags": 1,
+    "declared_size": 65536,
+    "size_match": true,
+    "crc_valid": true
+  },
+  "generated_at": "2026-07-02T17:37:04.215018",
+  "description": "GD32F303 ARM固件 V1.3.0.20260702",
+  "filename": "arm_firmware.bin",
+  "filepath": "D:\\CS_INV_WIFI\\tools\\arm_firmware.bin"
+}

@@ -127,7 +127,7 @@ static bool send_ota_start() {
 // 发送 OTA_DATA 命令
 // DATA: [packet_index(2B, LE)] [data(最大 480 bytes)]
 static bool send_ota_data(uint16_t packet_idx) {
-  uint8_t buf[2 + ARM_OTA_PACKET_SIZE];
+  static uint8_t buf[2 + ARM_OTA_PACKET_SIZE];
   int pos = 0;
 
   // packet_index (2B, LE)
@@ -141,10 +141,14 @@ static bool send_ota_data(uint16_t packet_idx) {
 
   if (g_streaming_mode) {
     // 流式模式：从缓冲区头部读取，读取后移动数据
-    // 简化：每次发送前，g_stream_buf 包含从 g_stream_sent 开始的未发送数据
     remaining = g_stream_total - offset;
     chunk = (remaining > ARM_OTA_PACKET_SIZE) ? ARM_OTA_PACKET_SIZE : remaining;
     chunk = (chunk > (size_t)g_stream_buf_len) ? (size_t)g_stream_buf_len : chunk;
+
+    // 缓冲区数据不足时，不发送空包
+    if (chunk == 0) {
+      return false;
+    }
 
     // 从缓冲区头部复制
     memcpy(buf + pos, g_stream_buf, chunk);
@@ -338,6 +342,11 @@ static void stream_process() {
     return;  // 没有更多数据
   }
 
+  // 缓冲区数据不足时，等待更多数据
+  if (g_stream_buf_len == 0) {
+    return;
+  }
+
   // 计算本包要发送的数据范围
   size_t packet_len = (remaining > ARM_OTA_PACKET_SIZE) ? ARM_OTA_PACKET_SIZE : remaining;
 
@@ -395,16 +404,26 @@ bool arm_ota_feed(const uint8_t* data, size_t len) {
     return false;
   }
 
-  // 将数据追加到缓冲区
+  // 将数据追加到缓冲区（带反压：缓冲区满时等待状态机消费）
   for (size_t i = 0; i < len; i++) {
-    if (g_stream_buf_len < ARM_OTA_STREAM_BUF_SIZE) {
-      g_stream_buf[g_stream_buf_len++] = data[i];
+    // 缓冲区满时，驱动状态机发送数据包并等待 ACK，腾出空间
+    unsigned long wait_start = millis();
+    while (g_stream_buf_len >= ARM_OTA_STREAM_BUF_SIZE) {
+      // 超时保护：30 秒内缓冲区仍未腾出空间
+      if (millis() - wait_start > 30000) {
+        Serial.printf("[ARM-OTA] feed() timeout: buffer stuck at %u bytes\n",
+                      (unsigned)g_stream_buf_len);
+        return false;
+      }
+      // 驱动状态机：发送数据包 + 等待 ACK
+      arm_ota_process();
+      // 处理 UART 接收 ACK
+      uart_protocol_process();
+      delay(5);
     }
+    g_stream_buf[g_stream_buf_len++] = data[i];
   }
 
-  // 注意：不直接调用 stream_process()，因为 ARM OTA 是同步确认模式
-  // 上一包收到 ACK 后，arm_ota_process() 会自动发送下一包
-  // 缓冲区数据会在 arm_ota_process() 的 ARM_OTA_SENDING 状态中被消费
   return true;
 }
 
@@ -413,30 +432,35 @@ bool arm_ota_end_streaming() {
     return false;
   }
 
-  // 发送最后一包（如果缓冲区还有数据）
-  if (g_stream_buf_len > 0 && g_current_packet < g_total_packets) {
-    unsigned long now = millis();
-    while (g_current_packet < g_total_packets) {
-      size_t packet_offset = (size_t)g_current_packet * ARM_OTA_PACKET_SIZE;
-      size_t remaining = g_stream_total - packet_offset;
-      if (remaining == 0) break;
+  // 等待状态机发送完所有剩余数据包（带 ACK 确认）
+  unsigned long start_wait = millis();
+  const unsigned long MAX_WAIT_TIME = 60000;  // 最多等待 60 秒
 
-      size_t packet_len = (remaining > ARM_OTA_PACKET_SIZE) ? ARM_OTA_PACKET_SIZE : remaining;
+  Serial.printf("[ARM-OTA] Waiting for %u packets to send (buffer: %u bytes)...\n",
+                g_total_packets - g_current_packet, (unsigned)g_stream_buf_len);
 
-      if (now - g_last_send_time < ARM_OTA_SEND_INTERVAL) {
-        delay(ARM_OTA_SEND_INTERVAL - (now - g_last_send_time));
-      }
-
-      if (!send_ota_data(g_current_packet)) {
-        Serial.println("[ARM-OTA] Failed to send last packet");
-        return false;
-      }
-      g_last_send_time = millis();
-      now = g_last_send_time;
+  while (g_current_packet < g_total_packets) {
+    // 超时检查
+    if (millis() - start_wait > MAX_WAIT_TIME) {
+      Serial.printf("[ARM-OTA] Timeout waiting for packets: sent %u/%u\n",
+                    g_current_packet, g_total_packets);
+      set_state(ARM_OTA_TIMEOUT, "End streaming timeout");
+      return false;
     }
+
+    // 驱动状态机发送数据包（带 ACK 确认）
+    arm_ota_process();
+
+    // 处理 UART 接收 ACK
+    uart_protocol_process();
+
+    // 短暂延迟，避免 CPU 占用过高
+    delay(10);
   }
 
-  // 发送 END 命令
+  Serial.printf("[ARM-OTA] All %u packets sent, sending END...\n", g_total_packets);
+
+  // 所有包发送完毕，发送 END 命令
   if (send_ota_end()) {
     g_last_send_time = millis();
     set_state(ARM_OTA_WAIT_READY, "Waiting for verify result");
@@ -668,6 +692,12 @@ void arm_ota_handle_uart(uint8_t cmd, const uint8_t* data, uint16_t len) {
                    g_retry_count, ARM_OTA_MAX_RETRIES, g_current_packet);
           set_state(ARM_OTA_SENDING, msg);
         }
+      }
+      else if (g_ota_state == ARM_OTA_WAIT_READY) {
+        // END 命令后 ARM 校验失败，发 NACK
+        char msg[64];
+        snprintf(msg, sizeof(msg), "ARM verify NACK, packet=%u", nack_packet);
+        set_state(ARM_OTA_ERROR, msg);
       }
       break;
     }

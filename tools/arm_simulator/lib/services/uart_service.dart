@@ -29,9 +29,9 @@ class UartFrame {
 
 class UartService {
   static const int frameHeader = 0xAA;
-  static const int frameEscape = 0x01;
-  static const int escHeader = 0x01;
-  static const int escEscape = 0x00;
+  static const int frameEscape = 0x55;
+  static const int escHeader = 0x01;   // 0xAA → 0x55 0x01
+  static const int escEscape = 0x00;   // 0x55 → 0x55 0x00
   static const int maxDataLen = 1024;
 
   final _frameController = StreamController<UartFrame>.broadcast();

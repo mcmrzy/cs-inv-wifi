@@ -637,8 +637,99 @@ static void handle_ota_upload(HttpClientSlot& slot) {
   Serial.printf("[OTA-UPLOAD] Content-Type: %s\n", ct_line);
 
   // 判断是否为 ESP OTA（原始二进制）
-  bool is_esp_raw = (strstr(ct, "application/octet-stream") != nullptr);
-  Serial.printf("[OTA-UPLOAD] is_esp_raw=%d\n", is_esp_raw);
+  // 检查 URL 中是否有 ?target=arm 参数
+  bool is_arm_target = (strstr(buf, "target=arm") != nullptr);
+  bool is_esp_raw = !is_arm_target && (strstr(ct, "application/octet-stream") != nullptr);
+  Serial.printf("[OTA-UPLOAD] is_esp_raw=%d, is_arm_target=%d\n", is_esp_raw, is_arm_target);
+
+  // ========== ARM OTA: 原始二进制流式接收（?target=arm） ==========
+  if (is_arm_target && strstr(ct, "application/octet-stream") != nullptr) {
+    Serial.printf("[OTA-UPLOAD] ARM raw binary, size=%d\n", content_length);
+    if (content_length <= 0 || content_length > 262144) {
+      send_http_response(client, 400, "application/json",
+                         "{\"result\":\"error\",\"message\":\"无效的ARM固件大小\"}");
+      return;
+    }
+
+    if (!arm_ota_start_streaming(content_length)) {
+      send_http_response(client, 500, "application/json",
+                         "{\"result\":\"error\",\"message\":\"ARM OTA 初始化失败\"}");
+      return;
+    }
+
+    led1_set(LED_FAST_BLINK);
+    ota_set_status(OTA_STATUS_WRITING, 0, "准备ARM升级");
+
+    // 跳过 HTTP header，找到 body 起始位置
+    int header_len = 0;
+    char* body_start = strstr(buf, "\r\n\r\n");
+    if (body_start) {
+      header_len = (body_start - buf) + 4;
+      body_start += 4;
+      int body_in_buf = buf_len - header_len;
+      if (body_in_buf > 0) {
+        arm_ota_feed((uint8_t*)body_start, body_in_buf);
+        Serial.printf("[OTA-UPLOAD] Fed %d bytes from header buffer\n", body_in_buf);
+      }
+    }
+
+    int written = buf_len - header_len;
+    if (written < 0) written = 0;
+    unsigned long timeout_start = millis();
+
+    while (written < content_length && (millis() - timeout_start) < 120000) {
+      arm_ota_process();
+      if (arm_ota_get_state() == ARM_OTA_ERROR || arm_ota_get_state() == ARM_OTA_TIMEOUT) {
+        Serial.printf("[OTA-UPLOAD] ARM OTA error: %s\n", arm_ota_get_message());
+        arm_ota_cancel();
+        send_http_response(client, 500, "application/json",
+                           "{\"result\":\"error\",\"message\":\"ARM OTA 传输失败\"}");
+        return;
+      }
+      if (client.available()) {
+        timeout_start = millis();
+        int to_read = min((int)client.available(), content_length - written);
+        if (to_read > (int)sizeof(g_ota_stream_buf)) to_read = sizeof(g_ota_stream_buf);
+        int bytes_read = client.read(g_ota_stream_buf, to_read);
+        if (bytes_read > 0) {
+          arm_ota_feed(g_ota_stream_buf, bytes_read);
+          written += bytes_read;
+          int progress = (written * 100) / content_length;
+          ota_set_status(OTA_STATUS_WRITING, progress,
+            String("ARM传输中: " + String(progress) + "%").c_str());
+        }
+      } else {
+        delay(1);
+      }
+    }
+
+    Serial.printf("[OTA-UPLOAD] ARM feed done: %d/%d bytes\n", written, content_length);
+    arm_ota_end_streaming();
+
+    // 等待 ARM 校验完成
+    timeout_start = millis();
+    while ((millis() - timeout_start) < 10000) {
+      arm_ota_process();
+      ArmOtaState st = arm_ota_get_state();
+      if (st == ARM_OTA_DONE) {
+        ota_set_status(OTA_STATUS_DONE, 100, "ARM OTA 完成");
+        send_http_response(client, 200, "application/json",
+                           "{\"result\":\"ok\",\"message\":\"ARM OTA 完成\"}");
+        return;
+      }
+      if (st == ARM_OTA_ERROR || st == ARM_OTA_TIMEOUT) {
+        ota_set_status(OTA_STATUS_ERROR, 0, arm_ota_get_message());
+        send_http_response(client, 500, "application/json",
+                           "{\"result\":\"error\",\"message\":\"ARM 校验失败\"}");
+        return;
+      }
+      delay(10);
+    }
+    arm_ota_cancel();
+    send_http_response(client, 500, "application/json",
+                       "{\"result\":\"error\",\"message\":\"ARM 校验超时\"}");
+    return;
+  }
 
   // ========== ESP OTA: 原始二进制流式接收 ==========
   if (is_esp_raw) {
@@ -1230,7 +1321,7 @@ static void process_http_request(HttpClientSlot& slot) {
   }
 
   // POST /ota/upload → 上传固件文件
-  if (strcmp(method, "POST") == 0 && strcmp(path, "/ota/upload") == 0) {
+  if (strcmp(method, "POST") == 0 && strncmp(path, "/ota/upload", 11) == 0) {
     handle_ota_upload(slot);
     return;
   }

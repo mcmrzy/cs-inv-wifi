@@ -23,6 +23,11 @@ bool mqtt_init(MQTTMessageHandler msg_handler);
 // 返回: true=已连接, false=连接中或失败
 bool mqtt_connect(void);
 
+// 尝试连接 MQTT Broker（可强制跳过重试间隔）
+// force: true=跳过重连间隔，立即尝试连接
+// 返回: true=已连接, false=连接中或失败
+bool mqtt_connect_ex(bool force);
+
 // 断开 MQTT 连接
 void mqtt_disconnect(void);
 

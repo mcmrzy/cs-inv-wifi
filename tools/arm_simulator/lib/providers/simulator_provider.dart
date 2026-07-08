@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_libserialport/flutter_libserialport.dart';
 import '../models/inverter_state.dart';
@@ -31,8 +33,28 @@ class SimulatorProvider extends ChangeNotifier {
   final Map<int, DateTime> _randomAlarmClearTime = {};
   double _alarmProbability = 0.0001;
 
+  // 告警防抖（同一告警码10秒内不重复发送）
+  final Map<int, DateTime> _alarmLastSent = {};
+
+  // 告警发送后跳过下一次 data/status，避免云端重复记录
+  bool _skipNextStatus = false;
+
+  // 恢复消息已发送标志（避免重复发送）
+  bool _recoverySent = false;
+
   // ACK等待机制
   Completer<void>? _ackCompleter;
+
+  // ARM OTA Bootloader 模拟状态
+  static const int _packetSize = 480; // 与 ESP32 ARM_OTA_PACKET_SIZE 一致
+  String _otaState = 'idle'; // idle, ready, receiving, verifying, done, error
+  int _otaExpectedSize = 0;
+  int _otaReceivedBytes = 0;
+  int _otaTotalPackets = 0;
+  int _otaNextPacketIndex = 0; // 期望的下一个包序号
+  List<int> _otaFirmwareBuffer = [];
+  List<int> _otaExpectedMd5 = [];
+  String _otaVersion = '';
 
   // 串口
   List<String> _availablePorts = [];
@@ -120,6 +142,7 @@ class SimulatorProvider extends ChangeNotifier {
       });
 
       _addLog('[SYS] 已连接到 $_selectedPort (115200 8N1)');
+      _firstPubDone = false;  // 重连后重新发送 info
       _updatePubTimer();  // 启动发布定时器
       notifyListeners();
     } catch (e) {
@@ -188,9 +211,10 @@ class SimulatorProvider extends ChangeNotifier {
     
     _inverterData.alarmCode = _alarmSystem.activeAlarms.firstOrNull ?? 0;
 
-    // 发送恢复消息
-    if (shouldSendRecovery) {
-      _publishTopic('alarm');
+    // 发送恢复消息（直接构造，不依赖 getAlarmJson）
+    if (shouldSendRecovery && !_recoverySent) {
+      _recoverySent = true;
+      _publishRecovery();
     }
 
     // 随机告警
@@ -268,8 +292,13 @@ class SimulatorProvider extends ChangeNotifier {
       await _publishTopic('info');
     }
 
-    final topics = ['ac', 'battery', 'pv', 'status', 'energy', 'cells', 'alarm'];
+    final topics = ['ac', 'battery', 'pv', 'status', 'energy', 'cells'];
     for (var topic in topics) {
+      // 告警发送后跳过 status，避免云端重复记录
+      if (topic == 'status' && _skipNextStatus) {
+        _skipNextStatus = false;
+        continue;
+      }
       await _publishTopic(topic);
     }
   }
@@ -282,13 +311,21 @@ class SimulatorProvider extends ChangeNotifier {
     // 告警数据特殊处理
     if (topic == 'alarm') {
       final alarmJson = _alarmSystem.getAlarmJson();
-      if (alarmJson == null) return;
+      if (alarmJson == null) return;  // 无告警数据，跳过
       payload.addAll(alarmJson);
+    }
+
+    final subTopic = topic == 'info' ? 'info' : 'data/$topic';
+
+    // 安全检查：确保 payload 不为空
+    if (payload.isEmpty) {
+      _addLog('[WARN] 跳过空 payload: $topic');
+      return;
     }
 
     final obj = {
       'sn': _sn,
-      'topic': 'data/$topic',
+      'topic': subTopic,
       'payload': jsonEncode(payload),
     };
 
@@ -305,6 +342,39 @@ class SimulatorProvider extends ChangeNotifier {
       await _ackCompleter!.future.timeout(const Duration(milliseconds: 500));
     } on TimeoutException {
       _addLog('[WARN] ACK timeout for data/$topic');
+    }
+    _ackCompleter = null;
+  }
+
+  /// 发布告警恢复消息（checkAlarms 检测到状态转换时调用）
+  Future<void> _publishRecovery() async {
+    final payload = {
+      'sn': _sn,
+      'code': 0,
+      'level': 'normal',
+      'message': '故障恢复，系统正常',
+      'count': 0,
+      'alarms': [],
+      'timestamp': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    };
+
+    final obj = {
+      'sn': _sn,
+      'topic': 'data/alarm',
+      'payload': jsonEncode(payload),
+    };
+
+    final data = utf8.encode(jsonEncode(obj));
+
+    _ackCompleter = Completer<void>();
+
+    await _uartService.sendFrame(CommandCodes.publish, Uint8List.fromList(data));
+    _addLog('[TX] PUBLISH data/alarm (recovery)');
+
+    try {
+      await _ackCompleter!.future.timeout(const Duration(milliseconds: 500));
+    } on TimeoutException {
+      _addLog('[WARN] ACK timeout for data/alarm (recovery)');
     }
     _ackCompleter = null;
   }
@@ -340,7 +410,7 @@ class SimulatorProvider extends ChangeNotifier {
         _handleOtaData(frame.data);
         break;
       case CommandCodes.armOtaEnd:
-        _handleOtaEnd();
+        _handleOtaEnd(frame.data);
         break;
       case CommandCodes.ack:
       case CommandCodes.nack:
@@ -412,15 +482,32 @@ class SimulatorProvider extends ChangeNotifier {
   void _handleSetAlarm(Map<String, dynamic> params, String taskId) {
     final code = params['code'] as int? ?? 0;
     if (code > 0) {
+      // 防抖：同一告警码10秒内不重复发送
+      final now = DateTime.now();
+      if (_alarmLastSent.containsKey(code) &&
+          now.difference(_alarmLastSent[code]!).inSeconds < 10) {
+        _addLog('[ALARM] 告警 $code 在防抖期内，跳过');
+        _uartService.sendAck();
+        _sendCmdResult(taskId, 'set_alarm', true, '告警 $code 在防抖期内');
+        return;
+      }
+
       _alarmSystem.addAlarm(code, manual: true);
+      _syncAlarmCodes();
+      _alarmLastSent[code] = now;
+      _skipNextStatus = true;
+      _recoverySent = false;  // 新告警，重置恢复标志
       _addLog('[ALARM] 远程触发告警: $code');
       _uartService.sendAck();
       _sendCmdResult(taskId, 'set_alarm', true, '已触发告警 $code');
+      _publishTopic('alarm');
     } else {
       _alarmSystem.clearAllAlarms();
+      _syncAlarmCodes();
       _addLog('[ALARM] 远程清除所有告警');
       _uartService.sendAck();
       _sendCmdResult(taskId, 'set_alarm', true, '已清除所有告警');
+      // 恢复消息由 _tick 中 checkAlarms 统一发送
     }
   }
 
@@ -432,10 +519,12 @@ class SimulatorProvider extends ChangeNotifier {
   void _handleReset(String taskId) {
     _inverterData.soc = 75.0;
     _alarmSystem.clearAllAlarms();
+    _syncAlarmCodes();
     _inverterData.mode = InverterMode.inverting;
     _addLog('[SYS] 远程重置逆变器');
     _uartService.sendAck();
     _sendCmdResult(taskId, 'reset', true, '逆变器已重置');
+    // 恢复消息由 _tick 中 checkAlarms 统一发送
   }
 
   void _handleGetParams(String taskId) {
@@ -506,28 +595,208 @@ class SimulatorProvider extends ChangeNotifier {
   }
 
   void _handleOtaInfoRequest() {
-    final info = {
-      'version': 'V1.2.3.20240510',
-      'size': 0,
-      'md5': '',
-    };
-    final data = utf8.encode(jsonEncode(info));
-    _uartService.sendFrame(CommandCodes.armOtaInfo, Uint8List.fromList(data));
-    _addLog('[OTA] 发送固件信息');
+    // 二进制格式: [version_len(1B)] [version_string(N)] [fw_size(4B,LE)] [md5(16B)]
+    final version = 'V1.2.3.20240510';
+    final versionBytes = utf8.encode(version);
+    final buf = BytesBuilder();
+    buf.addByte(versionBytes.length);
+    buf.add(versionBytes);
+    // fw_size: 4 bytes LE (当前固件大小，若无则为0)
+    final fwSize = _otaFirmwareBuffer.isNotEmpty ? _otaFirmwareBuffer.length : 0;
+    for (int i = 0; i < 4; i++) {
+      buf.addByte((fwSize >> (i * 8)) & 0xFF);
+    }
+    // md5: 16 bytes
+    if (_otaFirmwareBuffer.isNotEmpty) {
+      buf.add(md5.convert(_otaFirmwareBuffer).bytes);
+    } else {
+      buf.add(List.filled(16, 0));
+    }
+    _uartService.sendFrame(CommandCodes.armOtaInfo, buf.toBytes());
+    _addLog('[OTA] 发送固件信息 (二进制): version=$version, size=$fwSize');
   }
 
+  /// 处理 OTA START 命令
+  /// DATA: [total_size(4B,LE)] [md5(16B)] [version_len(1B)] [version_string]
   void _handleOtaStart(Uint8List data) {
-    _addLog('[OTA] 收到OTA开始命令');
+    if (data.length < 4 + 16 + 1) {
+      _addLog('[OTA] START 数据长度不足: ${data.length}');
+      _sendOtaNack(0);
+      return;
+    }
+
+    // 解析 total_size (4B, LE)
+    _otaExpectedSize = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+
+    // 解析 md5 (16B)
+    _otaExpectedMd5 = data.sublist(4, 20).toList();
+
+    // 解析 version
+    final versionLen = data[20];
+    if (data.length >= 21 + versionLen) {
+      _otaVersion = utf8.decode(data.sublist(21, 21 + versionLen));
+    } else {
+      _otaVersion = 'unknown';
+    }
+
+    // 初始化接收状态
+    _otaState = 'ready';
+    _otaReceivedBytes = 0;
+    _otaNextPacketIndex = 0;
+
+    _otaFirmwareBuffer = [];
+    _otaTotalPackets = (_otaExpectedSize + _packetSize - 1) ~/ _packetSize;
+
+    _addLog('[OTA] START: size=$_otaExpectedSize, packets=$_otaTotalPackets, '
+        'md5=${_otaExpectedMd5.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}, '
+        'version=$_otaVersion');
+
+    // 回复 ACK（表示 ARM 已进入 IAP 模式就绪）
     _uartService.sendFrame(CommandCodes.armOtaAck, Uint8List(0));
+    _addLog('[OTA] ARM IAP 模式就绪，发送 ACK');
   }
 
+  /// 处理 OTA DATA 命令
+  /// DATA: [packet_index(2B,LE)] [firmware_data(up to 480B)]
   void _handleOtaData(Uint8List data) {
+    if (_otaState != 'ready' && _otaState != 'receiving') {
+      _addLog('[OTA] DATA 在非法状态 $_otaState 收到');
+      _sendOtaNack(0);
+      return;
+    }
+
+    if (data.length < 2) {
+      _addLog('[OTA] DATA 数据长度不足: ${data.length}');
+      _sendOtaNack(_otaNextPacketIndex);
+      return;
+    }
+
+    // 解析 packet_index (2B, LE)
+    final packetIndex = data[0] | (data[1] << 8);
+    final firmwareData = data.sublist(2);
+
+    // 检查包序号
+    if (packetIndex != _otaNextPacketIndex) {
+      _addLog('[OTA] DATA 包序号不匹配: 期望=$_otaNextPacketIndex, 收到=$packetIndex');
+      _sendOtaNack(_otaNextPacketIndex);
+      return;
+    }
+
+    // 累积固件数据
+    _otaFirmwareBuffer.addAll(firmwareData);
+    _otaReceivedBytes += firmwareData.length;
+    _otaNextPacketIndex++;
+    _otaState = 'receiving';
+
+
+    // 进度
+    final progress = _otaExpectedSize > 0
+        ? (_otaReceivedBytes * 100 ~/ _otaExpectedSize).clamp(0, 100)
+        : 0;
+
+    // 每10包或首尾包打印日志
+    if (packetIndex % 10 == 0 || packetIndex == _otaTotalPackets - 1) {
+      _addLog('[OTA] DATA[$packetIndex/$_otaTotalPackets] '
+          '${firmwareData.length}B, 累计 $_otaReceivedBytes/$_otaExpectedSize ($progress%)');
+    }
+
+    // 回复 ACK
     _uartService.sendFrame(CommandCodes.armOtaAck, Uint8List(0));
   }
 
-  void _handleOtaEnd() {
-    _addLog('[OTA] OTA传输结束');
-    _uartService.sendFrame(CommandCodes.armOtaAck, Uint8List(0));
+  /// 处理 OTA END 命令
+  /// DATA: [total_packets(2B,LE)] [total_size(4B,LE)] [md5(16B)]
+  void _handleOtaEnd(Uint8List data) {
+    // END 帧数据通过 _handleFrame 传入时已经解码，但当前 _handleOtaEnd 没有参数
+    // 我们用内部状态来验证
+    if (_otaState != 'receiving' && _otaState != 'ready') {
+      _addLog('[OTA] END 在非法状态 $_otaState 收到');
+      _sendOtaNack(0);
+      return;
+    }
+
+    _otaState = 'verifying';
+
+    // 解析 END 帧数据
+    int endPackets = 0, endSize = 0;
+    List<int> endMd5 = [];
+    if (data.length >= 2 + 4 + 16) {
+      endPackets = data[0] | (data[1] << 8);
+      endSize = data[2] | (data[3] << 8) | (data[4] << 16) | (data[5] << 24);
+      endMd5 = data.sublist(6, 22).toList();
+      _addLog('[OTA] END 帧: packets=$endPackets, size=$endSize');
+    }
+
+    _addLog('[OTA] 开始校验...');
+
+    // 校验1: 数据大小 (使用 END 帧中的 size 或 START 帧中的)
+    final expectedSize = endSize > 0 ? endSize : _otaExpectedSize;
+    final sizeOk = _otaReceivedBytes == expectedSize;
+    _addLog('[OTA] 大小校验: ${sizeOk ? "通过" : "失败"} '
+        '(期望=$expectedSize, 实际=$_otaReceivedBytes)');
+
+    // 校验2: 包数量 (使用 END 帧中的 packets 或计算值)
+    final expectedPackets = endPackets > 0 ? endPackets : _otaTotalPackets;
+    final packetsOk = _otaNextPacketIndex == expectedPackets;
+    _addLog('[OTA] 包数校验: ${packetsOk ? "通过" : "失败"} '
+        '(期望=$expectedPackets, 实际=$_otaNextPacketIndex)');
+
+    // 校验3: MD5 (优先用 END 帧中的 md5，其次用 START 帧中的)
+    final expectedMd5 = endMd5.isNotEmpty && endMd5.any((b) => b != 0)
+        ? endMd5
+        : _otaExpectedMd5;
+    bool md5Ok = true;
+    if (expectedMd5.isNotEmpty && expectedMd5.any((b) => b != 0)) {
+      final actualMd5 = md5.convert(_otaFirmwareBuffer).bytes;
+      for (int i = 0; i < 16; i++) {
+        if (actualMd5[i] != expectedMd5[i]) {
+          md5Ok = false;
+          break;
+        }
+      }
+      _addLog('[OTA] MD5校验: ${md5Ok ? "通过" : "失败"}');
+    } else {
+      _addLog('[OTA] MD5校验: 跳过 (ESP32未提供MD5)');
+    }
+
+    if (sizeOk && packetsOk && md5Ok) {
+      _otaState = 'done';
+      _addLog('[OTA] ✅ 固件校验通过! OTA 完成');
+      _addLog('[OTA] 固件版本: $_otaVersion, 大小: $_otaReceivedBytes 字节, '
+          '包数: $_otaNextPacketIndex');
+      // 回复 ACK（表示校验成功）
+      _uartService.sendFrame(CommandCodes.armOtaAck, Uint8List(0));
+    } else {
+      _otaState = 'error';
+      _addLog('[OTA] ❌ 固件校验失败!');
+      // 回复 NACK
+      _sendOtaNack(0);
+    }
+
+    // 重置状态以便下次 OTA
+    _resetOtaState();
+  }
+
+  void _sendOtaNack(int packetIndex) {
+    // NACK DATA: [packet_index(2B, LE)]
+    final buf = Uint8List(2);
+    buf[0] = packetIndex & 0xFF;
+    buf[1] = (packetIndex >> 8) & 0xFF;
+    _uartService.sendFrame(CommandCodes.armOtaNack, buf);
+    _addLog('[OTA] 发送 NACK: packet=$packetIndex');
+  }
+
+  void _resetOtaState() {
+    // 延迟重置，让日志先显示
+    Future.delayed(const Duration(seconds: 1), () {
+      _otaState = 'idle';
+      _otaFirmwareBuffer = [];
+      _otaExpectedMd5 = [];
+      _otaExpectedSize = 0;
+      _otaReceivedBytes = 0;
+      _otaTotalPackets = 0;
+      _otaNextPacketIndex = 0;
+    });
   }
 
   void _sendCmdResult(String taskId, String cmd, bool success, String message, [Map<String, dynamic>? data]) {
@@ -548,16 +817,40 @@ class SimulatorProvider extends ChangeNotifier {
 
   /// 手动触发告警
   void triggerAlarm(int code) {
+    // 防抖：同一告警码10秒内不重复发送
+    final now = DateTime.now();
+    if (_alarmLastSent.containsKey(code) &&
+        now.difference(_alarmLastSent[code]!).inSeconds < 10) {
+      _addLog('[ALARM] 告警 $code 在防抖期内，跳过');
+      return;
+    }
+
     _alarmSystem.addAlarm(code, manual: true);
+    _syncAlarmCodes();
+    _alarmLastSent[code] = now;
+    _skipNextStatus = true;
+    _recoverySent = false;  // 新告警，重置恢复标志
     _addLog('[ALARM] 手动触发告警: $code');
+    _publishTopic('alarm');
     notifyListeners();
   }
 
   /// 清除所有告警
   void clearAllAlarms() {
     _alarmSystem.clearAllAlarms();
+    _alarmLastSent.clear();
+    _syncAlarmCodes();
     _addLog('[ALARM] 清除所有告警');
+    // 恢复消息由 _tick 中 checkAlarms 检测到状态转换后统一发送
     notifyListeners();
+  }
+
+  /// 同步告警码到 InverterData（确保 data/status 与 alarm 一致）
+  void _syncAlarmCodes() {
+    _inverterData.faultCode = _alarmSystem.activeAlarms
+        .where((code) => AlarmSystem.alarmDefinitions[code]?.level == 'fault')
+        .firstOrNull ?? 0;
+    _inverterData.alarmCode = _alarmSystem.activeAlarms.firstOrNull ?? 0;
   }
 
   /// 更新UI

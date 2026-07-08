@@ -62,4 +62,7 @@ size_t offline_cache_total_bytes(void);
 // 清除所有缓存
 void offline_cache_clear(void);
 
+// 保存当前 epoch 到 NVS（NTP 同步后调用）
+void offline_cache_save_epoch(void);
+
 #endif // OFFLINE_CACHE_H

@@ -1,0 +1,20 @@
+{
+  "version": "V1.3.0.20260702",
+  "size_bytes": 307200,
+  "size_kb": 300,
+  "md5": "74646d7b8e2520195170d26e2ba62851",
+  "sha256": "158d8a49b682f6996c28b77af5364b1b119e48cd35c693501375b1273b7db0d1",
+  "header": {
+    "magic": "47443332",
+    "magic_valid": true,
+    "header_version": 1,
+    "flags": 1,
+    "declared_size": 307200,
+    "size_match": true,
+    "crc_valid": true
+  },
+  "generated_at": "2026-07-02T17:19:24.434572",
+  "description": "GD32F303 ARM固件 V1.3.0.20260702",
+  "filename": "arm_firmware_oversize.bin",
+  "filepath": "D:\\CS_INV_WIFI\\tools\\arm_firmware_oversize.bin"
+}

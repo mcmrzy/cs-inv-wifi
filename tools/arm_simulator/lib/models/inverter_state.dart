@@ -139,6 +139,11 @@ class InverterData {
   String batteryType = 'LiFePO4';
   int cellCount = 16;
 
+  // 固件版本（可自定义）
+  String firmwareArm = 'V1.2.3.20240510';
+  String firmwareDsp = 'V1.1.0.20240508';
+  String firmwareBms = 'V2.0.1';
+
   // 远程控制参数
   Map<String, dynamic> remoteControls = {
     'power_limit': 6200,
@@ -163,10 +168,10 @@ class InverterData {
           'sn': '',
           'model': 'CS-I10-6k2',
           'manufacturer': '辰烁科技',
-          'firmware_arm': 'V1.2.3.20240510',
+          'firmware_arm': firmwareArm,
           'firmware_esp': 'V1.2.0.20260629',
-          'firmware_dsp': 'V1.1.0.20240508',
-          'firmware_bms': 'V2.0.1',
+          'firmware_dsp': firmwareDsp,
+          'firmware_bms': firmwareBms,
           'type': '离网逆变器',
           'rated_power': ratedPower,
           'rated_voltage': ratedVoltage,

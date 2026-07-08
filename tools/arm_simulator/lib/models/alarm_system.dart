@@ -173,19 +173,7 @@ class AlarmSystem {
       };
     }
 
-    // 无故障/警告时，只在刚恢复时返回恢复状态
-    if (_hadCriticalAlarm) {
-      _hadCriticalAlarm = false;
-      return {
-        'code': 0,
-        'level': 'normal',
-        'message': '故障恢复，系统正常',
-        'count': 0,
-        'alarms': [],
-        'timestamp': DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      };
-    }
-    // 无告警且之前也没有，返回null（不发送）
+    // 无告警，返回null（恢复消息由 checkAlarms 触发后单独处理）
     return null;
   }
 }

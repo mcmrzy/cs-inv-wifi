@@ -647,6 +647,24 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
             ),
           ]),
           const SizedBox(height: 16),
+          _buildSettingsCard('设备信息', [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  _buildVersionField('ARM固件', provider.inverterData.firmwareArm,
+                      (v) => setState(() => provider.inverterData.firmwareArm = v)),
+                  const SizedBox(height: 12),
+                  _buildVersionField('DSP固件', provider.inverterData.firmwareDsp,
+                      (v) => setState(() => provider.inverterData.firmwareDsp = v)),
+                  const SizedBox(height: 12),
+                  _buildVersionField('BMS固件', provider.inverterData.firmwareBms,
+                      (v) => setState(() => provider.inverterData.firmwareBms = v)),
+                ],
+              ),
+            ),
+          ]),
+          const SizedBox(height: 16),
           _buildSettingsCard('模拟控制', [
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -815,6 +833,29 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
           ...children,
         ],
       ),
+    );
+  }
+
+  Widget _buildVersionField(String label, String value, ValueChanged<String> onChanged) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(label, style: TextStyle(fontSize: 14, color: Colors.grey[400])),
+        ),
+        Expanded(
+          child: TextFormField(
+            initialValue: value,
+            style: const TextStyle(fontSize: 14),
+            decoration: const InputDecoration(
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              border: OutlineInputBorder(),
+            ),
+            onFieldSubmitted: onChanged,
+          ),
+        ),
+      ],
     );
   }
 

@@ -140,6 +140,10 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
 
 // ==================== 连接 ====================
 bool mqtt_connect(void) {
+    return mqtt_connect_ex(false);
+}
+
+bool mqtt_connect_ex(bool force) {
     if (!g_mqtt_client || !WiFi.isConnected()) {
         return false;
     }
@@ -149,9 +153,9 @@ bool mqtt_connect(void) {
         return true;
     }
 
-    // 重连间隔控制
+    // 重连间隔控制（强制模式跳过）
     uint32_t now = millis();
-    if (now - g_last_reconnect < g_reconnect_delay) {
+    if (!force && (now - g_last_reconnect < g_reconnect_delay)) {
         return false;
     }
     g_last_reconnect = now;

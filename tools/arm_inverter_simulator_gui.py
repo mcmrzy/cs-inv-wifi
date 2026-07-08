@@ -15,7 +15,7 @@ GD32F303 ARM芯片完整模拟器 - 辰烁科技 CS_INV
   python arm_inverter_simulator_gui.py --test   # 运行单元测试
 """
 
-import sys, os, time, json, threading, random, math, struct, queue, hashlib
+import sys, os, time, json, threading, random, math, struct, queue, hashlib, binascii
 from datetime import datetime, date
 from collections import deque
 
@@ -563,6 +563,11 @@ class GD32F303Bootloader:
     STATE_IDLE, STATE_IAP_READY, STATE_RECEIVING, STATE_VERIFYING, STATE_JUMPING, STATE_ERROR = range(6)
     STATE_NAMES = {0: "正常模式", 1: "IAP就绪", 2: "接收中", 3: "校验中", 4: "跳转中", 5: "错误"}
     PACKET_SIZE = 480
+    
+    # 固件头部常量
+    FIRMWARE_HEADER_MAGIC = b'GD32'
+    FIRMWARE_MAX_SIZE = 256 * 1024
+    FIRMWARE_MIN_SIZE = 4 * 1024
 
     def __init__(self):
         self.state = self.STATE_IDLE
@@ -573,15 +578,18 @@ class GD32F303Bootloader:
         self.received_packets = set()
         self.md5_expected = "0" * 32
         self.firmware_version = "V1.2.3.20240510"
+        self.current_firmware_version = "V1.2.3.20240510"  # 当前运行的固件版本
         self.max_flash_size = 256 * 1024
         self._last_activity = time.time()
         self.on_progress = None
-
+        self.verification_errors = []  # 存储验证错误信息
+        
     def reset(self):
         self.state = self.STATE_IDLE
         self.firmware = bytearray()
         self.total_size = self.total_packets = self.current_packet = 0
         self.received_packets = set()
+        self.verification_errors = []
 
     def handle_start(self, data):
         if len(data) < 5: return False, CMD_ARM_OTA_NACK, b'\x00\x00'
@@ -626,15 +634,103 @@ class GD32F303Bootloader:
         md5_received = data[6:22].hex()
         self.state = self.STATE_VERIFYING
         self._last_activity = time.time()
+        
+        if self.on_progress: self.on_progress(95, "正在验证固件...")
         time.sleep(0.1)  # 模拟校验
+        
+        # 执行固件验证
+        self.verification_errors = []
+        verification_ok = self._verify_firmware(total_size, md5_received)
+        
+        if not verification_ok:
+            self.state = self.STATE_ERROR
+            error_msg = "; ".join(self.verification_errors) if self.verification_errors else "验证失败"
+            if self.on_progress: self.on_progress(0, f"固件验证失败: {error_msg}")
+            return False, CMD_ARM_OTA_NACK, b'\x00\x03'
+        
         if total_size != self.total_size:
-            self.state = self.STATE_ERROR; return False, CMD_ARM_OTA_NACK, b'\x00\x02'
+            self.state = self.STATE_ERROR
+            self.verification_errors.append(f"大小不匹配: 期望{self.total_size}, 收到{total_size}")
+            return False, CMD_ARM_OTA_NACK, b'\x00\x02'
         if len(self.firmware) != self.total_size:
-            self.state = self.STATE_ERROR; return False, CMD_ARM_OTA_NACK, struct.pack('<H', self.current_packet - 1)
+            self.state = self.STATE_ERROR
+            self.verification_errors.append(f"数据不完整: {len(self.firmware)}/{self.total_size}")
+            return False, CMD_ARM_OTA_NACK, struct.pack('<H', self.current_packet - 1)
+        
+        # 验证通过，更新固件版本
+        self.current_firmware_version = self.firmware_version
         self.state = self.STATE_JUMPING
+        if self.on_progress: self.on_progress(98, "跳转到新固件...")
         time.sleep(0.2)  # 模拟跳转
         self.state = self.STATE_IDLE
         return True, CMD_ARM_OTA_ACK, b''
+    
+    def _verify_firmware(self, total_size: int, md5_received: str) -> bool:
+        """验证固件完整性和有效性"""
+        ok = True
+        
+        # 1. 检查固件大小
+        if len(self.firmware) < self.FIRMWARE_MIN_SIZE:
+            self.verification_errors.append(f"固件太小: {len(self.firmware)} < {self.FIRMWARE_MIN_SIZE}")
+            ok = False
+        
+        if len(self.firmware) > self.FIRMWARE_MAX_SIZE:
+            self.verification_errors.append(f"固件太大: {len(self.firmware)} > {self.FIRMWARE_MAX_SIZE}")
+            ok = False
+        
+        # 2. 检查固件头部魔数
+        if len(self.firmware) >= 4:
+            magic = bytes(self.firmware[0:4])
+            if magic != self.FIRMWARE_HEADER_MAGIC:
+                self.verification_errors.append(f"无效的固件魔数: {magic.hex()} (期望: {self.FIRMWARE_HEADER_MAGIC.hex()})")
+                ok = False
+        
+        # 3. 检查固件尾部
+        if len(self.firmware) >= 32:
+            footer = self.firmware[-32:]
+            footer_magic = bytes(footer[0:4])
+            if footer_magic == b'FOOT':
+                # 验证尾部CRC
+                footer_crc_received = struct.unpack_from('<I', footer, 28)[0]
+                footer_crc_calc = binascii.crc32(footer[0:28]) & 0xFFFFFFFF
+                if footer_crc_received != footer_crc_calc:
+                    self.verification_errors.append(f"尾部CRC校验失败: 0x{footer_crc_received:08X} != 0x{footer_crc_calc:08X}")
+                    ok = False
+                
+                # 验证固件CRC
+                fw_crc_in_footer = struct.unpack_from('<I', footer, 4)[0]
+                fw_data = self.firmware[:-32]
+                fw_crc_calc = binascii.crc32(fw_data) & 0xFFFFFFFF
+                if fw_crc_in_footer != fw_crc_calc:
+                    self.verification_errors.append(f"固件CRC校验失败: 0x{fw_crc_in_footer:08X} != 0x{fw_crc_calc:08X}")
+                    ok = False
+        
+        # 4. 检查头部CRC
+        if len(self.firmware) >= 32:
+            header = self.firmware[0:32]
+            header_crc_received = struct.unpack_from('<I', header, 28)[0]
+            header_crc_calc = binascii.crc32(header[0:28]) & 0xFFFFFFFF
+            if header_crc_received != header_crc_calc:
+                self.verification_errors.append(f"头部CRC校验失败: 0x{header_crc_received:08X} != 0x{header_crc_calc:08X}")
+                ok = False
+        
+        # 5. 验证MD5
+        fw_md5 = hashlib.md5(self.firmware).hexdigest()
+        if md5_received != "0" * 32 and fw_md5 != md5_received:
+            self.verification_errors.append(f"MD5校验失败: {fw_md5[:16]}... != {md5_received[:16]}...")
+            ok = False
+        
+        # 6. 检查版本号格式
+        if len(self.firmware) >= 32:
+            header = self.firmware[0:32]
+            version_len = header[12]
+            if version_len > 0 and version_len < 32:
+                version = header[13:13 + version_len].decode('ascii', errors='ignore')
+                if not version.startswith('V'):
+                    self.verification_errors.append(f"版本号格式错误: {version}")
+                    ok = False
+        
+        return ok
 
     def handle_info_request(self, data):
         version_bytes = self.firmware_version.encode('ascii')
@@ -916,6 +1012,12 @@ class InverterController:
         for code in list(self.active_alarms):
             self._remove_alarm(code)
         self._manual_alarms.clear()  # 清空手动告警集合
+        # 批量清除后统一上报一次
+        now2 = time.time()
+        if (hasattr(self, '_alarm_pub_callback') and self._alarm_pub_callback
+                and now2 - getattr(self, '_last_alarm_pub', 0) >= 2):
+            self._last_alarm_pub = now2
+            self._alarm_pub_callback()
     
     def _check_alarms(self):
         """检查告警条件"""
@@ -1785,9 +1887,14 @@ class GD32F303Chip:
             self._log(f"[OTA] ✅ 固件升级成功! ({len(self.bootloader.firmware)} bytes)")
             if self.bootloader.firmware_version:
                 self.inverter.firmware_arm = self.bootloader.firmware_version
-                self._log(f"[OTA] ARM固件版本: {self.inverter.firmware_arm}")
+                self._log(f"[OTA] ARM固件版本已更新: {self.inverter.firmware_arm}")
         else:
-            self.ota_status = "校验失败"; self._log("[OTA] ❌ 固件校验失败")
+            self.ota_status = "校验失败"
+            self._log("[OTA] ❌ 固件校验失败")
+            # 输出详细的验证错误信息
+            if self.bootloader.verification_errors:
+                for error in self.bootloader.verification_errors:
+                    self._log(f"[OTA]   - {error}")
         if resp_cmd: self.serial_send(resp_cmd, resp_data)
 
     def _handle_ota_info(self, data):
