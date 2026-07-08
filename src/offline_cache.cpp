@@ -1,341 +1,572 @@
 /**
- * offline_cache.cpp - 离线数据缓存模块
- * 
- * 功能：
- * 1. 当MQTT未连接时，将数据存储到Flash/NVS
- * 2. 每个数据自动添加Unix时间戳
- * 3. 连接成功后发送所有缓存数据
- * 4. 自动清理超过7天的过期数据
+ * offline_cache.cpp — SPIFFS-based offline message cache with write batching
+ *
+ * Design goals:
+ *   1. Survive power loss (SPIFFS handles this)
+ *   2. Minimize flash wear (batch N messages into one file write)
+ *   3. 7-day retention with automatic cleanup
+ *   4. Drop-in replacement for the old NVS/Preferences cache
+ *
+ * File naming: /b<seq>  (e.g. /b000001, /b000002, ...)
+ * Each file contains a JSON array of cached messages.
  */
 
 #include "offline_cache.h"
 #include "nvs_storage.h"
 #include <string.h>
 #include <time.h>
+#include <SPIFFS.h>
 
 #ifdef CHIP_ESP32C3
   #include <Preferences.h>
-#else
-  #include <EEPROM.h>
 #endif
 
-// NVS 命名空间和键
-#define OFFLINE_CACHE_NAMESPACE "offline_cache"
-#define OFFLINE_CACHE_COUNT_KEY  "count"
-#define OFFLINE_CACHE_INDEX_KEY  "next_index"
-#define OFFLINE_CACHE_SYNC_KEY   "last_sync"
-#define OFFLINE_CACHE_ITEM(i)    "item_" #i
+// ---- Configuration ----
+#define SPIFFS_MOUNT      "/"
+#define MAX_BATCH_ITEMS   10        // flush after this many messages
+#define FLUSH_INTERVAL_MS 60000     // or after this many ms
+#define MAX_CACHE_FILES   500       // max batch files on disk
 
-// 全局变量
-static Preferences g_prefs;
-static bool g_initialized = false;
-static uint32_t g_last_sync_time = 0;
+// ---- NVS keys for metadata persistence ----
+#ifdef CHIP_ESP32C3
+static Preferences g_meta_prefs;
+#endif
+#define META_NAMESPACE    "cache_meta"
+#define KEY_NEXT_SEQ      "next_seq"
+#define KEY_TOTAL_MSGS    "total_msgs"
+#define KEY_LAST_SYNC     "last_sync"
+#define KEY_LAST_EPOCH    "last_epoch"
 
-// 静态函数声明
-static uint32_t get_current_timestamp(void);
-static bool load_item(int index, OfflineCacheItem* item);
-static bool save_item(const OfflineCacheItem* item);
-static void remove_item_at(int index);
+// ---- State ----
+static bool s_initialized = false;
+static SemaphoreHandle_t s_mutex = NULL;
 
-// ==================== 初始化 ====================
-void offline_cache_init(void) {
-    if (g_initialized) return;
-    
-    // 打开 Preferences
-    if (!g_prefs.begin(OFFLINE_CACHE_NAMESPACE, false)) {
-        Serial.println("[OFFLINE_CACHE] Failed to open NVS");
-        return;
-    }
-    
-    // 清理过期数据
-    offline_cache_cleanup();
-    
-    // 加载最后同步时间
-    g_last_sync_time = g_prefs.getUInt(OFFLINE_CACHE_SYNC_KEY, 0);
-    
-    g_initialized = true;
-    Serial.printf("[OFFLINE_CACHE] Initialized. Cached items: %d\n", offline_cache_count());
+// Write batch buffer
+static OfflineCacheItem *s_batch = NULL;
+static int s_batch_count = 0;
+static unsigned long s_batch_start_ms = 0;
+
+// Persistent metadata
+static uint32_t s_next_seq = 1;
+static uint32_t s_total_msgs = 0;
+static uint32_t s_last_sync = 0;
+
+// ---- Helpers ----
+
+static uint32_t now_epoch(void) {
+    return (uint32_t)time(nullptr);
 }
 
-// ==================== 工具函数 ====================
-static uint32_t get_current_timestamp(void) {
-    time_t now = time(nullptr);
-    if (now < 1000000000) {  // NTP未同步，返回0
-        return 0;
-    }
-    return (uint32_t)now;
+static void load_meta(void) {
+#ifdef CHIP_ESP32C3
+    g_meta_prefs.begin(META_NAMESPACE, true); // read-only
+    s_next_seq = g_meta_prefs.getUInt(KEY_NEXT_SEQ, 1);
+    s_total_msgs = g_meta_prefs.getUInt(KEY_TOTAL_MSGS, 0);
+    s_last_sync = g_meta_prefs.getUInt(KEY_LAST_SYNC, 0);
+    g_meta_prefs.end();
+#endif
 }
 
-static bool load_item(int index, OfflineCacheItem* item) {
-    if (index < 0 || index >= OFFLINE_CACHE_MAX_ITEMS) return false;
-    
-    char key[16];
-    snprintf(key, sizeof(key), "item_%d", index);
-    
-    String json = g_prefs.getString(key, "");
-    if (json.length() == 0) return false;
-    
-    // 简单的JSON解析
-    // 格式: {"topic":"xxx","payload":"yyy","ts":1234567890,"idx":1}
-    memset(item, 0, sizeof(OfflineCacheItem));
-    
-    const char* p = json.c_str();
-    char* out;
-    
-    // 解析 topic
-    const char* tp = strstr(p, "\"topic\":\"");
-    if (tp) {
-        tp += 9;
-        out = item->topic;
-        while (*tp && *tp != '"' && (size_t)(out - item->topic) < sizeof(item->topic) - 1) {
-            if (*tp == '\\' && *(tp + 1)) tp++;
-            *out++ = *tp++;
+static void save_meta(void) {
+#ifdef CHIP_ESP32C3
+    g_meta_prefs.begin(META_NAMESPACE, false); // read-write
+    g_meta_prefs.putUInt(KEY_NEXT_SEQ, s_next_seq);
+    g_meta_prefs.putUInt(KEY_TOTAL_MSGS, s_total_msgs);
+    g_meta_prefs.putUInt(KEY_LAST_SYNC, s_last_sync);
+    g_meta_prefs.end();
+#endif
+}
+
+// 冷启动时恢复上次 NTP epoch，避免 RTC 从 0 开始
+static void restore_rtc_from_nvs(void) {
+#ifdef CHIP_ESP32C3
+    g_meta_prefs.begin(META_NAMESPACE, true);
+    uint32_t saved_epoch = g_meta_prefs.getUInt(KEY_LAST_EPOCH, 0);
+    g_meta_prefs.end();
+
+    if (saved_epoch > 1000000000) {
+        struct timeval tv;
+        tv.tv_sec = (time_t)saved_epoch;
+        tv.tv_usec = 0;
+        settimeofday(&tv, NULL);
+        Serial.printf("[SYS] Restored RTC from NVS: epoch=%lu\n", (unsigned long)saved_epoch);
+    }
+#endif
+}
+
+// 保存当前 epoch 到 NVS（NTP 同步后调用）
+void offline_cache_save_epoch(void) {
+#ifdef CHIP_ESP32C3
+    time_t t = time(nullptr);
+    if (t > 1000000000) {
+        g_meta_prefs.begin(META_NAMESPACE, false);
+        g_meta_prefs.putUInt(KEY_LAST_EPOCH, (uint32_t)t);
+        g_meta_prefs.end();
+    }
+#endif
+}
+
+static void make_filename(uint32_t seq, char *buf, size_t len) {
+    snprintf(buf, len, "/b%08lu", (unsigned long)seq);
+}
+
+// 获取文件名的 basename（跳过前导 '/'）
+// Arduino SPIFFS 的 file.name() 返回 "/b000001"，需要跳过 '/'
+static const char* cache_basename(const char* path) {
+    if (path && path[0] == '/') return path + 1;
+    return path;
+}
+
+// Count files in SPIFFS
+static int count_files(void) {
+    int count = 0;
+    File root = SPIFFS.open("/");
+    if (!root || !root.isDirectory()) return 0;
+    File file = root.openNextFile();
+    while (file) {
+        if (cache_basename(file.name())[0] == 'b') count++;
+        file = root.openNextFile();
+    }
+    return count;
+}
+
+// Find the lowest sequence number among existing files
+static uint32_t find_min_seq(void) {
+    uint32_t min_seq = UINT32_MAX;
+    File root = SPIFFS.open("/");
+    if (!root || !root.isDirectory()) return min_seq;
+    File file = root.openNextFile();
+    while (file) {
+        const char* name = cache_basename(file.name());
+        if (name[0] == 'b') {
+            uint32_t seq = (uint32_t)strtoul(name + 1, NULL, 10);
+            if (seq < min_seq) min_seq = seq;
         }
-        *out = '\0';
+        file = root.openNextFile();
     }
-    
-    // 解析 payload
-    const char* pp = strstr(p, "\"payload\":\"");
-    if (pp) {
-        pp += 10;
-        out = item->payload;
-        while (*pp && *pp != '"' && (size_t)(out - item->payload) < sizeof(item->payload) - 1) {
-            if (*pp == '\\' && *(pp + 1)) pp++;
-            *out++ = *pp++;
+    return min_seq;
+}
+
+// Count total messages across all batch files
+static uint32_t count_all_messages(void) {
+    uint32_t total = 0;
+    File root = SPIFFS.open("/");
+    if (!root || !root.isDirectory()) return 0;
+    File file = root.openNextFile();
+    while (file) {
+        if (cache_basename(file.name())[0] == 'b') {
+            // Count '[' occurrences as rough message count
+            // Actually, count opening braces for items
+            String content = file.readString();
+            int idx = 0;
+            while ((idx = content.indexOf("\"t\":", idx)) >= 0) {
+                total++;
+                idx += 4;
+            }
         }
-        *out = '\0';
-    }
-    
-    // 解析 timestamp
-    const char* tsp = strstr(p, "\"ts\":");
-    if (tsp) {
-        item->timestamp = atoi(tsp + 5);
-    }
-    
-    // 解析 index
-    const char* ip = strstr(p, "\"idx\":");
-    if (ip) {
-        item->index = atoi(ip + 6);
-    }
-    
-    return true;
-}
-
-static bool save_item(const OfflineCacheItem* item) {
-    char key[16];
-    snprintf(key, sizeof(key), "item_%d", item->index);
-    
-    // 构建JSON
-    char json[sizeof(OfflineCacheItem) + 64];
-    int len = snprintf(json, sizeof(json),
-        "{\"topic\":\"%s\",\"payload\":\"%s\",\"ts\":%u,\"idx\":%u}",
-        item->topic, item->payload, item->timestamp, item->index);
-    
-    return g_prefs.putString(key, json);
-}
-
-// ==================== 添加数据 ====================
-bool offline_cache_add(const char* topic, const char* payload, uint32_t timestamp) {
-    if (!g_initialized) offline_cache_init();
-    if (!topic || !payload) return false;
-    
-    int count = offline_cache_count();
-    
-    // 检查是否已满
-    if (count >= OFFLINE_CACHE_MAX_ITEMS) {
-        Serial.println("[OFFLINE_CACHE] Cache full, removing oldest item");
-        // 移除最老的数据
-        remove_item_at(0);
-        count--;
-    }
-    
-    // 获取时间戳
-    if (timestamp == 0) {
-        timestamp = get_current_timestamp();
-    }
-    
-    // 创建新条目
-    OfflineCacheItem item;
-    memset(&item, 0, sizeof(item));
-    strncpy(item.topic, topic, sizeof(item.topic) - 1);
-    strncpy(item.payload, payload, sizeof(item.payload) - 1);
-    item.timestamp = timestamp;
-    item.index = count;
-    
-    // 保存
-    if (save_item(&item)) {
-        // 更新计数
-        g_prefs.putInt(OFFLINE_CACHE_COUNT_KEY, count + 1);
-        Serial.printf("[OFFLINE_CACHE] Added: topic=%s, ts=%u, total=%d\n", 
-                      topic, timestamp, count + 1);
-        return true;
-    }
-    
-    return false;
-}
-
-// ==================== 查询 ====================
-int offline_cache_count(void) {
-    if (!g_initialized) return 0;
-    return g_prefs.getInt(OFFLINE_CACHE_COUNT_KEY, 0);
-}
-
-bool offline_cache_get(int index, OfflineCacheItem* item) {
-    if (!g_initialized) return false;
-    if (index < 0 || index >= offline_cache_count()) return false;
-    return load_item(index, item);
-}
-
-uint32_t offline_cache_get_last_sync_time(void) {
-    return g_last_sync_time;
-}
-
-void offline_cache_set_last_sync_time(uint32_t timestamp) {
-    g_last_sync_time = timestamp;
-    if (g_initialized) {
-        g_prefs.putUInt(OFFLINE_CACHE_SYNC_KEY, timestamp);
-    }
-}
-
-size_t offline_cache_total_bytes(void) {
-    if (!g_initialized) return 0;
-    
-    size_t total = 0;
-    int count = offline_cache_count();
-    for (int i = 0; i < count; i++) {
-        char key[16];
-        snprintf(key, sizeof(key), "item_%d", i);
-        total += g_prefs.getString(key, "").length();
+        file = root.openNextFile();
     }
     return total;
 }
 
-// ==================== 删除和清理 ====================
-static void remove_item_at(int index) {
-    if (!g_initialized) return;
-    
-    int count = offline_cache_count();
-    if (index < 0 || index >= count) return;
-    
-    // 清除该条目
-    char key[16];
-    snprintf(key, sizeof(key), "item_%d", index);
-    g_prefs.remove(key);
-    
-    // 重新排列：将后面的数据前移
-    for (int i = index; i < count - 1; i++) {
-        OfflineCacheItem item;
-        char src_key[16], dst_key[16];
-        snprintf(src_key, sizeof(src_key), "item_%d", i + 1);
-        snprintf(dst_key, sizeof(dst_key), "item_%d", i);
-        
-        String json = g_prefs.getString(src_key, "");
-        if (json.length() > 0) {
-            g_prefs.remove(src_key);
-            g_prefs.putString(dst_key, json);
-        }
-    }
-    
-    // 清除最后一个
-    snprintf(key, sizeof(key), "item_%d", count - 1);
-    g_prefs.remove(key);
-    
-    // 更新计数
-    g_prefs.putInt(OFFLINE_CACHE_COUNT_KEY, count - 1);
-}
+// Delete files older than TTL_DAYS
+static void cleanup_expired(void) {
+    uint32_t now = now_epoch();
+    if (now == 0) return;
 
-void offline_cache_remove(int index) {
-    if (!g_initialized) return;
-    remove_item_at(index);
-}
-
-void offline_cache_cleanup(void) {
-    if (!g_initialized) return;
-    
-    uint32_t now = get_current_timestamp();
-    if (now == 0) return;  // NTP未同步，不清理
-    
-    uint32_t cutoff = now - (OFFLINE_CACHE_TTL_DAYS * 24 * 3600);
-    
-    int count = offline_cache_count();
+    uint32_t cutoff = now - ((uint32_t)OFFLINE_CACHE_TTL_DAYS * 86400);
     int removed = 0;
-    
-    for (int i = count - 1; i >= 0; i--) {
-        OfflineCacheItem item;
-        if (load_item(i, &item)) {
-            if (item.timestamp < cutoff) {
-                remove_item_at(i);
+
+    File root = SPIFFS.open("/");
+    if (!root || !root.isDirectory()) return;
+
+    File file = root.openNextFile();
+    while (file) {
+        if (cache_basename(file.name())[0] == 'b') {
+            // Read first timestamp from the batch
+            String content = file.readString();
+            int tsIdx = content.indexOf("\"ts\":");
+            if (tsIdx >= 0) {
+                uint32_t ts = (uint32_t)atol(content.c_str() + tsIdx + 5);
+                if (ts < cutoff) {
+                    String path = String("/") + file.name();
+                    SPIFFS.remove(path);
+                    removed++;
+                }
+            } else {
+                // No timestamp, remove
+                String path = String("/") + file.name();
+                SPIFFS.remove(path);
                 removed++;
             }
         }
+        file = root.openNextFile();
     }
-    
+
     if (removed > 0) {
-        Serial.printf("[OFFLINE_CACHE] Cleanup: removed %d expired items\n", removed);
+        s_total_msgs = count_all_messages();
+        save_meta();
+        Serial.printf("[OFFLINE_CACHE] Cleanup: removed %d expired batch files\n", removed);
     }
+}
+
+// Evict oldest files if we have too many
+static void evict_if_needed(void) {
+    while (count_files() >= MAX_CACHE_FILES) {
+        uint32_t min_seq = find_min_seq();
+        if (min_seq == UINT32_MAX) break;
+        char path[32];
+        make_filename(min_seq, path, sizeof(path));
+        Serial.printf("[OFFLINE_CACHE] Evicting oldest batch: %s\n", path);
+        SPIFFS.remove(path);
+    }
+}
+
+// ---- Internal: flush batch buffer to SPIFFS ----
+
+static bool flush_batch(void) {
+    if (s_batch_count == 0) return true;
+
+    evict_if_needed();
+
+    // Build JSON array manually (avoid ArduinoJson dependency)
+    String json = "[";
+    for (int i = 0; i < s_batch_count; i++) {
+        if (i > 0) json += ",";
+        json += "{\"t\":\"";
+        // Escape topic
+        for (const char *p = s_batch[i].topic; *p; p++) {
+            if (*p == '"' || *p == '\\') json += '\\';
+            json += *p;
+        }
+        json += "\",\"p\":\"";
+        // Escape payload
+        for (const char *p = s_batch[i].payload; *p; p++) {
+            if (*p == '"' || *p == '\\') json += '\\';
+            json += *p;
+        }
+        json += "\",\"ts\":";
+        json += String(s_batch[i].timestamp);
+        json += "}";
+    }
+    json += "]";
+
+    char path[32];
+    make_filename(s_next_seq, path, sizeof(path));
+
+    File f = SPIFFS.open(path, FILE_WRITE);
+    if (!f) {
+        Serial.printf("[OFFLINE_CACHE] Failed to create %s\n", path);
+        return false;
+    }
+    size_t written = f.print(json);
+    f.close();
+
+    if (written == 0) {
+        SPIFFS.remove(path);
+        return false;
+    }
+
+    Serial.printf("[OFFLINE_CACHE] Flushed batch #%lu: %d msgs -> %s (%zu bytes)\n",
+                  (unsigned long)s_next_seq, s_batch_count, path, written);
+
+    s_next_seq++;
+    s_total_msgs += s_batch_count;
+    s_batch_count = 0;
+    save_meta();
+
+    return true;
+}
+
+// ==================== Public API ====================
+
+void offline_cache_init(void) {
+    if (s_initialized) return;
+
+    if (!s_mutex) {
+        s_mutex = xSemaphoreCreateMutex();
+    }
+
+    s_batch = (OfflineCacheItem *)calloc(MAX_BATCH_ITEMS, sizeof(OfflineCacheItem));
+    s_batch_count = 0;
+    s_batch_start_ms = millis();
+
+    if (!SPIFFS.begin(true)) { // formatOnFail=true
+        Serial.println("[OFFLINE_CACHE] SPIFFS mount failed!");
+        return;
+    }
+
+    restore_rtc_from_nvs();  // 恢复上次 epoch 到 RTC
+    load_meta();
+    cleanup_expired();
+
+    Serial.printf("[OFFLINE_CACHE] Initialized. Batch files: %d, total msgs: %lu\n",
+                  count_files(), (unsigned long)s_total_msgs);
+
+    s_initialized = true;
+}
+
+bool offline_cache_add(const char *topic, const char *payload, uint32_t timestamp) {
+    if (!s_initialized || !topic || !payload) return false;
+
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    if (timestamp == 0) timestamp = now_epoch();
+
+    OfflineCacheItem *item = &s_batch[s_batch_count];
+    memset(item, 0, sizeof(*item));
+    strncpy(item->topic, topic, sizeof(item->topic) - 1);
+    strncpy(item->payload, payload, sizeof(item->payload) - 1);
+    item->timestamp = timestamp;
+    item->index = s_batch_count;
+    s_batch_count++;
+
+    Serial.printf("[OFFLINE_CACHE] Cached: %s (ts=%u)\n",
+                  topic, (unsigned)timestamp);
+
+    bool need_flush = (s_batch_count >= MAX_BATCH_ITEMS) ||
+                      (millis() - s_batch_start_ms >= FLUSH_INTERVAL_MS);
+
+    if (need_flush) {
+        flush_batch();
+        s_batch_start_ms = millis();
+    }
+
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return true;
+}
+
+int offline_cache_count(void) {
+    if (!s_initialized) return 0;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int count = s_total_msgs + s_batch_count;
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return count;
+}
+
+bool offline_cache_get(int index, OfflineCacheItem *item) {
+    (void)index; (void)item;
+    return false; // not supported in batch mode
+}
+
+void offline_cache_remove(int index) {
+    (void)index;
+    // not needed — flush_all handles removal
+}
+
+void offline_cache_cleanup(void) {
+    if (!s_initialized) return;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    cleanup_expired();
+    if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
 void offline_cache_clear(void) {
-    if (!g_initialized) return;
-    
-    int count = offline_cache_count();
-    for (int i = 0; i < count; i++) {
-        char key[16];
-        snprintf(key, sizeof(key), "item_%d", i);
-        g_prefs.remove(key);
-    }
-    g_prefs.putInt(OFFLINE_CACHE_COUNT_KEY, 0);
-    
-    Serial.println("[OFFLINE_CACHE] All cache cleared");
-}
+    if (!s_initialized) return;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
 
-// ==================== 发送所有缓存数据 ====================
-int offline_cache_flush_all(bool (*send_func)(const char* topic, const char* payload, uint32_t timestamp)) {
-    if (!g_initialized) return 0;
-    if (!send_func) return 0;
-    
-    int count = offline_cache_count();
-    if (count == 0) return 0;
-    
-    int sent = 0;
-    int failed = 0;
-    uint32_t now = get_current_timestamp();
-    
-    Serial.printf("[OFFLINE_CACHE] Flushing %d cached items...\n", count);
-    
-    // 逐条发送，从最老的开始
-    for (int i = 0; i < count; i++) {
-        OfflineCacheItem item;
-        if (load_item(i, &item)) {
-            Serial.printf("[OFFLINE_CACHE] Sending item %d: topic=%s, ts=%u\n", i, item.topic, item.timestamp);
-            
-            // 调用发送函数，检查返回值
-            if (send_func(item.topic, item.payload, item.timestamp)) {
-                sent++;
-                // 发送成功，删除该条目
-                remove_item_at(i);
-                // 由于删除了当前条目，后续条目索引前移，需要调整
-                i--;
-                count--;
-                Serial.printf("[OFFLINE_CACHE] Item %d sent successfully\n", i);
-            } else {
-                failed++;
-                Serial.printf("[OFFLINE_CACHE] Failed to send item %d\n", i);
+    // Clear batch buffer
+    s_batch_count = 0;
+
+    // Delete all batch files
+    File root = SPIFFS.open("/");
+    if (root && root.isDirectory()) {
+        File file = root.openNextFile();
+        while (file) {
+            if (cache_basename(file.name())[0] == 'b') {
+                String path = String("/") + file.name();
+                SPIFFS.remove(path);
             }
-            
-            // 每发送10条打印一次进度
-            if ((sent + failed) % 10 == 0) {
-                Serial.printf("[OFFLINE_CACHE] Progress: sent=%d, failed=%d\n", sent, failed);
-            }
+            file = root.openNextFile();
         }
     }
-    
-    // 更新最后同步时间
-    if (now > 0 && sent > 0) {
-        offline_cache_set_last_sync_time(now);
+
+    s_total_msgs = 0;
+    save_meta();
+    Serial.println("[OFFLINE_CACHE] All cache cleared");
+    if (s_mutex) xSemaphoreGive(s_mutex);
+}
+
+int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *payload, uint32_t timestamp)) {
+    if (!s_initialized || !send_func) return 0;
+
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    // First flush any buffered messages
+    if (s_batch_count > 0) {
+        flush_batch();
+        s_batch_start_ms = millis();
     }
-    
-    Serial.printf("[OFFLINE_CACHE] Flush complete: sent=%d, failed=%d, remaining=%d\n", 
-                  sent, failed, offline_cache_count());
+
+    int sent = 0;
+    int failed = 0;
+
+    Serial.println("[OFFLINE_CACHE] Flushing cached batches...");
+
+    while (true) {
+        uint32_t min_seq = find_min_seq();
+        if (min_seq == UINT32_MAX) break; // no more files
+
+        char path[32];
+        make_filename(min_seq, path, sizeof(path));
+
+        File f = SPIFFS.open(path, FILE_READ);
+        if (!f) {
+            SPIFFS.remove(path);
+            continue;
+        }
+
+        String content = f.readString();
+        f.close();
+
+        if (content.length() == 0) {
+            SPIFFS.remove(path);
+            continue;
+        }
+
+        // Parse the JSON array manually
+        // Format: [{"t":"topic","p":"payload","ts":123}, ...]
+        bool batch_ok = true;
+        int pos = 0;
+
+        while (pos < (int)content.length()) {
+            // Find next item start
+            int itemStart = content.indexOf('{', pos);
+            if (itemStart < 0) break;
+
+            // 用花括号深度计数找到正确的闭合 }，避免 payload 内嵌套 {} 导致截断
+            int depth = 0;
+            int itemEnd = -1;
+            for (int i = itemStart; i < (int)content.length(); i++) {
+                if (content[i] == '{') depth++;
+                else if (content[i] == '}') {
+                    depth--;
+                    if (depth == 0) { itemEnd = i; break; }
+                }
+            }
+            if (itemEnd < 0) break;
+
+            String itemStr = content.substring(itemStart, itemEnd + 1);
+            pos = itemEnd + 1;
+
+            // Parse "t":"..."
+            int tIdx = itemStr.indexOf("\"t\":\"");
+            if (tIdx < 0) continue;
+            int tStart = tIdx + 5;
+            int tEnd = itemStr.indexOf('"', tStart);
+            if (tEnd < 0) continue;
+
+            // Handle escaped quotes in topic
+            String topic = "";
+            for (int i = tStart; i < tEnd; i++) {
+                if (itemStr[i] == '\\' && i + 1 < tEnd) {
+                    i++;
+                    topic += itemStr[i];
+                } else {
+                    topic += itemStr[i];
+                }
+            }
+
+            // Parse "p":"..."
+            int pIdx = itemStr.indexOf("\"p\":\"");
+            if (pIdx < 0) continue;
+            int pStart = pIdx + 5;
+            // 逐字符扫描，跳过 \" 转义，找到 payload 结束的真正引号
+            int pEnd = -1;
+            for (int i = pStart; i < (int)itemStr.length(); i++) {
+                if (itemStr[i] == '\\') {
+                    i++;  // 跳过转义字符
+                } else if (itemStr[i] == '"') {
+                    pEnd = i;
+                    break;
+                }
+            }
+            if (pEnd < 0) continue;
+
+            String payload = "";
+            for (int i = pStart; i < pEnd; i++) {
+                if (itemStr[i] == '\\' && i + 1 < pEnd) {
+                    i++;
+                    payload += itemStr[i];
+                } else {
+                    payload += itemStr[i];
+                }
+            }
+
+            // Parse "ts":... 从 payload 结束位置之后搜索，避免匹配到 payload 内部
+            int tsIdx = itemStr.indexOf("\"ts\":", pEnd);
+            uint32_t ts = 0;
+            if (tsIdx >= 0) {
+                ts = (uint32_t)atol(itemStr.c_str() + tsIdx + 5);
+            }
+
+            // ts 不是有效 epoch（NTP 未同步时缓存的），用当前时间替代
+            if (ts < 1000000000) {
+                ts = (uint32_t)time(nullptr);
+            }
+
+            if (send_func(topic.c_str(), payload.c_str(), ts)) {
+                sent++;
+            } else {
+                failed++;
+                batch_ok = false;
+                Serial.println("[OFFLINE_CACHE] Send failed, pausing flush");
+                break;
+            }
+        }
+
+        if (batch_ok) {
+            SPIFFS.remove(path);
+            uint32_t msgCount = 0;
+            int idx = 0;
+            while ((idx = content.indexOf("\"t\":", idx)) >= 0) {
+                msgCount++;
+                idx += 4;
+            }
+            s_total_msgs -= (s_total_msgs >= msgCount) ? msgCount : s_total_msgs;
+        } else {
+            break;
+        }
+    }
+
+    if (sent > 0 && failed == 0) {
+        s_last_sync = now_epoch();
+        save_meta();
+    }
+
+    save_meta();
+    Serial.printf("[OFFLINE_CACHE] Flush done: sent=%d, failed=%d, remaining files=%d\n",
+                  sent, failed, count_files());
+
+    if (s_mutex) xSemaphoreGive(s_mutex);
     return sent;
+}
+
+uint32_t offline_cache_get_last_sync_time(void) {
+    return s_last_sync;
+}
+
+void offline_cache_set_last_sync_time(uint32_t timestamp) {
+    s_last_sync = timestamp;
+    save_meta();
+}
+
+size_t offline_cache_total_bytes(void) {
+    if (!s_initialized) return 0;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    size_t total = 0;
+    File root = SPIFFS.open("/");
+    if (root && root.isDirectory()) {
+        File file = root.openNextFile();
+        while (file) {
+            if (cache_basename(file.name())[0] == 'b') {
+                total += file.size();
+            }
+            file = root.openNextFile();
+        }
+    }
+
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return total;
 }
