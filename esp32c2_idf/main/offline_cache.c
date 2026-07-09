@@ -243,6 +243,16 @@ static void evict_if_needed(void) {
 
 /* ---- Internal: flush batch buffer to SPIFFS ---- */
 
+/* SPIFFS 满时删除最旧的批次文件腾出空间 */
+static void evict_oldest_batch(void) {
+    uint32_t min_seq = find_min_seq();
+    if (min_seq == UINT32_MAX) return;
+    char path[280];
+    make_filename(min_seq, path, sizeof(path));
+    ESP_LOGW(TAG, "SPIFFS full, evicting oldest: %s", path);
+    remove(path);
+}
+
 static esp_err_t flush_batch(void) {
     if (s_batch_count == 0) return ESP_OK;
 
@@ -270,6 +280,8 @@ static esp_err_t flush_batch(void) {
     if (!f) {
         ESP_LOGE(TAG, "Failed to create %s", path);
         free(json);
+        evict_oldest_batch();
+        s_batch_count = 0;  /* 防止缓冲区溢出 */
         return ESP_FAIL;
     }
     size_t written = fwrite(json, 1, strlen(json), f);
@@ -278,6 +290,8 @@ static esp_err_t flush_batch(void) {
 
     if (written == 0) {
         remove(path);
+        evict_oldest_batch();
+        s_batch_count = 0;
         return ESP_FAIL;
     }
 

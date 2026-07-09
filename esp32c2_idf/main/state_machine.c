@@ -43,6 +43,14 @@ static int64_t g_last_uart_heartbeat = 0;
 static int64_t g_last_cache_flush = 0;
 static int64_t g_last_debug = 0;
 
+/* ARM 数据超时看门告警 */
+static int64_t g_last_data_received = 0;
+static int64_t g_last_arm_alarm_check = 0;
+static bool g_arm_alarm_sent = false;
+#define ARM_DATA_TIMEOUT_MS   (10LL * 60 * 1000)  /* 10 分钟 */
+#define ARM_ALARM_CHECK_MS    (30LL * 1000)        /* 每 30 秒检查一次 */
+#define ARM_ALARM_CODE        13                    /* 告警码 */
+
 static bool g_btn_pressed = false;
 static int64_t g_btn_press_start = 0;
 
@@ -202,6 +210,8 @@ static void state_mqtt_connecting(void)
         led1_set(LED_SOLID);
         led2_set(LED_SOLID);
         g_last_heartbeat = now_ms();
+        g_last_data_received = now_ms();
+        g_arm_alarm_sent = false;
         return;
     }
     mqtt_connect();
@@ -246,6 +256,37 @@ static void state_running(void)
     if (now_ms() - g_last_cache_flush >= 10000) {
         g_last_cache_flush = now_ms();
         mqtt_flush_offline_cache();
+    }
+
+    /* ARM 数据超时看门告警（每 30 秒检查一次） */
+    if (now_ms() - g_last_arm_alarm_check >= ARM_ALARM_CHECK_MS) {
+        g_last_arm_alarm_check = now_ms();
+
+        if (now_ms() - g_last_data_received > ARM_DATA_TIMEOUT_MS) {
+            if (!g_arm_alarm_sent) {
+                g_arm_alarm_sent = true;
+                char alarm_msg[256];
+                snprintf(alarm_msg, sizeof(alarm_msg),
+                    "{\"code\":%d,\"level\":\"fault\","
+                    "\"message\":\"ARM通信超时\",\"count\":1,"
+                    "\"alarms\":[{\"code\":%d,\"level\":\"fault\",\"message\":\"ARM通信超时\"}],"
+                    "\"timestamp\":%lu}",
+                    ARM_ALARM_CODE, ARM_ALARM_CODE, (unsigned long)time(NULL));
+                mqtt_publish("data/alarm", alarm_msg, strlen(alarm_msg), 0, 0);
+                ESP_LOGW(TAG, "ARM watchdog alarm: no data for %lld ms",
+                         now_ms() - g_last_data_received);
+            }
+        } else if (g_arm_alarm_sent) {
+            g_arm_alarm_sent = false;
+            char recovery_msg[128];
+            snprintf(recovery_msg, sizeof(recovery_msg),
+                "{\"code\":0,\"level\":\"normal\","
+                "\"message\":\"故障恢复，系统正常\",\"count\":0,"
+                "\"alarms\":[],\"timestamp\":%lu}",
+                (unsigned long)time(NULL));
+            mqtt_publish("data/alarm", recovery_msg, strlen(recovery_msg), 0, 0);
+            ESP_LOGI(TAG, "ARM watchdog recovery: data resumed");
+        }
     }
 }
 
@@ -399,6 +440,7 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
                 }
             }
             mqtt_publish(topic, send_payload, strlen(send_payload), 0, 0);
+            g_last_data_received = now_ms();
             led_signal_data();
             ESP_LOGI(TAG, "PUBLISH -> cs_inv/%s/%s (%d bytes)",
                      g_device_sn, topic, (int)strlen(send_payload));
