@@ -224,6 +224,16 @@ static void evict_if_needed(void) {
 
 // ---- Internal: flush batch buffer to SPIFFS ----
 
+// SPIFFS 满时删除最旧的批次文件腾出空间
+static void evict_oldest_batch(void) {
+    uint32_t min_seq = find_min_seq();
+    if (min_seq == UINT32_MAX) return;
+    char path[32];
+    make_filename(min_seq, path, sizeof(path));
+    Serial.printf("[OFFLINE_CACHE] SPIFFS full, evicting oldest: %s\n", path);
+    SPIFFS.remove(path);
+}
+
 static bool flush_batch(void) {
     if (s_batch_count == 0) return true;
 
@@ -257,6 +267,9 @@ static bool flush_batch(void) {
     File f = SPIFFS.open(path, FILE_WRITE);
     if (!f) {
         Serial.printf("[OFFLINE_CACHE] Failed to create %s\n", path);
+        // SPIFFS 满了：删除最旧的批次腾出空间，然后丢弃当前批次
+        evict_oldest_batch();
+        s_batch_count = 0;  // 防止缓冲区溢出
         return false;
     }
     size_t written = f.print(json);
@@ -264,6 +277,8 @@ static bool flush_batch(void) {
 
     if (written == 0) {
         SPIFFS.remove(path);
+        evict_oldest_batch();
+        s_batch_count = 0;
         return false;
     }
 

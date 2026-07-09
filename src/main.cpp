@@ -64,6 +64,14 @@ static unsigned long g_last_uart_heartbeat = 0;
 static unsigned long g_last_led_tick = 0;
 static unsigned long g_last_debug = 0;
 
+// ARM 数据超时看门告警
+static unsigned long g_last_data_received = 0;   // 最后一次收到 ARM CMD_PUBLISH 的时间
+static unsigned long g_last_arm_alarm_check = 0;  // 上次检查告警的时间
+static bool g_arm_alarm_sent = false;             // 是否已发送超时告警
+#define ARM_DATA_TIMEOUT_MS   (10UL * 60 * 1000)  // 10 分钟无数据视为超时
+#define ARM_ALARM_CHECK_MS    (30UL * 1000)        // 每 30 秒检查一次
+#define ARM_ALARM_CODE        13                   // 告警码（不与 ARM 侧 1-12 冲突）
+
 static bool g_btn_pressed = false;
 static unsigned long g_btn_press_start = 0;
 
@@ -604,6 +612,8 @@ static void state_mqtt_connecting() {
     led1_set(LED_SOLID);        // 一切正常!
     led2_set(LED_SOLID);
     g_last_heartbeat = millis();
+    g_last_data_received = millis();  // 初始化 ARM 数据时间戳
+    g_arm_alarm_sent = false;
     return;
   }
   // 只在首次进入时调用一次 mqtt_connect，
@@ -633,14 +643,47 @@ static void state_running() {
   // 心跳
   if (millis() - g_last_heartbeat >= HEARTBEAT_INTERVAL) {
     g_last_heartbeat = millis();
-    
+
     char status_msg[256];
     snprintf(status_msg, sizeof(status_msg),
       "{\"online\":true,\"rssi\":%d,\"ip\":\"%s\"}",
       WiFi.RSSI(), WiFi.localIP().toString().c_str());
-    
+
     mqtt_publish("status", status_msg, strlen(status_msg), 1, 1);
     Serial.printf("[HB] status sent, ip=%s\n", WiFi.localIP().toString().c_str());
+  }
+
+  // ARM 数据超时看门告警（每 30 秒检查一次）
+  if (millis() - g_last_arm_alarm_check >= ARM_ALARM_CHECK_MS) {
+    g_last_arm_alarm_check = millis();
+
+    if (millis() - g_last_data_received > ARM_DATA_TIMEOUT_MS) {
+      // 超时：发送告警（仅发一次）
+      if (!g_arm_alarm_sent) {
+        g_arm_alarm_sent = true;
+        char alarm_msg[256];
+        snprintf(alarm_msg, sizeof(alarm_msg),
+          "{\"code\":%d,\"level\":\"fault\","
+          "\"message\":\"ARM通信超时\",\"count\":1,"
+          "\"alarms\":[{\"code\":%d,\"level\":\"fault\",\"message\":\"ARM通信超时\"}],"
+          "\"timestamp\":%lu}",
+          ARM_ALARM_CODE, ARM_ALARM_CODE, (unsigned long)time(nullptr));
+        pub_queue_push("data/alarm", alarm_msg);
+        Serial.printf("[ARM-WD] Alarm sent: no data for %lu ms\n",
+                      millis() - g_last_data_received);
+      }
+    } else if (g_arm_alarm_sent) {
+      // 恢复：ARM 数据已恢复，发送恢复消息
+      g_arm_alarm_sent = false;
+      char recovery_msg[128];
+      snprintf(recovery_msg, sizeof(recovery_msg),
+        "{\"code\":0,\"level\":\"normal\","
+        "\"message\":\"故障恢复，系统正常\",\"count\":0,"
+        "\"alarms\":[],\"timestamp\":%lu}",
+        (unsigned long)time(nullptr));
+      pub_queue_push("data/alarm", recovery_msg);
+      Serial.println("[ARM-WD] Recovery sent: ARM data resumed");
+    }
   }
 }
 
@@ -704,6 +747,7 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
         // 先回复 ACK，再入队（mqtt_publish 会阻塞 TLS，不能在 UART 回调中调用）
         uart_send_ack();
         pub_queue_push(topic, send_payload);
+        g_last_data_received = millis();  // 更新 ARM 数据到达时间
         led_signal_data();    // LED2 短暂闪一下表示有数据活动
         Serial.printf("[UART] PUBLISH queued -> cs_inv/%s/%s (%d bytes)\n",
                       g_device_sn, topic, strlen(send_payload));
