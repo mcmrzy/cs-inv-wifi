@@ -10,6 +10,7 @@
 #include "led_status.h"
 #include "uart_protocol.h"
 #include "config.h"
+#include "cs_protocol_defs.h"
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
@@ -22,6 +23,7 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "cJSON.h"
+#include "mbedtls/sha256.h"
 
 static const char* TAG = "MQTT-OTA";
 
@@ -52,7 +54,7 @@ static TaskHandle_t g_ota_task_handle = NULL;
 // ==================== 前向声明 ====================
 static bool parse_ota_command(const uint8_t* payload, unsigned int len, struct MqttOtaCommand* cmd);
 static void handle_ota_start_command(const struct MqttOtaCommand* cmd);
-static void handle_ota_stop_command(const struct MqttOtaCommand* cmd);
+static void handle_ota_cancel_command(const struct MqttOtaCommand* cmd);
 static void handle_ota_query_command(const struct MqttOtaCommand* cmd);
 static void send_ota_ack(const char* task_id, bool ack, const char* message);
 static void start_firmware_download(const struct MqttOtaCommand* cmd);
@@ -109,8 +111,8 @@ static bool parse_ota_command(const uint8_t* payload, unsigned int len,
 
     cJSON* j;
 
-    j = cJSON_GetObjectItem(root, "command");
-    strncpy(cmd->command, cJSON_IsString(j) ? j->valuestring : "", sizeof(cmd->command) - 1);
+    j = cJSON_GetObjectItem(root, "action");
+    strncpy(cmd->action, cJSON_IsString(j) ? j->valuestring : "", sizeof(cmd->action) - 1);
 
     j = cJSON_GetObjectItem(root, "target");
     strncpy(cmd->target, cJSON_IsString(j) ? j->valuestring : "", sizeof(cmd->target) - 1);
@@ -124,13 +126,19 @@ static bool parse_ota_command(const uint8_t* payload, unsigned int len,
     j = cJSON_GetObjectItem(root, "version");
     strncpy(cmd->version, cJSON_IsString(j) ? j->valuestring : "", sizeof(cmd->version) - 1);
 
-    j = cJSON_GetObjectItem(root, "md5");
-    strncpy(cmd->md5, cJSON_IsString(j) ? j->valuestring : "", sizeof(cmd->md5) - 1);
+    j = cJSON_GetObjectItem(root, "sha256");
+    strncpy(cmd->sha256, cJSON_IsString(j) ? j->valuestring : "", sizeof(cmd->sha256) - 1);
+
+    j = cJSON_GetObjectItem(root, "signature");
+    strncpy(cmd->signature, cJSON_IsString(j) ? j->valuestring : "", sizeof(cmd->signature) - 1);
 
     j = cJSON_GetObjectItem(root, "task_id");
     strncpy(cmd->task_id, cJSON_IsString(j) ? j->valuestring : "", sizeof(cmd->task_id) - 1);
 
     trim_str(cmd->url);
+
+    j = cJSON_GetObjectItem(root, "security_version");
+    cmd->security_version = cJSON_IsNumber(j) ? (uint32_t)j->valuedouble : 0;
 
     j = cJSON_GetObjectItem(root, "file_size");
     cmd->file_size = cJSON_IsNumber(j) ? (uint32_t)j->valuedouble : 0;
@@ -158,24 +166,24 @@ bool mqtt_ota_handle_command(const char* topic, const uint8_t* payload, unsigned
         return false;
     }
 
-    if (strlen(cmd.command) == 0) {
-        mqtt_ota_report_error("unknown", "MISSING_FIELD", "缺少 command 字段");
+    if (strlen(cmd.action) == 0) {
+        mqtt_ota_report_error("unknown", PROTO_ERR_INVALID_ARGS, "缺少 action 字段");
         return false;
     }
 
-    ESP_LOGI(TAG, "命令: %s, 目标: %s, URL: %s", cmd.command, cmd.target, cmd.url);
+    ESP_LOGI(TAG, "action: %s, 目标: %s, URL: %s", cmd.action, cmd.target, cmd.url);
 
     memcpy(&g_current_ota_cmd, &cmd, sizeof(cmd));
 
-    if (strcmp(cmd.command, "start") == 0) {
+    if (strcmp(cmd.action, PROTO_OTA_ACTION_START) == 0) {
         handle_ota_start_command(&cmd);
-    } else if (strcmp(cmd.command, "stop") == 0) {
-        handle_ota_stop_command(&cmd);
-    } else if (strcmp(cmd.command, "query") == 0) {
+    } else if (strcmp(cmd.action, PROTO_OTA_ACTION_CANCEL) == 0) {
+        handle_ota_cancel_command(&cmd);
+    } else if (strcmp(cmd.action, PROTO_OTA_ACTION_QUERY) == 0) {
         handle_ota_query_command(&cmd);
     } else {
-        ESP_LOGW(TAG, "未知命令: %s", cmd.command);
-        mqtt_ota_report_error(cmd.target, "UNKNOWN_CMD", "命令不支持");
+        ESP_LOGW(TAG, "未知 action: %s", cmd.action);
+        mqtt_ota_report_error(cmd.target, PROTO_ERR_NOT_SUPPORTED, "action 不支持");
     }
     return true;
 }
@@ -211,7 +219,15 @@ static void handle_ota_start_command(const struct MqttOtaCommand* cmd) {
     memcpy(&g_current_ota_cmd, cmd, sizeof(struct MqttOtaCommand));
 
     send_ota_ack(cmd->task_id, true, "OTA 命令已接收");
-    mqtt_ota_report_status(cmd->target, "preparing", 0, "准备下载固件");
+
+    // Ed25519 签名校验（当前仅 stub）
+    // TODO: 集成 mbedtls Ed25519 签名校验
+    if (cmd->signature[0] != '\0') {
+        ESP_LOGW(TAG, "Ed25519 signature present but not verified (TODO)");
+    }
+
+    mqtt_ota_report_status(cmd->target, PROTO_OTA_STATE_ACCEPTED, 0,
+                           PROTO_ERR_OK, "准备下载固件");
 
     if (g_ota_task_handle) {
         xTaskNotifyGive(g_ota_task_handle);
@@ -219,18 +235,30 @@ static void handle_ota_start_command(const struct MqttOtaCommand* cmd) {
     }
 }
 
-static void handle_ota_stop_command(const struct MqttOtaCommand* cmd) {
-    ESP_LOGI(TAG, "处理 STOP 命令");
-    ESP_LOGW(TAG, "STOP 命令暂不支持");
+static void handle_ota_cancel_command(const struct MqttOtaCommand* cmd) {
+    ESP_LOGI(TAG, "处理 CANCEL 命令");
+
+    if (mqtt_ota_is_busy()) {
+        ESP_LOGI(TAG, "取消 OTA 操作");
+        mqtt_ota_report_status(cmd->target, PROTO_OTA_STATE_CANCELLED, 0,
+                               PROTO_ERR_OK, "OTA 已取消");
+        reset_ota_state();
+    } else {
+        ESP_LOGI(TAG, "当前无 OTA 操作，忽略 cancel");
+        mqtt_ota_report_status(cmd->target, PROTO_OTA_STATE_CANCELLED, 0,
+                               PROTO_ERR_OK, "无活跃 OTA");
+    }
 }
 
 static void handle_ota_query_command(const struct MqttOtaCommand* cmd) {
     ESP_LOGI(TAG, "处理 QUERY 命令");
 
     if (mqtt_ota_is_busy()) {
-        mqtt_ota_report_status(g_current_ota_target, "downloading", 50, "查询中");
+        mqtt_ota_report_status(g_current_ota_target, PROTO_OTA_STATE_DOWNLOADING, 50,
+                               PROTO_ERR_OK, "查询中");
     } else {
-        mqtt_ota_report_status("esp", "idle", 0, "空闲");
+        mqtt_ota_report_status("esp", PROTO_OTA_STATE_ACCEPTED, 0,
+                               PROTO_ERR_OK, "空闲");
     }
 }
 
@@ -366,6 +394,11 @@ static void handle_esp_ota_download(esp_http_client_handle_t http_client, int co
         return;
     }
 
+    // 初始化 SHA-256 计算
+    mbedtls_sha256_context sha_ctx;
+    mbedtls_sha256_init(&sha_ctx);
+    mbedtls_sha256_starts_ret(&sha_ctx, 0);
+
     int bytes_written = 0;
     int prev_progress = 0;
     int64_t last_update = esp_timer_get_time() / 1000;
@@ -400,6 +433,9 @@ static void handle_esp_ota_download(esp_http_client_handle_t http_client, int co
                 return;
             }
 
+            // SHA-256 更新
+            mbedtls_sha256_update_ret(&sha_ctx, g_ota_buffer, bytes_read);
+
             bytes_written += bytes_read;
             g_ota_downloaded_bytes = bytes_written;
 
@@ -415,7 +451,8 @@ static void handle_esp_ota_download(esp_http_client_handle_t http_client, int co
 
                     char detail[32];
                     snprintf(detail, sizeof(detail), "下载中: %d%%", progress);
-                    mqtt_ota_report_status("esp", "downloading", progress, detail);
+                    mqtt_ota_report_status("esp", PROTO_OTA_STATE_DOWNLOADING, progress,
+                                           PROTO_ERR_OK, detail);
                 }
                 last_update = esp_timer_get_time() / 1000;
             }
@@ -432,9 +469,33 @@ static void handle_esp_ota_download(esp_http_client_handle_t http_client, int co
     }
 
     ESP_LOGI(TAG, "[ESP] 下载完成, 共 %d 字节", bytes_written);
-    mqtt_ota_report_status("esp", "verifying", 100, "校验中...");
+    mqtt_ota_report_status("esp", PROTO_OTA_STATE_VERIFYING, 100,
+                           PROTO_ERR_OK, "校验中...");
 
     led1_set(LED_SOLID);
+
+    // SHA-256 校验
+    if (cmd->sha256[0] != '\0') {
+        uint8_t hash[32];
+        mbedtls_sha256_finish_ret(&sha_ctx, hash);
+        mbedtls_sha256_free(&sha_ctx);
+
+        char hex[65];
+        for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", hash[i]);
+
+        if (strcmp(hex, cmd->sha256) != 0) {
+            ESP_LOGE(TAG, "[ESP] SHA-256 校验失败: expected=%s, got=%s", cmd->sha256, hex);
+            esp_ota_abort(ota_handle);
+            mqtt_ota_report_error("esp", PROTO_ERR_EXEC_FAILED, "SHA-256 校验失败");
+            led1_set(LED_OFF);
+            reset_ota_state();
+            return;
+        }
+        ESP_LOGI(TAG, "[ESP] SHA-256 校验通过");
+    } else {
+        mbedtls_sha256_free(&sha_ctx);
+        ESP_LOGI(TAG, "[ESP] 未提供 SHA-256，跳过校验");
+    }
 
     ota_err = esp_ota_end(ota_handle);
     if (ota_err != ESP_OK) {
@@ -448,7 +509,8 @@ static void handle_esp_ota_download(esp_http_client_handle_t http_client, int co
     esp_ota_set_boot_partition(update_partition);
 
     ESP_LOGI(TAG, "[ESP] 升级成功，设备即将重启");
-    mqtt_ota_report_status("esp", "done", 100, "升级成功，重启中");
+    mqtt_ota_report_status("esp", PROTO_OTA_STATE_REBOOTING, 100,
+                           PROTO_ERR_OK, "升级成功，重启中");
     led1_set(LED_OFF);
 
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -516,7 +578,8 @@ static void handle_arm_ota_download(esp_http_client_handle_t http_client, int co
 
                     char detail[32];
                     snprintf(detail, sizeof(detail), "下载中: %d%%", progress);
-                    mqtt_ota_report_status("arm", "downloading", progress, detail);
+                    mqtt_ota_report_status("arm", PROTO_OTA_STATE_DOWNLOADING, progress,
+                                           PROTO_ERR_OK, detail);
                 }
                 last_update = esp_timer_get_time() / 1000;
             }
@@ -542,7 +605,8 @@ static void handle_arm_ota_download(esp_http_client_handle_t http_client, int co
         return;
     }
 
-    mqtt_ota_report_status("arm", "verifying", 100, "等待 ARM 校验");
+    mqtt_ota_report_status("arm", PROTO_OTA_STATE_VERIFYING, 100,
+                           PROTO_ERR_OK, "等待 ARM 校验");
     led1_set(LED_SOLID);
 
     ESP_LOGI(TAG, "[ARM] 固件已转发，等待 ARM 校验");
@@ -551,23 +615,23 @@ static void handle_arm_ota_download(esp_http_client_handle_t http_client, int co
 // ==================== 状态上报 ====================
 
 void mqtt_ota_report_status(const char* target, const char* state, int progress,
-                            const char* detail) {
+                            const char* code, const char* detail) {
     cJSON* root = cJSON_CreateObject();
     if (!root) return;
 
-    const char* client_id = mqtt_get_client_id();
-    cJSON_AddStringToObject(root, "device_id", client_id ? client_id : "");
-    cJSON_AddStringToObject(root, "current_version", FIRMWARE_VERSION);
+    cJSON_AddStringToObject(root, "target", target);
+    const char* ver = g_current_ota_cmd.version[0] ? g_current_ota_cmd.version : FIRMWARE_VERSION;
+    cJSON_AddStringToObject(root, "version", ver);
     cJSON_AddStringToObject(root, "state", state);
     cJSON_AddNumberToObject(root, "progress", progress);
-    cJSON_AddStringToObject(root, "status_message", detail);
-    cJSON_AddStringToObject(root, "error_message", "");
+    cJSON_AddStringToObject(root, "code", code ? code : PROTO_ERR_OK);
+    cJSON_AddStringToObject(root, "message", detail ? detail : "");
 
     char* payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
     if (payload) {
-        mqtt_publish("ota/status", payload, strlen(payload), 0, false);
+        mqtt_publish(PROTO_TOPIC_OTA_STATUS, payload, strlen(payload), 0, 0);
         ESP_LOGI(TAG, "上报状态: %s", payload);
         free(payload);
     }
@@ -578,19 +642,19 @@ void mqtt_ota_report_error(const char* target, const char* error_code,
     cJSON* root = cJSON_CreateObject();
     if (!root) return;
 
-    const char* client_id = mqtt_get_client_id();
-    cJSON_AddStringToObject(root, "device_id", client_id ? client_id : "");
-    cJSON_AddStringToObject(root, "current_version", FIRMWARE_VERSION);
-    cJSON_AddStringToObject(root, "state", "failed");
+    cJSON_AddStringToObject(root, "target", target);
+    const char* ver = g_current_ota_cmd.version[0] ? g_current_ota_cmd.version : FIRMWARE_VERSION;
+    cJSON_AddStringToObject(root, "version", ver);
+    cJSON_AddStringToObject(root, "state", PROTO_OTA_STATE_FAILED);
     cJSON_AddNumberToObject(root, "progress", 0);
-    cJSON_AddStringToObject(root, "status_message", "");
-    cJSON_AddStringToObject(root, "error_message", error_message);
+    cJSON_AddStringToObject(root, "code", error_code ? error_code : PROTO_ERR_EXEC_FAILED);
+    cJSON_AddStringToObject(root, "message", error_message ? error_message : "");
 
     char* payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
     if (payload) {
-        mqtt_publish("ota/status", payload, strlen(payload), 1, false);
+        mqtt_publish(PROTO_TOPIC_OTA_STATUS, payload, strlen(payload), 1, 0);
         ESP_LOGI(TAG, "上报错误: %s", payload);
         free(payload);
     }
@@ -600,16 +664,19 @@ static void send_ota_ack(const char* task_id, bool ack, const char* message) {
     cJSON* root = cJSON_CreateObject();
     if (!root) return;
 
-    cJSON_AddBoolToObject(root, "ack", ack);
-    cJSON_AddStringToObject(root, "task_id", task_id);
-    cJSON_AddStringToObject(root, "message", message);
-    cJSON_AddNumberToObject(root, "timestamp", (double)time(NULL));
+    cJSON_AddStringToObject(root, "task_id", task_id ? task_id : "");
+    cJSON_AddStringToObject(root, "cmd", "ota");
+    cJSON_AddStringToObject(root, "stage", ack ? PROTO_CMD_STAGE_ACK : PROTO_CMD_STAGE_DONE);
+    cJSON_AddBoolToObject(root, "success", ack);
+    cJSON_AddStringToObject(root, "code", ack ? PROTO_ERR_OK : PROTO_ERR_EXEC_FAILED);
+    cJSON_AddStringToObject(root, "message", message ? message : "");
+    cJSON_AddItemToObject(root, "result", cJSON_CreateArray());
 
     char* payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
     if (payload) {
-        mqtt_publish("ota/cmd_ack", payload, strlen(payload), 1, false);
+        mqtt_publish(PROTO_TOPIC_CMD_RESP, payload, strlen(payload), 1, 0);
         ESP_LOGI(TAG, "发送 ACK: %s", payload);
         free(payload);
     }

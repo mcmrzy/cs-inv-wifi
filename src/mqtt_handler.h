@@ -45,6 +45,15 @@ void mqtt_loop(void);
 // 返回: 0=成功, 负数=错误码
 int mqtt_publish(const char* sub_topic, const char* data, int len, int qos, int retain);
 
+// 向指定子主题发布信封格式消息
+// 自动包装为 {"t":<NTP秒>,"data":<arm_payload>} 格式
+// topic: 子主题
+// arm_payload: ARM 原始 payload（JSON 对象）
+// payload_len: payload 长度
+// retain: 是否保留消息
+// 返回: true=成功, false=失败
+bool mqtt_publish_envelope(const char *topic, const char *arm_payload, unsigned int payload_len, bool retain = false);
+
 // 订阅指定子主题
 // sub_topic: 子主题（如 "cmd"，完整主题为 cs_inv/{SN}/cmd）
 // qos: QoS 等级

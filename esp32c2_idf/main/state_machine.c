@@ -10,6 +10,7 @@
 #include "ota_manager.h"
 #include "arm_ota.h"
 #include "offline_cache.h"
+#include "cs_protocol_defs.h"
 
 #include "esp_wifi.h"
 #include "esp_netif.h"
@@ -23,6 +24,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 static const char *TAG = "sm";
 
@@ -249,7 +251,7 @@ static void state_running(void)
         snprintf(status_msg, sizeof(status_msg),
                  "{\"online\":true,\"rssi\":%d,\"ip\":\"" IPSTR "\"}",
                  ap_info.rssi, IP2STR(&ip_info.ip));
-        mqtt_publish("status", status_msg, strlen(status_msg), 1, 1);
+        mqtt_publish(PROTO_TOPIC_STATUS, status_msg, strlen(status_msg), 1, 1);
         ESP_LOGI(TAG, "Heartbeat sent");
     }
 
@@ -267,12 +269,9 @@ static void state_running(void)
                 g_arm_alarm_sent = true;
                 char alarm_msg[256];
                 snprintf(alarm_msg, sizeof(alarm_msg),
-                    "{\"code\":%d,\"level\":\"fault\","
-                    "\"message\":\"ARM通信超时\",\"count\":1,"
-                    "\"alarms\":[{\"code\":%d,\"level\":\"fault\",\"message\":\"ARM通信超时\"}],"
-                    "\"timestamp\":%lu}",
-                    ARM_ALARM_CODE, ARM_ALARM_CODE, (unsigned long)time(NULL));
-                mqtt_publish("data/alarm", alarm_msg, strlen(alarm_msg), 0, 0);
+                    "{\"source\":%d,\"code\":%d,\"level\":%d,\"state\":%d}",
+                    PROTO_SOURCE_COMM, ARM_ALARM_CODE, PROTO_LEVEL_FAULT, PROTO_STATE_ACTIVE);
+                mqtt_publish(PROTO_TOPIC_ALARM, alarm_msg, strlen(alarm_msg), 0, 0);
                 ESP_LOGW(TAG, "ARM watchdog alarm: no data for %lld ms",
                          now_ms() - g_last_data_received);
             }
@@ -280,11 +279,9 @@ static void state_running(void)
             g_arm_alarm_sent = false;
             char recovery_msg[128];
             snprintf(recovery_msg, sizeof(recovery_msg),
-                "{\"code\":0,\"level\":\"normal\","
-                "\"message\":\"故障恢复，系统正常\",\"count\":0,"
-                "\"alarms\":[],\"timestamp\":%lu}",
-                (unsigned long)time(NULL));
-            mqtt_publish("data/alarm", recovery_msg, strlen(recovery_msg), 0, 0);
+                "{\"source\":%d,\"code\":%d,\"level\":%d,\"state\":%d}",
+                PROTO_SOURCE_COMM, ARM_ALARM_CODE, PROTO_LEVEL_FAULT, PROTO_STATE_RECOVERED);
+            mqtt_publish(PROTO_TOPIC_ALARM, recovery_msg, strlen(recovery_msg), 0, 0);
             ESP_LOGI(TAG, "ARM watchdog recovery: data resumed");
         }
     }
@@ -530,7 +527,7 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
         size_t copy_len = (len < sizeof(json) - 1) ? len : sizeof(json) - 1;
         memcpy(json, data, copy_len);
         json[copy_len] = '\0';
-        mqtt_publish("cmd_result", json, copy_len, 1, 0);
+        mqtt_publish(PROTO_TOPIC_CMD_RESP, json, copy_len, 1, 0);
         ESP_LOGI(TAG, "ARM->MQTT cmd_result: %s", json);
         uart_send_ack();
         break;
@@ -567,6 +564,44 @@ void on_mqtt_message(const char *topic, const char *payload, unsigned int len)
         }
     }
 
+    /* ---- /cmd 下行命令：提取 task_id / t，过期校验，回复 ACK ---- */
+    bool is_cmd_topic = (strcmp(sub, "cmd") == 0);
+    if (is_cmd_topic) {
+        char task_id[72] = {0};
+        char t_str[16]   = {0};
+        char cmd_str[32] = {0};
+        extract_str(payload, "\"task_id\"", task_id, sizeof(task_id));
+        extract_str(payload, "\"t\"",       t_str,   sizeof(t_str));
+        extract_str(payload, "\"cmd\"",     cmd_str, sizeof(cmd_str));
+        time_t cmd_t = atol(t_str);
+        time_t now   = time(NULL);
+
+        /* 过期校验（NTP 未同步时跳过） */
+        if (now > 0 && cmd_t > 0 && (now - cmd_t) > PROTO_CMD_EXPIRE_S) {
+            char expired_resp[256];
+            snprintf(expired_resp, sizeof(expired_resp),
+                "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
+                "\"success\":false,\"code\":\"%s\",\"message\":\"Command expired\",\"result\":[]}",
+                task_id, cmd_str, PROTO_CMD_STAGE_DONE, PROTO_ERR_EXPIRED);
+            mqtt_publish(PROTO_TOPIC_CMD_RESP, expired_resp, (int)strlen(expired_resp), 0, 0);
+            ESP_LOGW(TAG, "CMD expired: task_id=%s cmd=%s t=%ld now=%ld",
+                     task_id, cmd_str, (long)cmd_t, (long)now);
+            return;  /* 不转发给 ARM */
+        }
+
+        /* 立即回复 acknowledged（QoS 0 低延迟） */
+        if (task_id[0] != '\0') {
+            char ack_resp[256];
+            snprintf(ack_resp, sizeof(ack_resp),
+                "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
+                "\"success\":true,\"code\":\"%s\",\"message\":\"\",\"result\":[]}",
+                task_id, cmd_str, PROTO_CMD_STAGE_ACK, PROTO_ERR_OK);
+            mqtt_publish(PROTO_TOPIC_CMD_RESP, ack_resp, (int)strlen(ack_resp), 0, 0);
+            ESP_LOGI(TAG, "CMD ACK sent: task_id=%s cmd=%s", task_id, cmd_str);
+        }
+    }
+
+    /* 转发给 ARM */
     char json[512];
     int jslen = snprintf(json, sizeof(json),
                          "{\"topic\":\"%s\",\"payload\":\"%.*s\"}",

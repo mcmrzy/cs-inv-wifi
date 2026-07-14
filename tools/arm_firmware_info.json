@@ -2,8 +2,8 @@
   "version": "V1.3.0.20260702",
   "size_bytes": 65536,
   "size_kb": 64,
-  "md5": "a305e5bbca0554d381b313090fc2cee9",
-  "sha256": "a3d21004b3c96477d431f8c73813b2d672613693003fb0e40acef19bc16bddba",
+  "md5": "84ea70ea038f50d09e012577d0652d38",
+  "sha256": "7a7869d99311a978c2460140c493686163feb5f0d2a986dbf3a95a93f7a1d8c5",
   "header": {
     "magic": "47443332",
     "magic_valid": true,
@@ -13,8 +13,8 @@
     "size_match": true,
     "crc_valid": true
   },
-  "generated_at": "2026-07-02T17:37:04.215018",
+  "generated_at": "2026-07-13T18:27:10.971152",
   "description": "GD32F303 ARM固件 V1.3.0.20260702",
   "filename": "arm_firmware.bin",
-  "filepath": "D:\\CS_INV_WIFI\\tools\\arm_firmware.bin"
+  "filepath": "C:\\Users\\29538\\.qoder\\worktree\\CS_INV_WIFI\\wt6tJz\\tools\\arm_firmware.bin"
 }

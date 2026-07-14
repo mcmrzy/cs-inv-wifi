@@ -11,11 +11,13 @@
 #include "led_status.h"
 #include "uart_protocol.h"
 #include "ota_result.h"
+#include "cs_protocol_defs.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <Update.h>
 #include <string.h>
+#include "mbedtls/sha256.h"
 
 // ==================== OTA 大小限制 ====================
 #define OTA_ESP_MAX_SIZE  (2 * 1024 * 1024)      // ESP: 2 MB
@@ -44,12 +46,13 @@ static uint8_t g_ota_buffer[4096];
 // ==================== 前向声明 ====================
 static bool parse_ota_command(const uint8_t* payload, unsigned int len, struct MqttOtaCommand* cmd);
 static void handle_ota_start_command(const struct MqttOtaCommand* cmd);
-static void handle_ota_stop_command(const struct MqttOtaCommand* cmd);
+static void handle_ota_cancel_command(const struct MqttOtaCommand* cmd);
 static void handle_ota_query_command(const struct MqttOtaCommand* cmd);
 static void send_ota_ack(const char* task_id, bool ack, const char* message);
 static void start_firmware_download(const struct MqttOtaCommand* cmd);
 static void handle_esp_ota_download(HTTPClient* http, int content_length, const struct MqttOtaCommand* cmd);
 static void handle_arm_ota_download(HTTPClient* http, int content_length, const struct MqttOtaCommand* cmd);
+static void reset_ota_state();
 
 // ==================== 初始化 ====================
 
@@ -98,17 +101,19 @@ static bool parse_ota_command(const uint8_t* payload, unsigned int len,
   }
 
   // 提取字段
-  strncpy(cmd->command, doc["command"] | "", sizeof(cmd->command) - 1);
+  strncpy(cmd->action, doc["action"] | "", sizeof(cmd->action) - 1);
   strncpy(cmd->target, doc["target"] | "", sizeof(cmd->target) - 1);
   strncpy(cmd->firmware_id, doc["firmware_id"] | "", sizeof(cmd->firmware_id) - 1);
   strncpy(cmd->url, doc["url"] | "", sizeof(cmd->url) - 1);
   strncpy(cmd->version, doc["version"] | "", sizeof(cmd->version) - 1);
-  strncpy(cmd->md5, doc["md5"] | "", sizeof(cmd->md5) - 1);
+  strncpy(cmd->sha256, doc["sha256"] | "", sizeof(cmd->sha256) - 1);
+  strncpy(cmd->signature, doc["signature"] | "", sizeof(cmd->signature) - 1);
   strncpy(cmd->task_id, doc["task_id"] | "", sizeof(cmd->task_id) - 1);
 
   // 去除 URL 两端的空格（服务器可能发送带空格的 URL）
   trim_str(cmd->url);
 
+  cmd->security_version = doc["security_version"] | (uint32_t)0;
   cmd->file_size = doc["file_size"] | 0;
   cmd->timeout = doc["timeout"] | 300;
   cmd->timestamp = doc["timestamp"] | (uint32_t)time(nullptr);
@@ -131,27 +136,27 @@ bool mqtt_ota_handle_command(const char* topic, const uint8_t* payload, unsigned
   }
 
   // 验证必要字段
-  if (strlen(cmd.command) == 0) {
-    mqtt_ota_report_error("unknown", "MISSING_FIELD", "缺少 command 字段");
+  if (strlen(cmd.action) == 0) {
+    mqtt_ota_report_error("unknown", PROTO_ERR_INVALID_ARGS, "缺少 action 字段");
     return false;
   }
 
-  Serial.printf("[MQTT-OTA] 命令: %s, 目标: %s, URL: %s\n",
-    cmd.command, cmd.target, cmd.url);
+  Serial.printf("[MQTT-OTA] action: %s, 目标: %s, URL: %s\n",
+    cmd.action, cmd.target, cmd.url);
 
   // 保存当前命令
   memcpy(&g_current_ota_cmd, &cmd, sizeof(cmd));
 
   // 根据命令类型处理
-  if (strcmp(cmd.command, "start") == 0) {
+  if (strcmp(cmd.action, PROTO_OTA_ACTION_START) == 0) {
     handle_ota_start_command(&cmd);
-  } else if (strcmp(cmd.command, "stop") == 0) {
-    handle_ota_stop_command(&cmd);
-  } else if (strcmp(cmd.command, "query") == 0) {
+  } else if (strcmp(cmd.action, PROTO_OTA_ACTION_CANCEL) == 0) {
+    handle_ota_cancel_command(&cmd);
+  } else if (strcmp(cmd.action, PROTO_OTA_ACTION_QUERY) == 0) {
     handle_ota_query_command(&cmd);
   } else {
-    Serial.printf("[MQTT-OTA] 未知命令: %s\n", cmd.command);
-    mqtt_ota_report_error(cmd.target, "UNKNOWN_CMD", "命令不支持");
+    Serial.printf("[MQTT-OTA] 未知 action: %s\n", cmd.action);
+    mqtt_ota_report_error(cmd.target, PROTO_ERR_NOT_SUPPORTED, "action 不支持");
   }
   return true;  // OTA 命令已处理（即使处理失败，也不应转发给 ARM）
 }
@@ -193,19 +198,35 @@ static void handle_ota_start_command(const struct MqttOtaCommand* cmd) {
   // 发送应答
   send_ota_ack(cmd->task_id, true, "OTA 命令已接收");
 
-  // 立即上报状态：准备下载
-  mqtt_ota_report_status(cmd->target, "preparing", 0, "准备下载固件");
+  // Ed25519 签名校验（当前仅 stub）
+  // TODO: 集成 mbedtls Ed25519 签名校验
+  if (cmd->signature[0] != '\0') {
+    Serial.println("[MQTT-OTA] Ed25519 signature present but not verified (TODO)");
+  }
+
+  // 立即上报状态：已接受
+  mqtt_ota_report_status(cmd->target, PROTO_OTA_STATE_ACCEPTED, 0,
+                         PROTO_ERR_OK, "准备下载固件");
 
   // 不在 MQTT 回调中直接下载，由 mqtt_ota_process() 在主循环中触发
   g_download_pending = true;
   Serial.println("[MQTT-OTA] 下载将在主循环中启动");
 }
 
-static void handle_ota_stop_command(const struct MqttOtaCommand* cmd) {
-  Serial.printf("[MQTT-OTA] 处理 STOP 命令\n");
+static void handle_ota_cancel_command(const struct MqttOtaCommand* cmd) {
+  Serial.printf("[MQTT-OTA] 处理 CANCEL 命令\n");
 
-  // 暂时未实现完全的取消功能，留给后续扩展
-  Serial.println("[MQTT-OTA] STOP 命令暂不支持");
+  if (mqtt_ota_is_busy()) {
+    // 取消正在进行的 OTA
+    Serial.println("[MQTT-OTA] 取消 OTA 操作");
+    mqtt_ota_report_status(cmd->target, PROTO_OTA_STATE_CANCELLED, 0,
+                           PROTO_ERR_OK, "OTA 已取消");
+    reset_ota_state();
+  } else {
+    Serial.println("[MQTT-OTA] 当前无 OTA 操作，忽略 cancel");
+    mqtt_ota_report_status(cmd->target, PROTO_OTA_STATE_CANCELLED, 0,
+                           PROTO_ERR_OK, "无活跃 OTA");
+  }
 }
 
 static void handle_ota_query_command(const struct MqttOtaCommand* cmd) {
@@ -213,9 +234,11 @@ static void handle_ota_query_command(const struct MqttOtaCommand* cmd) {
 
   // 上报当前 OTA 状态
   if (mqtt_ota_is_busy()) {
-    mqtt_ota_report_status(g_current_ota_target.c_str(), "downloading", 50, "查询中");
+    mqtt_ota_report_status(g_current_ota_target.c_str(), PROTO_OTA_STATE_DOWNLOADING, 50,
+                           PROTO_ERR_OK, "查询中");
   } else {
-    mqtt_ota_report_status("esp", "idle", 0, "空闲");
+    mqtt_ota_report_status("esp", PROTO_OTA_STATE_ACCEPTED, 0,
+                           PROTO_ERR_OK, "空闲");
   }
 }
 
@@ -324,6 +347,11 @@ static void handle_esp_ota_download(HTTPClient* http, int content_length,
     return;
   }
 
+  // 初始化 SHA-256 计算
+  mbedtls_sha256_context sha_ctx;
+  mbedtls_sha256_init(&sha_ctx);
+  mbedtls_sha256_starts_ret(&sha_ctx, 0);
+
   WiFiClient* stream = http->getStreamPtr();
 
   const int BUFFER_SIZE = 4096;
@@ -381,6 +409,9 @@ static void handle_esp_ota_download(HTTPClient* http, int content_length,
       if (bytes_read > 0) {
         last_data_time = millis();  // 更新数据接收时间
 
+        // SHA-256 更新
+        mbedtls_sha256_update_ret(&sha_ctx, g_ota_buffer, bytes_read);
+
         // 写入 Flash
         size_t written = Update.write(g_ota_buffer, bytes_read);
         if (written != bytes_read) {
@@ -413,8 +444,8 @@ static void handle_esp_ota_download(HTTPClient* http, int content_length,
             Serial.printf("[MQTT-OTA-ESP] 进度: %d%% (%d/%d), 速度: %d KB/s\n",
               progress, bytes_written, content_length, speed_kbps);
 
-            mqtt_ota_report_status("esp", "downloading", progress,
-              String("下载中: " + String(progress) + "%").c_str());
+            mqtt_ota_report_status("esp", PROTO_OTA_STATE_DOWNLOADING, progress,
+              PROTO_ERR_OK, String("下载中: " + String(progress) + "%").c_str());
           }
           last_update = millis();
         }
@@ -445,10 +476,34 @@ static void handle_esp_ota_download(HTTPClient* http, int content_length,
     delay(100);             // 等待重连完成
   }
 
-  mqtt_ota_report_status("esp", "verifying", 100, "校验中...");
+  mqtt_ota_report_status("esp", PROTO_OTA_STATE_VERIFYING, 100,
+                         PROTO_ERR_OK, "校验中...");
 
   // LED 提示：校验中
   led1_set(LED_SOLID);
+
+  // SHA-256 校验
+  if (cmd->sha256[0] != '\0') {
+    uint8_t hash[32];
+    mbedtls_sha256_finish_ret(&sha_ctx, hash);
+    mbedtls_sha256_free(&sha_ctx);
+
+    char hex[65];
+    for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", hash[i]);
+
+    if (strcmp(hex, cmd->sha256) != 0) {
+      Serial.printf("[MQTT-OTA-ESP] SHA-256 校验失败: expected=%s, got=%s\n", cmd->sha256, hex);
+      Update.abort();
+      mqtt_ota_report_error("esp", PROTO_ERR_EXEC_FAILED, "SHA-256 校验失败");
+      led1_set(LED_OFF);
+      reset_ota_state();
+      return;
+    }
+    Serial.println("[MQTT-OTA-ESP] SHA-256 校验通过");
+  } else {
+    mbedtls_sha256_free(&sha_ctx);
+    Serial.println("[MQTT-OTA-ESP] 未提供 SHA-256，跳过校验");
+  }
 
   // 结束 Update，触发校验和重启
   if (!Update.end(true)) {
@@ -460,7 +515,8 @@ static void handle_esp_ota_download(HTTPClient* http, int content_length,
   }
 
   Serial.println("[MQTT-OTA-ESP] 升级成功，设备即将重启");
-  mqtt_ota_report_status("esp", "done", 100, "升级成功，重启中");
+  mqtt_ota_report_status("esp", PROTO_OTA_STATE_REBOOTING, 100,
+                         PROTO_ERR_OK, "升级成功，重启中");
   // 保存结果到NVS，重启后APP可通过HTTP轮询读取
   ota_result_save("done", FIRMWARE_VERSION, "ESP升级完成");
   Serial.printf("[MQTT-OTA] Result saved to NVS\n");
@@ -482,8 +538,8 @@ static void arm_ota_progress_callback(ArmOtaState state, int progress, const cha
   if (abs(progress - s_arm_mqtt_last_progress) >= 5 || now - s_arm_mqtt_last_report >= 3000) {
     s_arm_mqtt_last_progress = progress;
     s_arm_mqtt_last_report = now;
-    mqtt_ota_report_status("arm", "sending", progress,
-      String("ARM传输中: " + String(progress) + "%").c_str());
+    mqtt_ota_report_status("arm", PROTO_OTA_STATE_DOWNLOADING, progress,
+      PROTO_ERR_OK, String("ARM传输中: " + String(progress) + "%").c_str());
   }
 }
 
@@ -627,7 +683,8 @@ static void handle_arm_ota_download(HTTPClient* http, int content_length,
     return;
   }
 
-  mqtt_ota_report_status("arm", "verifying", 100, "等待 ARM 校验");
+  mqtt_ota_report_status("arm", PROTO_OTA_STATE_VERIFYING, 100,
+                         PROTO_ERR_OK, "等待 ARM 校验");
   led1_set(LED_SOLID);
 
   Serial.println("[MQTT-OTA-ARM] 固件已转发，等待 ARM 校验结果");
@@ -644,7 +701,8 @@ static void handle_arm_ota_download(HTTPClient* http, int content_length,
 
     if (state == ARM_OTA_DONE) {
       Serial.println("[MQTT-OTA-ARM] ARM 校验成功，升级完成");
-      mqtt_ota_report_status("arm", "done", 100, "升级成功");
+      mqtt_ota_report_status("arm", PROTO_OTA_STATE_SUCCEEDED, 100,
+                             PROTO_ERR_OK, "升级成功");
       led1_set(LED_OFF);
       reset_ota_state();
       return;
@@ -673,13 +731,15 @@ static void handle_arm_ota_download(HTTPClient* http, int content_length,
 // ==================== 状态上报 ====================
 
 void mqtt_ota_report_status(const char* target, const char* state, int progress,
-                            const char* detail) {
+                            const char* code, const char* detail) {
 
   StaticJsonDocument<256> doc;
   doc["target"] = target;
+  doc["version"] = g_current_ota_cmd.version[0] ? g_current_ota_cmd.version : FIRMWARE_VERSION;
   doc["state"] = state;
   doc["progress"] = progress;
-  doc["message"] = detail;
+  doc["code"] = code ? code : PROTO_ERR_OK;
+  doc["message"] = detail ? detail : "";
 
   String payload;
   serializeJson(doc, payload);
@@ -691,7 +751,7 @@ void mqtt_ota_report_status(const char* target, const char* state, int progress,
     delay(100);             // 等待重连完成
   }
 
-  mqtt_publish("ota/status", payload.c_str(), payload.length(), 0, false);
+  mqtt_publish_envelope(PROTO_TOPIC_OTA_STATUS, payload.c_str(), payload.length(), false);
 
   Serial.printf("[MQTT-OTA] 上报状态: %s\n", payload.c_str());
 }
@@ -700,12 +760,12 @@ void mqtt_ota_report_error(const char* target, const char* error_code,
                            const char* error_message) {
 
   StaticJsonDocument<256> doc;
-  doc["device_id"] = mqtt_get_client_id();
-  doc["current_version"] = FIRMWARE_VERSION;
-  doc["state"] = "failed";
+  doc["target"] = target;
+  doc["version"] = g_current_ota_cmd.version[0] ? g_current_ota_cmd.version : FIRMWARE_VERSION;
+  doc["state"] = PROTO_OTA_STATE_FAILED;
   doc["progress"] = 0;
-  doc["status_message"] = "";
-  doc["error_message"] = error_message;
+  doc["code"] = error_code ? error_code : PROTO_ERR_EXEC_FAILED;
+  doc["message"] = error_message ? error_message : "";
 
   String payload;
   serializeJson(doc, payload);
@@ -717,22 +777,25 @@ void mqtt_ota_report_error(const char* target, const char* error_code,
     delay(100);             // 等待重连完成
   }
 
-  mqtt_publish("ota/status", payload.c_str(), payload.length(), 1, false);
+  mqtt_publish_envelope(PROTO_TOPIC_OTA_STATUS, payload.c_str(), payload.length(), false);
 
   Serial.printf("[MQTT-OTA] 上报错误: %s\n", payload.c_str());
 }
 
 static void send_ota_ack(const char* task_id, bool ack, const char* message) {
   StaticJsonDocument<256> doc;
-  doc["ack"] = ack;
-  doc["task_id"] = task_id;
-  doc["message"] = message;
-  doc["timestamp"] = (uint32_t)time(nullptr);
+  doc["task_id"] = task_id ? task_id : "";
+  doc["cmd"] = "ota";
+  doc["stage"] = ack ? PROTO_CMD_STAGE_ACK : PROTO_CMD_STAGE_DONE;
+  doc["success"] = ack;
+  doc["code"] = ack ? PROTO_ERR_OK : PROTO_ERR_EXEC_FAILED;
+  doc["message"] = message ? message : "";
+  doc["result"].to<JsonArray>();
 
   String payload;
   serializeJson(doc, payload);
 
-  mqtt_publish("ota/cmd_ack", payload.c_str(), payload.length(), 1, false);
+  mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, payload.c_str(), payload.length(), false);
 
   Serial.printf("[MQTT-OTA] 发送 ACK: %s\n", payload.c_str());
 }

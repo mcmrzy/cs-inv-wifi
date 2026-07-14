@@ -230,10 +230,41 @@ void app_main(void)
         led2_set(LED_OFF);
     }
 
-    // BLE 始终广播（类似 AP 热点行为）
+    // BLE 配网需要大量内存，先停止 WiFi 释放内存
+    esp_wifi_stop();
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     ble_prov_set_callback(on_provision_done);
     ble_prov_start(g_device_sn, FIRMWARE_VERSION);
-    ESP_LOGI(TAG, "BLE provisioning started (always advertising)");
+
+    // BLE 启动后重新启动 WiFi
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+
+    if (storage_has_wifi_config()) {
+        wifi_config_t sta_cfg = {0};
+        strncpy((char *)sta_cfg.sta.ssid, g_wifi_ssid, sizeof(sta_cfg.sta.ssid) - 1);
+        strncpy((char *)sta_cfg.sta.password, g_wifi_pass, sizeof(sta_cfg.sta.password) - 1);
+        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+    }
+
+    {
+        char ap_ssid2[32];
+        build_ap_ssid(ap_ssid2, sizeof(ap_ssid2));
+        wifi_config_t ap_cfg2 = {0};
+        strncpy((char *)ap_cfg2.ap.ssid, ap_ssid2, sizeof(ap_cfg2.ap.ssid) - 1);
+        ap_cfg2.ap.ssid_len = strlen(ap_ssid2);
+        ap_cfg2.ap.channel = 1;
+        ap_cfg2.ap.max_connection = 4;
+        ap_cfg2.ap.authmode = WIFI_AUTH_OPEN;
+        esp_wifi_set_config(WIFI_IF_AP, &ap_cfg2);
+    }
+
+    esp_wifi_start();
+    if (storage_has_wifi_config()) {
+        esp_wifi_connect();
+    }
+    ESP_LOGI(TAG, "WiFi restarted after BLE init");
 
     tcp_provision_init();
     sntp_init_cst8();

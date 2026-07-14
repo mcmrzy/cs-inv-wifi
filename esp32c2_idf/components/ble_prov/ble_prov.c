@@ -7,6 +7,8 @@
 #include "esp_err.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static const char *TAG = "ble_prov";
@@ -119,10 +121,26 @@ void ble_prov_start(const char *device_sn, const char *fw_version)
     wifi_prov_security_t security = WIFI_PROV_SECURITY_1;
     const char *pop = NULL;  /* 不使用 Proof of Possession */
 
-    /* 启动配网 */
+    /* 启动配网，带重试 */
     ret = wifi_prov_mgr_start_provisioning(security, pop, s_service_name, NULL);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "wifi_prov_mgr_start_provisioning failed: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "BLE prov start failed (%s), retrying in 2s...",
+                 esp_err_to_name(ret));
+        wifi_prov_mgr_deinit();
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+        /* 重新初始化 */
+        ret = wifi_prov_mgr_init(config);
+        if (ret == ESP_OK) {
+            esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID,
+                                       &prov_event_handler, NULL);
+            ret = wifi_prov_mgr_start_provisioning(security, pop,
+                                                    s_service_name, NULL);
+        }
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "wifi_prov_mgr_start_provisioning failed: %s",
+                 esp_err_to_name(ret));
         wifi_prov_mgr_deinit();
         s_state = BLE_PROV_ERROR;
         return;

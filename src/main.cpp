@@ -28,6 +28,7 @@
 #include "ota_manager.h"
 #include "arm_ota.h"
 #include "offline_cache.h"
+#include "cs_protocol_defs.h"
 #include <esp_mac.h>
 
 // min 宏定义
@@ -63,14 +64,6 @@ static unsigned long g_last_heartbeat = 0;
 static unsigned long g_last_uart_heartbeat = 0;
 static unsigned long g_last_led_tick = 0;
 static unsigned long g_last_debug = 0;
-
-// ARM 数据超时看门告警
-static unsigned long g_last_data_received = 0;   // 最后一次收到 ARM CMD_PUBLISH 的时间
-static unsigned long g_last_arm_alarm_check = 0;  // 上次检查告警的时间
-static bool g_arm_alarm_sent = false;             // 是否已发送超时告警
-#define ARM_DATA_TIMEOUT_MS   (10UL * 60 * 1000)  // 10 分钟无数据视为超时
-#define ARM_ALARM_CHECK_MS    (30UL * 1000)        // 每 30 秒检查一次
-#define ARM_ALARM_CODE        13                   // 告警码（不与 ARM 侧 1-12 冲突）
 
 static bool g_btn_pressed = false;
 static unsigned long g_btn_press_start = 0;
@@ -135,7 +128,7 @@ static void pub_queue_process() {
   if (g_pub_queue_tail == g_pub_queue_head) return; // 空队列
   PubQueueItem* item = &g_pub_queue[g_pub_queue_tail];
   if (item->used) {
-    mqtt_publish(item->topic, item->payload, strlen(item->payload), 0, 0);
+    mqtt_publish_envelope(item->topic, item->payload, strlen(item->payload));
     Serial.printf("[PUB-Q] Sent %s (%d bytes)\n", item->topic, strlen(item->payload));
     item->used = false;
   }
@@ -612,8 +605,6 @@ static void state_mqtt_connecting() {
     led1_set(LED_SOLID);        // 一切正常!
     led2_set(LED_SOLID);
     g_last_heartbeat = millis();
-    g_last_data_received = millis();  // 初始化 ARM 数据时间戳
-    g_arm_alarm_sent = false;
     return;
   }
   // 只在首次进入时调用一次 mqtt_connect，
@@ -643,47 +634,14 @@ static void state_running() {
   // 心跳
   if (millis() - g_last_heartbeat >= HEARTBEAT_INTERVAL) {
     g_last_heartbeat = millis();
-
+    
     char status_msg[256];
     snprintf(status_msg, sizeof(status_msg),
       "{\"online\":true,\"rssi\":%d,\"ip\":\"%s\"}",
       WiFi.RSSI(), WiFi.localIP().toString().c_str());
-
-    mqtt_publish("status", status_msg, strlen(status_msg), 1, 1);
+    
+    mqtt_publish_envelope(PROTO_TOPIC_STATUS, status_msg, strlen(status_msg), true);
     Serial.printf("[HB] status sent, ip=%s\n", WiFi.localIP().toString().c_str());
-  }
-
-  // ARM 数据超时看门告警（每 30 秒检查一次）
-  if (millis() - g_last_arm_alarm_check >= ARM_ALARM_CHECK_MS) {
-    g_last_arm_alarm_check = millis();
-
-    if (millis() - g_last_data_received > ARM_DATA_TIMEOUT_MS) {
-      // 超时：发送告警（仅发一次）
-      if (!g_arm_alarm_sent) {
-        g_arm_alarm_sent = true;
-        char alarm_msg[256];
-        snprintf(alarm_msg, sizeof(alarm_msg),
-          "{\"code\":%d,\"level\":\"fault\","
-          "\"message\":\"ARM通信超时\",\"count\":1,"
-          "\"alarms\":[{\"code\":%d,\"level\":\"fault\",\"message\":\"ARM通信超时\"}],"
-          "\"timestamp\":%lu}",
-          ARM_ALARM_CODE, ARM_ALARM_CODE, (unsigned long)time(nullptr));
-        pub_queue_push("data/alarm", alarm_msg);
-        Serial.printf("[ARM-WD] Alarm sent: no data for %lu ms\n",
-                      millis() - g_last_data_received);
-      }
-    } else if (g_arm_alarm_sent) {
-      // 恢复：ARM 数据已恢复，发送恢复消息
-      g_arm_alarm_sent = false;
-      char recovery_msg[128];
-      snprintf(recovery_msg, sizeof(recovery_msg),
-        "{\"code\":0,\"level\":\"normal\","
-        "\"message\":\"故障恢复，系统正常\",\"count\":0,"
-        "\"alarms\":[],\"timestamp\":%lu}",
-        (unsigned long)time(nullptr));
-      pub_queue_push("data/alarm", recovery_msg);
-      Serial.println("[ARM-WD] Recovery sent: ARM data resumed");
-    }
   }
 }
 
@@ -747,7 +705,6 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
         // 先回复 ACK，再入队（mqtt_publish 会阻塞 TLS，不能在 UART 回调中调用）
         uart_send_ack();
         pub_queue_push(topic, send_payload);
-        g_last_data_received = millis();  // 更新 ARM 数据到达时间
         led_signal_data();    // LED2 短暂闪一下表示有数据活动
         Serial.printf("[UART] PUBLISH queued -> cs_inv/%s/%s (%d bytes)\n",
                       g_device_sn, topic, strlen(send_payload));
@@ -847,7 +804,7 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
       size_t copy_len = (len < sizeof(json) - 1) ? len : sizeof(json) - 1;
       memcpy(json, data, copy_len);
       json[copy_len] = '\0';
-      mqtt_publish("cmd_result", json, copy_len, 1, 0);
+      mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, json, copy_len);
       Serial.printf("[ARM→MQTT] cmd_result: %s\n", json);
       uart_send_ack();
       break;
@@ -887,6 +844,43 @@ static void on_mqtt_message(const char* topic, const char* payload, unsigned int
     // 使用新的 mqtt_ota_handler 处理
     if (mqtt_ota_handle_command(topic, (const uint8_t*)payload, len)) {
       return;  // OTA 命令已处理，不再转发给 ARM
+    }
+  }
+
+  // ---- /cmd 下行命令：提取 task_id / t，过期校验，回复 ACK ----
+  bool is_cmd_topic = (strcmp(sub, "cmd") == 0);
+  if (is_cmd_topic) {
+    char task_id[72] = {0};
+    char t_str[16] = {0};
+    char cmd_str[32] = {0};
+    json_extract_str(payload, "\"task_id\"", task_id, sizeof(task_id));
+    json_extract_str(payload, "\"t\"", t_str, sizeof(t_str));
+    json_extract_str(payload, "\"cmd\"", cmd_str, sizeof(cmd_str));
+    time_t cmd_t = atol(t_str);
+    time_t now = time(nullptr);
+
+    // 过期校验（NTP 未同步时跳过）
+    if (now > 0 && cmd_t > 0 && (now - cmd_t) > PROTO_CMD_EXPIRE_S) {
+      char expired_resp[256];
+      snprintf(expired_resp, sizeof(expired_resp),
+        "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
+        "\"success\":false,\"code\":\"%s\",\"message\":\"Command expired\",\"result\":[]}",
+        task_id, cmd_str, PROTO_CMD_STAGE_DONE, PROTO_ERR_EXPIRED);
+      mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, expired_resp, strlen(expired_resp));
+      Serial.printf("[CMD] Expired: task_id=%s cmd=%s t=%ld now=%ld\n",
+                    task_id, cmd_str, (long)cmd_t, (long)now);
+      return;  // 不转发给 ARM
+    }
+
+    // 立即回复 acknowledged（QoS 0 低延迟）
+    if (task_id[0] != '\0') {
+      char ack_resp[256];
+      snprintf(ack_resp, sizeof(ack_resp),
+        "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
+        "\"success\":true,\"code\":\"%s\",\"message\":\"\",\"result\":[]}",
+        task_id, cmd_str, PROTO_CMD_STAGE_ACK, PROTO_ERR_OK);
+      mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, ack_resp, strlen(ack_resp));
+      Serial.printf("[CMD] ACK sent: task_id=%s cmd=%s\n", task_id, cmd_str);
     }
   }
 

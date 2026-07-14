@@ -8,6 +8,7 @@
 #include "nvs_storage.h"
 #include "sn_encoder.h"
 #include "offline_cache.h"
+#include "cs_protocol_defs.h"
 #include <string.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
@@ -41,16 +42,16 @@ static bool offline_send_callback(const char* topic, const char* payload, uint32
     
     // 构建完整主题
     char full_topic[128];
-    int n = snprintf(full_topic, sizeof(full_topic), "cs_inv/%s/%s", g_device_sn, topic);
+    int n = snprintf(full_topic, sizeof(full_topic), PROTO_TOPIC_FMT, g_device_sn, topic);
     if (n < 0 || n >= (int)sizeof(full_topic)) {
         Serial.println("[OFFLINE-SEND] Topic too long");
         return false;
     }
     
-    // 为payload添加时间戳
+    // 统一信封格式：{"t":NTP秒,"v":1,"data":<payload>}
     char full_payload[1024];
     int len = snprintf(full_payload, sizeof(full_payload),
-        "{\"data\":%s,\"timestamp\":%u}", payload, timestamp);
+        "{\"t\":%lu,\"v\":%d,\"data\":%s}", (unsigned long)timestamp, PROTO_ENVELOPE_VERSION, payload);
     
     if (len <= 0 || len >= (int)sizeof(full_payload)) {
         Serial.println("[OFFLINE-SEND] Payload too large");
@@ -108,9 +109,9 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
 
     // 构建状态主题
     snprintf(g_status_topic, sizeof(g_status_topic),
-             "cs_inv/%s/status", g_device_sn);
+             PROTO_TOPIC_FMT, g_device_sn, PROTO_TOPIC_STATUS);
     snprintf(g_lwt_payload, sizeof(g_lwt_payload),
-             "{\"online\":false,\"sn\":\"%s\"}", g_device_sn);
+             "{\"t\":0,\"v\":%d,\"data\":{\"online\":false}}", PROTO_ENVELOPE_VERSION);
     Serial.printf("[MQTT] Status topic: %s\n", g_status_topic);
 
     // 创建 WiFiClientSecure
@@ -182,10 +183,12 @@ bool mqtt_connect_ex(bool force) {
         g_reconnect_attempts = 0;
         g_reconnect_delay = MQTT_RECONNECT_MIN;
 
-        // 发布上线状态
+        // 发布上线状态（信封格式）
         char online_payload[128];
+        time_t online_ts = time(nullptr);
         snprintf(online_payload, sizeof(online_payload),
-                 "{\"online\":true,\"sn\":\"%s\"}", g_device_sn);
+                 "{\"t\":%lu,\"v\":%d,\"data\":{\"online\":true}}",
+                 (unsigned long)online_ts, PROTO_ENVELOPE_VERSION);
         g_mqtt_client->publish(g_status_topic, online_payload, true);
 
         // 订阅命令主题
@@ -233,38 +236,41 @@ void mqtt_disconnect(void) {
 }
 
 // ==================== 发布 ====================
+
+// 信封格式发布：{"t":<NTP秒>,"data":<arm_payload>}
+bool mqtt_publish_envelope(const char *topic, const char *arm_payload, unsigned int payload_len, bool retain) {
+    if (!g_mqtt_client || !g_mqtt_client->connected()) return false;
+
+    char full_topic[128];
+    int n = snprintf(full_topic, sizeof(full_topic), PROTO_TOPIC_FMT, g_device_sn, topic);
+    if (n < 0 || n >= (int)sizeof(full_topic)) return false;
+
+    time_t now = time(nullptr);
+    // 外层信封：{"t":NTP秒,"v":1,"data":<payload>}
+    size_t env_len = payload_len + 64;
+    char *envelope = (char*)malloc(env_len);
+    if (!envelope) return false;
+    snprintf(envelope, env_len, "{\"t\":%lu,\"v\":%d,\"data\":%s}", (unsigned long)now, PROTO_ENVELOPE_VERSION, arm_payload);
+
+    bool result = g_mqtt_client->publish(full_topic, (const uint8_t*)envelope, strlen(envelope), retain);
+    free(envelope);
+    return result;
+}
+
 int mqtt_publish(const char* sub_topic, const char* data, int len, int qos, int retain) {
     if (!sub_topic || !data || len < 0) {
         return -2;
     }
 
-    // 构建完整主题
-    char full_topic[128];
-    int n = snprintf(full_topic, sizeof(full_topic), "cs_inv/%s/%s", g_device_sn, sub_topic);
-    if (n < 0 || n >= (int)sizeof(full_topic)) {
-        return -3;
-    }
-
     // 如果未连接，存储到离线缓存
     if (!g_mqtt_client || !g_mqtt_client->connected()) {
-        // 离线缓存会自动添加时间戳
         offline_cache_add(sub_topic, data, 0);
         Serial.printf("[MQTT] Not connected, cached: topic=%s (%d bytes)\n", sub_topic, len);
         return -1;  // 返回-1表示未发送但已缓存
     }
 
-    // 在线发送也添加时间戳，与离线缓存发送格式保持一致
-    char full_payload[1024];
-    uint32_t timestamp = (uint32_t)time(nullptr);
-    int payload_len = snprintf(full_payload, sizeof(full_payload),
-        "{\"data\":%s,\"timestamp\":%u}", data, timestamp);
-    
-    if (payload_len <= 0 || payload_len >= (int)sizeof(full_payload)) {
-        Serial.println("[MQTT] Payload too large");
-        return -5;
-    }
-
-    bool result = g_mqtt_client->publish(full_topic, (const uint8_t*)full_payload, payload_len, retain);
+    // 委托给信封格式发布
+    bool result = mqtt_publish_envelope(sub_topic, data, (unsigned int)len, retain != 0);
     return result ? 0 : -4;
 }
 
@@ -280,7 +286,7 @@ int mqtt_subscribe(const char* sub_topic, int qos) {
 
     // 构建完整主题
     char full_topic[128];
-    int n = snprintf(full_topic, sizeof(full_topic), "cs_inv/%s/%s", g_device_sn, sub_topic);
+    int n = snprintf(full_topic, sizeof(full_topic), PROTO_TOPIC_FMT, g_device_sn, sub_topic);
     if (n < 0 || n >= (int)sizeof(full_topic)) {
         return -3;
     }

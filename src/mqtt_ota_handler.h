@@ -3,7 +3,7 @@
  *  MQTT OTA 处理模块
  *
  *  功能：
- *    - 接收 MQTT OTA 命令（start, stop, query）
+ *    - 接收 MQTT OTA 命令（start, cancel, query）
  *    - HTTP 下载固件
  *    - 实时上报进度到 MQTT
  *    - 支持 ESP 和 ARM 固件升级
@@ -18,12 +18,14 @@
 
 // ==================== OTA 命令结构 ====================
 struct MqttOtaCommand {
-  char command[16];              // "start", "stop", "query"
+  char action[16];              // start/cancel/query
   char target[8];                // "esp", "arm"
   char firmware_id[64];
   char url[256];                 // 固件下载 URL
   char version[32];
-  char md5[33];                  // MD5 校验值（32字符 + null）
+  char sha256[65];               // SHA-256 hex (64 chars + null)
+  char signature[132];           // Ed25519 hex (128 chars + null)
+  uint32_t security_version;     // 防降级单调递增
   uint32_t file_size;            // 文件大小
   uint16_t timeout;              // 超时（秒）
   char task_id[64];              // 任务 ID
@@ -46,7 +48,7 @@ void mqtt_ota_process();
 
 // 上报 OTA 状态到 MQTT
 void mqtt_ota_report_status(const char* target, const char* state, int progress,
-                            const char* detail);
+                            const char* code, const char* detail);
 
 // 上报错误信息
 void mqtt_ota_report_error(const char* target, const char* error_code,

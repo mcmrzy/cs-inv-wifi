@@ -9,6 +9,7 @@
 #include "sn_encoder.h"
 #include "offline_cache.h"
 #include "mqtt_ca_cert.h"
+#include "cs_protocol_defs.h"
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
@@ -48,7 +49,7 @@ static bool offline_send_callback(const char* topic, const char* payload, uint32
     }
 
     char full_topic[128];
-    int n = snprintf(full_topic, sizeof(full_topic), "cs_inv/%s/%s", g_device_sn, topic);
+    int n = snprintf(full_topic, sizeof(full_topic), PROTO_TOPIC_FMT, g_device_sn, topic);
     if (n < 0 || n >= (int)sizeof(full_topic)) {
         ESP_LOGW(TAG, "[OFFLINE-SEND] Topic too long");
         return false;
@@ -56,7 +57,7 @@ static bool offline_send_callback(const char* topic, const char* payload, uint32
 
     char full_payload[1024];
     int len = snprintf(full_payload, sizeof(full_payload),
-        "{\"data\":%s,\"timestamp\":%" PRIu32 "}", payload, timestamp);
+        "{\"t\":%" PRIu32 ",\"v\":%d,\"data\":%s}", timestamp, PROTO_ENVELOPE_VERSION, payload);
 
     if (len <= 0 || len >= (int)sizeof(full_payload)) {
         ESP_LOGW(TAG, "[OFFLINE-SEND] Payload too large");
@@ -83,7 +84,8 @@ static void mqtt_event_handler(void* arg, esp_event_base_t base,
             {
                 char online_payload[128];
                 snprintf(online_payload, sizeof(online_payload),
-                         "{\"online\":true,\"sn\":\"%s\"}", g_device_sn);
+                         "{\"t\":%ld,\"v\":%d,\"data\":{\"online\":true}}",
+                         (long)time(NULL), PROTO_ENVELOPE_VERSION);
                 esp_mqtt_client_publish(g_mqtt_client, g_status_topic,
                                         online_payload, 0, 1, 1);
             }
@@ -165,9 +167,9 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
     ESP_LOGI(TAG, "Broker: %s", g_mqtt_uri);
 
     snprintf(g_status_topic, sizeof(g_status_topic),
-             "cs_inv/%s/status", g_device_sn);
+             PROTO_TOPIC_FMT, g_device_sn, PROTO_TOPIC_STATUS);
     snprintf(g_lwt_payload, sizeof(g_lwt_payload),
-             "{\"online\":false,\"sn\":\"%s\"}", g_device_sn);
+             "{\"t\":0,\"v\":%d,\"data\":{\"online\":false}}", PROTO_ENVELOPE_VERSION);
     ESP_LOGI(TAG, "Status topic: %s", g_status_topic);
 
     esp_mqtt_client_config_t mqtt_cfg = {
@@ -243,7 +245,7 @@ int mqtt_publish(const char* sub_topic, const char* data, int len, int qos, int 
     }
 
     char full_topic[128];
-    int n = snprintf(full_topic, sizeof(full_topic), "cs_inv/%s/%s", g_device_sn, sub_topic);
+    int n = snprintf(full_topic, sizeof(full_topic), PROTO_TOPIC_FMT, g_device_sn, sub_topic);
     if (n < 0 || n >= (int)sizeof(full_topic)) {
         return -3;
     }
@@ -257,7 +259,7 @@ int mqtt_publish(const char* sub_topic, const char* data, int len, int qos, int 
     char full_payload[1024];
     uint32_t timestamp = (uint32_t)time(NULL);
     int payload_len = snprintf(full_payload, sizeof(full_payload),
-        "{\"data\":%s,\"timestamp\":%" PRIu32 "}", data, timestamp);
+        "{\"t\":%" PRIu32 ",\"v\":%d,\"data\":%s}", timestamp, PROTO_ENVELOPE_VERSION, data);
 
     if (payload_len <= 0 || payload_len >= (int)sizeof(full_payload)) {
         ESP_LOGE(TAG, "Payload too large");
@@ -279,7 +281,7 @@ int mqtt_subscribe(const char* sub_topic, int qos) {
     }
 
     char full_topic[128];
-    int n = snprintf(full_topic, sizeof(full_topic), "cs_inv/%s/%s", g_device_sn, sub_topic);
+    int n = snprintf(full_topic, sizeof(full_topic), PROTO_TOPIC_FMT, g_device_sn, sub_topic);
     if (n < 0 || n >= (int)sizeof(full_topic)) {
         return -3;
     }

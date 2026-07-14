@@ -367,6 +367,58 @@ CMD_ARM_OTA_INFO     = 0x15
 CMD_ACK              = 0xFE
 CMD_NACK             = 0xFF
 
+# ==================== V1.0.26.713 协议常量 ====================
+PROTO_ENVELOPE_VERSION = 1
+
+# Heartbeat 数组長度
+PROTO_AC_LEN = 8
+PROTO_BAT_LEN = 23
+PROTO_PV_LEN = 7
+PROTO_SYS_LEN = 11
+PROTO_ENG_LEN = 12
+PROTO_CELLS_LEN = 2
+
+# Topic 名
+PROTO_TOPIC_HEARTBEAT = "heartbeat"
+PROTO_TOPIC_INFO = "info"
+PROTO_TOPIC_CONFIG = "config"
+PROTO_TOPIC_ALARM = "alarm"
+PROTO_TOPIC_PARALLEL = "parallel"
+PROTO_TOPIC_THREE_PHASE = "three_phase"
+PROTO_TOPIC_STATUS = "status"
+PROTO_TOPIC_CMD_RESP = "cmd/response"
+PROTO_TOPIC_OTA_STATUS = "ota/status"
+
+# 告警 source（0-based）
+PROTO_SOURCE_PCS = 0
+PROTO_SOURCE_BMS = 1
+PROTO_SOURCE_MPPT = 2
+PROTO_SOURCE_COMM = 3
+
+# 告警 level
+PROTO_LEVEL_WARNING = 1
+PROTO_LEVEL_FAULT = 2
+
+# 告警 state
+PROTO_STATE_RECOVERED = 0
+PROTO_STATE_ACTIVE = 1
+
+# 命令错误码
+PROTO_ERR_OK = "OK"
+PROTO_ERR_INVALID_ARGS = "INVALID_ARGS"
+PROTO_ERR_OUT_OF_RANGE = "OUT_OF_RANGE"
+PROTO_ERR_NOT_SUPPORTED = "NOT_SUPPORTED"
+PROTO_ERR_BUSY = "BUSY"
+PROTO_ERR_INTERLOCKED = "INTERLOCKED"
+PROTO_ERR_EXPIRED = "EXPIRED"
+PROTO_ERR_EXEC_FAILED = "EXEC_FAILED"
+PROTO_ERR_TIMEOUT = "TIMEOUT"
+
+# 命令阶段
+PROTO_CMD_STAGE_ACK = "acknowledged"
+PROTO_CMD_STAGE_EXEC = "executing"
+PROTO_CMD_STAGE_DONE = "completed"
+
 MODBUS_FUNC_READ_HOLDING  = 0x03
 MODBUS_FUNC_READ_INPUT    = 0x04
 MODBUS_FUNC_WRITE_SINGLE  = 0x06
@@ -755,6 +807,11 @@ class InverterController:
     """
     STATE_MAP = {'inverting': '逆变运行', 'standby': '待机', 'fault': '故障', 'shutdown': '关机', 'bypass': '旁路'}
 
+    # V1.0.26.713 状态映射（整数编码）
+    WORK_STATE_MAP = {'inverting': 0, 'standby': 1, 'fault': 2, 'shutdown': 3, 'bypass': 4}
+    CHARGE_STATE_MAP = {'idle': 0, 'charging': 1, 'discharging': 2}
+    MPPT_STATE_MAP = {'tracking': 0, 'limited': 1, 'off': 2, 'fault': 3}
+
     def __init__(self, modbus_master):
         self.modbus = modbus_master
         
@@ -898,6 +955,28 @@ class InverterController:
         
         self._last_update = time.time()
 
+        # ========== V1.0.26.713 设备配置 ==========
+        self.config_rev = 1
+        self.device_config = {
+            'ac_enabled': 1,
+            'power_limit_w': self.rated_power,
+            'charge_limit_w': 3000,
+            'discharge_limit_w': 5000,
+            'soc_low_x10': 200,       # SOC下限 20.0%
+            'soc_high_x10': 900,      # SOC上限 90.0%
+            'force_charge': 0,
+            'force_discharge': 0,
+            'charge_enabled': 1,
+            'discharge_enabled': 1,
+            'max_charge_current_x10': 600,     # 60.0A
+            'max_discharge_current_x10': 1200, # 120.0A
+            'charge_voltage_x10': 546,         # 54.6V
+            'discharge_voltage_x10': 440,      # 44.0V
+            'parallel_mode': 0,     # 0=单机, 1=单相并机, 2=三相并机
+            'parallel_role': 0,     # 0=master, 1=slave
+            'parallel_phase': None, # 1/2/3 或 None
+        }
+
     def set_sim_param(self, key, value):
         """设置模拟参数"""
         if key in self.sim_params:
@@ -940,18 +1019,18 @@ class InverterController:
     
     # ========== 告警定义 ==========
     ALARM_DEFINITIONS = {
-        1: {'level': 'fault', 'message': '逆变器过温保护'},
-        2: {'level': 'fault', 'message': '电池过压保护'},
-        3: {'level': 'fault', 'message': '电池欠压保护'},
-        4: {'level': 'fault', 'message': '输出过载保护'},
-        5: {'level': 'fault', 'message': '直流母线过压'},
-        6: {'level': 'warning', 'message': '逆变器温度过高'},
-        7: {'level': 'warning', 'message': '电池SOC过低'},
-        8: {'level': 'warning', 'message': 'PV输入异常'},
-        9: {'level': 'warning', 'message': '电芯压差过大'},
-        10: {'level': 'info', 'message': '系统启动完成'},
-        11: {'level': 'info', 'message': '进入待机模式'},
-        12: {'level': 'info', 'message': '恢复并网运行'},
+        1: {'level': 'fault', 'source': PROTO_SOURCE_PCS, 'message': '逆变器过温保护'},
+        2: {'level': 'fault', 'source': PROTO_SOURCE_BMS, 'message': '电池过压保护'},
+        3: {'level': 'fault', 'source': PROTO_SOURCE_BMS, 'message': '电池欠压保护'},
+        4: {'level': 'fault', 'source': PROTO_SOURCE_PCS, 'message': '输出过载保护'},
+        5: {'level': 'fault', 'source': PROTO_SOURCE_PCS, 'message': '直流母线过压'},
+        6: {'level': 'warning', 'source': PROTO_SOURCE_PCS, 'message': '逆变器温度过高'},
+        7: {'level': 'warning', 'source': PROTO_SOURCE_BMS, 'message': '电池SOC过低'},
+        8: {'level': 'warning', 'source': PROTO_SOURCE_MPPT, 'message': 'PV输入异常'},
+        9: {'level': 'warning', 'source': PROTO_SOURCE_BMS, 'message': '电芯压差过大'},
+        10: {'level': 'info', 'source': PROTO_SOURCE_COMM, 'message': '系统启动完成'},
+        11: {'level': 'info', 'source': PROTO_SOURCE_PCS, 'message': '进入待机模式'},
+        12: {'level': 'info', 'source': PROTO_SOURCE_PCS, 'message': '恢复并网运行'},
     }
     
     def _add_alarm(self, code, manual=False):
@@ -1535,7 +1614,221 @@ class InverterController:
         self.pv2_power = 943.0
         self.pv_power_total = self.pv1_power + self.pv2_power
 
-    def to_json(self, topic):
+    # ========== V1.0.26.713 新协议方法 ==========
+
+    def to_heartbeat(self):
+        """生成 Heartbeat V1 payload - 数组格式（V1.0.26.713）"""
+        # AC 数组 [8]
+        apparent = round(self.voltage * self.current, 1)
+        pf = round(min(1.0, self.power / max(1, self.voltage * self.current)), 3)
+        thd_v = round(random.uniform(1.5, 3.5), 1)
+        ac_arr = [
+            round(self.voltage, 1),          # 0: voltage
+            round(self.current, 2),          # 1: current
+            round(self.power, 1),            # 2: active_power
+            apparent,                        # 3: apparent_power
+            round(self.frequency, 2),        # 4: frequency
+            pf,                              # 5: power_factor
+            round(self.load_percent, 1),     # 6: load_percent
+            thd_v                            # 7: voltage_thd
+        ]
+
+        # Battery 数组 [23]
+        cell_v_max = max(self.cell_voltages) if self.cell_voltages else 0
+        cell_v_min = min(self.cell_voltages) if self.cell_voltages else 0
+        bat_arr = [
+            round(self.soc, 1),              # 0: soc
+            round(self.soh, 1),              # 1: soh
+            round(self.battery_v, 2),        # 2: voltage
+            round(self.battery_i, 2),        # 3: current
+            round(self.battery_v * self.battery_i, 1),  # 4: power
+            round(self.soc / 100.0 * self.battery_capacity, 1),  # 5: capacity_remain
+            self.battery_capacity,           # 6: capacity_total
+            int(self.cycle_count),           # 7: cycle_count
+            round(max(self.cell_temps), 1),  # 8: temp_max
+            round(min(self.cell_temps), 1),  # 9: temp_min
+            round(cell_v_max, 3),            # 10: cell_volt_max
+            round(cell_v_min, 3),            # 11: cell_volt_min
+            round(cell_v_max - cell_v_min, 3),  # 12: cell_volt_diff
+            self.CHARGE_STATE_MAP.get(self.charge_state, 0),  # 13: battery_state
+            self.protect_status,             # 14: protect_status
+            self.bms_fault_code,             # 15: bms_fault_code
+            self.device_config['max_charge_current_x10'] / 10.0,   # 16: max_chg_current
+            self.device_config['max_discharge_current_x10'] / 10.0, # 17: max_dischg_current
+            self.device_config['charge_voltage_x10'] / 10.0,        # 18: charge_volt_ref
+            self.device_config['discharge_voltage_x10'] / 10.0,     # 19: dischg_cut_volt
+            round(sum(self.cell_temps) / len(self.cell_temps), 1),  # 20: temp_battery
+            500,  # 21: charge_request_current_x10 (BMS 请求充电电流，50A 默认)
+            546,  # 22: charge_request_voltage_x10 (BMS 请求充电电压，54.6V 默认)
+        ]
+
+        # PV 数组 [7]（删除了 voltage_max/power_max/total_power）
+        pv_arr = [
+            round(self.pv1_voltage, 1),      # 0: pv1_voltage
+            round(self.pv1_current, 2),      # 1: pv1_current
+            round(self.pv1_power, 1),        # 2: pv1_power
+            round(self.pv2_voltage, 1),      # 3: pv2_voltage（旧下标 5）
+            round(self.pv2_current, 2),      # 4: pv2_current（旧下标 6）
+            round(self.pv2_power, 1),        # 5: pv2_power（旧下标 7）
+            self.MPPT_STATE_MAP.get(self.mppt_state, 0)  # 6: mppt_state（旧下标 11）
+        ]
+
+        # System 数组 [11]（新增 system_mode）
+        dc_bus = round(self.battery_v * 7.4, 1)
+        sys_arr = [
+            self.WORK_STATE_MAP.get(self.state, 0),  # 0: work_state
+            self.fault_code,                           # 1: fault_code
+            self.alarm_code,                           # 2: alarm_code
+            round(self.temp_inv, 1),                   # 3: inverter_temperature
+            round(self.temp_mos, 1),                   # 4: mos_temperature
+            round(self.temp_ambient, 1),               # 5: ambient_temperature
+            dc_bus,                                    # 6: dc_bus_voltage
+            int(self.runtime_hours),                   # 7: runtime_hours
+            int(self.fan_speed),                       # 8: fan_speed_percent
+            round(self.efficiency, 1),                 # 9: efficiency
+            0                                          # 10: system_mode（0=离网单机）
+        ]
+
+        # Energy 数组 [12]（新增 4 个累计字段）
+        eng_arr = [
+            round(self.daily_pv, 2),         # 0: daily_pv_energy
+            round(self.total_pv, 1),         # 1: total_pv_energy
+            round(self.daily_charge, 2),     # 2: daily_charge_energy
+            round(self.total_charge, 1),     # 3: total_charge_energy
+            round(self.daily_discharge, 2),  # 4: daily_discharge_energy
+            round(self.total_discharge, 1),  # 5: total_discharge_energy
+            round(self.daily_load, 2),       # 6: daily_load_energy
+            round(self.total_load, 1),       # 7: total_load_energy
+            round(self.total_charge * 10, 0),  # 8: total_charge_capacity (Ah)
+            round(self.total_discharge * 10, 0),  # 9: total_discharge_capacity (Ah)
+            int(self.runtime_hours * 3600),  # 10: total_charge_time (s)
+            int(self.runtime_hours * 3600),  # 11: total_discharge_time (s)
+        ]
+
+        # Cells 数组 [2]
+        cells_arr = [
+            [round(v, 3) for v in self.cell_voltages],  # cells[0]: 电压数组
+            [round(t, 1) for t in self.cell_temps]      # cells[1]: 温度数组
+        ]
+
+        return {
+            "v": PROTO_ENVELOPE_VERSION,
+            "ac": ac_arr,
+            "bat": bat_arr,
+            "pv": pv_arr,
+            "sys": sys_arr,
+            "eng": eng_arr,
+            "cells": cells_arr
+        }
+
+    def to_info(self):
+        """生成设备信息 payload（V1.0.26.713）"""
+        return {
+            "v": PROTO_ENVELOPE_VERSION,
+            "model": self.model,
+            "manufacturer": self.manufacturer,
+            "device_type": "off_grid_inverter",
+            "firmware_arm": self.firmware_arm,
+            "firmware_esp": self.firmware_esp,
+            "firmware_dsp": self.firmware_dsp,
+            "firmware_bms": self.firmware_bms,
+            "rated_power": self.rated_power,
+            "rated_voltage": self.rated_voltage,
+            "rated_frequency": self.rated_freq,
+            "battery_nominal_voltage": self.battery_voltage,
+            "battery_type": self.battery_type,
+            "cell_count": self.cell_count,
+            "temp_sensor_count": len(self.cell_temps),
+        }
+
+    def to_config(self):
+        """生成设备配置 payload（V1.0.26.713）"""
+        cfg = self.device_config
+        enabled = 0 if cfg['parallel_mode'] == 0 else 1
+        mode = cfg['parallel_mode']
+        role = None if cfg['parallel_mode'] == 0 else (0 if cfg['parallel_role'] == 1 else 1)
+        phase = cfg['parallel_phase']
+        return {
+            "v": PROTO_ENVELOPE_VERSION,
+            "rev": self.config_rev,
+            "inv": [
+                cfg['ac_enabled'], cfg['power_limit_w'], cfg['charge_limit_w'],
+                cfg['discharge_limit_w'], cfg['soc_low_x10'], cfg['soc_high_x10'],
+                cfg['force_charge'], cfg['force_discharge']
+            ],
+            "bms": [
+                cfg['charge_enabled'], cfg['discharge_enabled'],
+                cfg['max_charge_current_x10'], cfg['max_discharge_current_x10'],
+                cfg['charge_voltage_x10'], cfg['discharge_voltage_x10']
+            ],
+            "parallel": [enabled, mode, role, phase]
+        }
+
+    def make_alarm_event(self, code, active=True):
+        """生成新格式告警事件 payload（V1.0.26.713）"""
+        alarm_info = self.ALARM_DEFINITIONS.get(code, {
+            'level': 'warning', 'source': PROTO_SOURCE_PCS, 'message': f'Unknown {code}'
+        })
+        source_map = {'PCS': PROTO_SOURCE_PCS, 'BMS': PROTO_SOURCE_BMS,
+                      'MPPT': PROTO_SOURCE_MPPT, 'COMM': PROTO_SOURCE_COMM}
+        source = alarm_info.get('source', PROTO_SOURCE_PCS)
+        if isinstance(source, str):
+            source = source_map.get(source, PROTO_SOURCE_PCS)
+
+        level = PROTO_LEVEL_FAULT if alarm_info.get('level') == 'fault' else PROTO_LEVEL_WARNING
+        state = PROTO_STATE_ACTIVE if active else PROTO_STATE_RECOVERED
+
+        return {
+            "v": PROTO_ENVELOPE_VERSION,
+            "source": source,
+            "code": code,
+            "level": level,
+            "state": state
+        }
+
+    def to_parallel(self):
+        """生成并机状态 payload（V1.0.26.713）"""
+        cfg = self.device_config
+        enabled = cfg['parallel_mode'] != 0
+        mode_map = {0: 'standalone', 1: 'single_phase', 2: 'three_phase'}
+        return {
+            "v": PROTO_ENVELOPE_VERSION,
+            "enabled": enabled,
+            "mode": mode_map.get(cfg['parallel_mode'], 'standalone'),
+            "count": 1 if enabled else 0,
+            "total_rated_power": self.rated_power if enabled else 0,
+            "total_active_power": round(self.power, 1) if enabled else 0.0,
+            "sync_state": "idle" if not enabled else "synced",
+            "machines": []
+        }
+
+    def to_three_phase(self):
+        """生成三相数据 payload（V1.0.26.713）"""
+        v1 = round(self.voltage, 1)
+        v2 = round(self.voltage + random.uniform(-0.5, 0.5), 1)
+        v3 = round(self.voltage + random.uniform(-0.5, 0.5), 1)
+        i1 = round(self.current, 2)
+        i2 = round(self.current + random.uniform(-0.3, 0.3), 2)
+        i3 = round(self.current + random.uniform(-0.3, 0.3), 2)
+        p1 = round(self.power / 3, 1)
+        p2 = round(self.power / 3, 1)
+        p3 = round(self.power / 3, 1)
+        ll12 = round((v1 + v2) / 2 * 1.732, 1)
+        ll23 = round((v2 + v3) / 2 * 1.732, 1)
+        ll31 = round((v3 + v1) / 2 * 1.732, 1)
+        return {
+            "v": PROTO_ENVELOPE_VERSION,
+            "voltage": [v1, v2, v3],
+            "current": [i1, i2, i3],
+            "active_power": [p1, p2, p3],
+            "power_total": round(self.power, 1),
+            "line_voltage": [ll12, ll23, ll31],
+            "frequency": round(self.frequency, 2),
+            "voltage_unbalance": round(random.uniform(0.1, 1.5), 1),
+            "current_unbalance": round(random.uniform(0.1, 2.0), 1),
+        }
+
+    def to_json(self, topic):  # deprecated - 保留向后兼容
         if topic == 'info':
             return {'sn': self.sn, 'model': self.model, 'manufacturer': self.manufacturer,
                     'firmware_arm': self.firmware_arm, 'firmware_esp': self.firmware_esp,
@@ -1963,7 +2256,7 @@ class SimulatorGUI:
         self.current_group = "概览"; self.param_labels = {}
         self.auto_sim = True; self.auto_pub = True; self.pub_interval = 180.0
         self._last_pub = 0; self._pub_topic_index = 0
-        self._pub_topics = ['info', 'ac', 'battery', 'pv', 'status', 'energy', 'cells', 'control']
+        self._pub_topics = [PROTO_TOPIC_HEARTBEAT]
         self._first_pub_done = False
         self._last_alarm_pub = 0  # 上次告警上报时间，用于防重
         # 设置告警上报回调（同步调用）
@@ -2523,11 +2816,36 @@ class SimulatorGUI:
 
     def _pub_topic(self, topic):
         if not self.chip.connected: self._add_log("[WARN] 请先连接串口"); return
-        payload = json.dumps(self.chip.inverter.to_json(topic), ensure_ascii=False)
-        obj = {"sn": self.chip.inverter.sn, "topic": f"data/{topic}", "payload": payload}
+        inv = self.chip.inverter
+        # 路由到新协议方法
+        if topic == PROTO_TOPIC_HEARTBEAT:
+            arm_data = inv.to_heartbeat()
+        elif topic == PROTO_TOPIC_INFO:
+            arm_data = inv.to_info()
+        elif topic == PROTO_TOPIC_CONFIG:
+            arm_data = inv.to_config()
+        elif topic == PROTO_TOPIC_ALARM:
+            # 告警特殊处理：组装当前活动告警列表
+            critical = [c for c in inv.active_alarms
+                        if inv.ALARM_DEFINITIONS.get(c, {}).get('level') in ('fault', 'warning')]
+            if critical:
+                arm_data = [inv.make_alarm_event(c, active=True) for c in critical]
+            else:
+                arm_data = []
+        elif topic == PROTO_TOPIC_PARALLEL:
+            arm_data = inv.to_parallel()
+        elif topic == PROTO_TOPIC_THREE_PHASE:
+            arm_data = inv.to_three_phase()
+        else:
+            # 兼容旧主题（status/energy/cells/control）
+            arm_data = inv.to_json(topic)
+        # 新信封格式：{"t": ..., "v": 1, "data": ...}
+        envelope = {"t": int(time.time()), "v": PROTO_ENVELOPE_VERSION, "data": arm_data}
+        payload = json.dumps(envelope, ensure_ascii=False)
+        obj = {"sn": inv.sn, "topic": topic, "payload": payload}
         data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         ok, info = self.chip.serial_send(CMD_PUBLISH, data)
-        if ok: self._add_log(f"[TX] PUBLISH data/{topic}")
+        if ok: self._add_log(f"[TX] PUBLISH {topic}")
         else: self._add_log(f"[ERR] PUBLISH失败: {info}")
 
 
@@ -2557,7 +2875,8 @@ class SimulatorGUI:
                 self._last_pub = now
                 if not self._first_pub_done:
                     self._first_pub_done = True
-                    self._pub_topic('info')
+                    self._pub_topic(PROTO_TOPIC_INFO)
+                    self._pub_topic(PROTO_TOPIC_CONFIG)
                 # 一次发送所有主题
                 for topic in self._pub_topics:
                     self._pub_topic(topic)
@@ -2609,6 +2928,88 @@ def self_test():
 
     print("\n[5] 测试状态获取...")
     print(f"  {chip.get_status()}")
+
+    # ===== V1.0.26.713 新协议测试 =====
+    inv = chip.inverter
+    errors = []
+
+    print("\n[6] 测试 to_heartbeat 数组长度...")
+    hb = inv.to_heartbeat()
+    checks = [
+        ('ac', PROTO_AC_LEN), ('bat', PROTO_BAT_LEN), ('pv', PROTO_PV_LEN),
+        ('sys', PROTO_SYS_LEN), ('eng', PROTO_ENG_LEN), ('cells', PROTO_CELLS_LEN),
+    ]
+    for key, expected in checks:
+        actual = len(hb[key])
+        status = 'OK' if actual == expected else 'FAIL'
+        if actual != expected:
+            errors.append(f"heartbeat.{key}: expected {expected}, got {actual}")
+        print(f"  {key}: {actual}/{expected} [{status}]")
+    # 检查 v 字段
+    assert hb.get('v') == PROTO_ENVELOPE_VERSION, f"heartbeat.v != {PROTO_ENVELOPE_VERSION}"
+    print(f"  v: {hb['v']} [OK]")
+    # 检查无 seq 字段
+    assert 'seq' not in hb, "heartbeat should not contain 'seq'"
+    print(f"  no seq field [OK]")
+
+    print("\n[7] 测试 to_info 新字段...")
+    info = inv.to_info()
+    assert 'sn' not in info, "info should not contain 'sn'"
+    print(f"  no sn [OK]")
+    for field in ['device_type', 'rated_frequency', 'battery_nominal_voltage', 'temp_sensor_count']:
+        assert field in info, f"info missing '{field}'"
+        print(f"  {field}: {info[field]} [OK]")
+    assert info['device_type'] == 'off_grid_inverter', "device_type should be 'off_grid_inverter'"
+
+    print("\n[8] 测试 make_alarm_event source 0-based...")
+    evt = inv.make_alarm_event(1, active=True)  # 告警码1=PCS故障
+    assert evt['source'] == PROTO_SOURCE_PCS, f"PCS source should be 0, got {evt['source']}"
+    print(f"  PCS alarm source={evt['source']} (expected 0) [OK]")
+    assert evt['level'] == PROTO_LEVEL_FAULT, f"fault level should be 2, got {evt['level']}"
+    print(f"  fault level={evt['level']} (expected 2) [OK]")
+    assert evt['state'] == PROTO_STATE_ACTIVE, f"active state should be 1, got {evt['state']}"
+    print(f"  active state={evt['state']} (expected 1) [OK]")
+    evt_bms = inv.make_alarm_event(2, active=False)  # 告警码2=BMS故障
+    assert evt_bms['source'] == PROTO_SOURCE_BMS, f"BMS source should be 1, got {evt_bms['source']}"
+    print(f"  BMS alarm source={evt_bms['source']} (expected 1) [OK]")
+    assert evt_bms['state'] == PROTO_STATE_RECOVERED, f"recovered state should be 0"
+    print(f"  recovered state={evt_bms['state']} (expected 0) [OK]")
+
+    print("\n[9] 测试 to_config...")
+    cfg = inv.to_config()
+    assert cfg.get('v') == PROTO_ENVELOPE_VERSION
+    assert 'rev' in cfg and 'inv' in cfg and 'bms' in cfg and 'parallel' in cfg
+    print(f"  config keys: {list(cfg.keys())} [OK]")
+    print(f"  parallel: {cfg['parallel']} [OK]")
+
+    print("\n[10] 测试 to_parallel...")
+    par = inv.to_parallel()
+    assert par.get('v') == PROTO_ENVELOPE_VERSION
+    assert 'enabled' in par
+    print(f"  enabled={par['enabled']}, mode={par['mode']}, count={par['count']} [OK]")
+
+    print("\n[11] 测试 to_three_phase...")
+    tp = inv.to_three_phase()
+    assert tp.get('v') == PROTO_ENVELOPE_VERSION
+    assert isinstance(tp.get('voltage'), list) and len(tp['voltage']) == 3
+    assert isinstance(tp.get('line_voltage'), list) and len(tp['line_voltage']) == 3
+    assert 'voltage_unbalance' in tp and 'current_unbalance' in tp
+    print(f"  voltage={tp['voltage']}, line_voltage={tp['line_voltage']} [OK]")
+
+    print("\n[12] 测试信封格式...")
+    envelope = {"t": int(time.time()), "v": PROTO_ENVELOPE_VERSION, "data": hb}
+    assert 'v' in envelope and envelope['v'] == 1
+    assert 't' in envelope and isinstance(envelope['t'], int)
+    assert 'data' in envelope
+    print(f"  envelope keys: {list(envelope.keys())} [OK]")
+
+    if errors:
+        print(f"\n[FAIL] {len(errors)} 个测试失败:")
+        for e in errors:
+            print(f"  - {e}")
+    else:
+        print(f"\n[PASS] 所有 V1.0.26.713 协议测试通过!")
+
     print("\n" + "=" * 50 + "\n单元测试完成!\n" + "=" * 50)
 
 
