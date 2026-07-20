@@ -4,26 +4,36 @@ idf_component_register(
         "state_machine.c"
         "uart_protocol.c"
         "mqtt_handler.c"
+        "mqtt_ota_adapter.c"
+        "ota_service.c"
+        "ota_signature.c"
+        "arm_ota.c"
         "nvs_storage.c"
         "offline_cache.c"
         "led_status.c"
-        "tcp_provision.c"
+        "ap_api_server.c"
         "sn_encoder.c"
     INCLUDE_DIRS "."
     REQUIRES
-        driver
+        nvs_flash
+        esp_common
         esp_wifi
         esp_netif
         esp_event
-        esp_http_client
-        mqtt
-        nvs_flash
-        json
         esp_timer
+        efuse
+        spi_flash
+        mqtt
+        ble_prov
+        esp_driver_uart
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_http_client
+        esp_http_server
         app_update
-        esp_partition
-        lwip
+        json
+        esp_https_ota
+        spiffs
         mbedtls
-    PRIV_REQUIRES
-        smartconfig
+        monocypher
 )

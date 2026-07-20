@@ -1,6 +1,8 @@
 #include "uart_protocol.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "uart_proto";
 
@@ -13,6 +15,8 @@ static uint16_t g_rx_data_idx = 0;
 static uint8_t  g_rx_data_buf[FRAME_DATA_MAX];
 static uint8_t  g_rx_xor = 0;
 static bool     g_rx_esc_next = false;
+static SemaphoreHandle_t g_tx_mutex;
+static SemaphoreHandle_t g_rx_mutex;
 
 void uart_protocol_init() {
     const uart_config_t uart_config = {
@@ -27,6 +31,8 @@ void uart_protocol_init() {
     uart_param_config(UART_PORT_NUM, &uart_config);
     uart_set_pin(UART_PORT_NUM, PIN_UART_TX, PIN_UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     uart_driver_install(UART_PORT_NUM, 1024, 512, 0, NULL, 0);
+    g_tx_mutex = xSemaphoreCreateMutex();
+    g_rx_mutex = xSemaphoreCreateMutex();
     ESP_LOGI(TAG, "UART%d TX=GPIO%d, RX=GPIO%d, baud=%d",
              UART_PORT_NUM, PIN_UART_TX, PIN_UART_RX, UART_BAUDRATE);
 }
@@ -56,6 +62,8 @@ static void uart_write_escaped(uint8_t b) {
 }
 
 bool uart_send_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
+    if (len > FRAME_DATA_MAX || (len > 0 && !data) || !g_tx_mutex) return false;
+    if (xSemaphoreTake(g_tx_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
     uint8_t xor_val = calc_xor(cmd, data, len);
     uint8_t len_h = (len >> 8) & 0xFF;
     uint8_t len_l = len & 0xFF;
@@ -71,7 +79,7 @@ bool uart_send_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
         uart_write_escaped(data[i]);
     }
     uart_write_escaped(xor_val);
-
+    xSemaphoreGive(g_tx_mutex);
     return true;
 }
 
@@ -84,6 +92,7 @@ bool uart_send_nack() {
 }
 
 void uart_protocol_process() {
+    if (!g_rx_mutex || xSemaphoreTake(g_rx_mutex, 0) != pdTRUE) return;
     size_t available = 0;
     uart_get_buffered_data_len(UART_PORT_NUM, &available);
     while (available > 0) {
@@ -162,4 +171,5 @@ void uart_protocol_process() {
                 break;
         }
     }
+    xSemaphoreGive(g_rx_mutex);
 }

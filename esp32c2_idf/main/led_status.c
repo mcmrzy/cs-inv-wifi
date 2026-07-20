@@ -10,6 +10,9 @@ static const char *TAG = "led";
 #define LEDC_TIMER       LEDC_TIMER_0
 #define LEDC_DUTY_RES    LEDC_TIMER_8_BIT
 
+// PIN_LED2 < 0 表示硬件上没有 LED2
+static bool s_led2_available = (PIN_LED2 >= 0);
+
 static const ledc_channel_config_t led2_channel_cfg = {
     .gpio_num   = PIN_LED2,
     .speed_mode = LEDC_SPEED_MODE,
@@ -53,6 +56,7 @@ static inline int64_t millis_now(void) {
 }
 
 static void led_write(struct LedSlot *s, bool on) {
+    if (s->pin < 0) return;  // 硬件上不存在此引脚
     gpio_set_level(s->pin, on ? 1 : 0);
     s->cur_on = on;
 }
@@ -77,21 +81,23 @@ void led_init(void) {
         .intr_type    = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
-
     gpio_set_level(PIN_LED1, 0);
 
-    ledc_timer_config_t timer_conf = {
-        .speed_mode      = LEDC_SPEED_MODE,
-        .duty_resolution = LEDC_DUTY_RES,
-        .timer_num       = LEDC_TIMER,
-        .freq_hz         = 5000,
-        .clk_cfg         = LEDC_AUTO_CLK,
-    };
-    ledc_timer_config(&timer_conf);
+    // LED2 仅在硬件存在时初始化 LEDC PWM
+    if (s_led2_available) {
+        ledc_timer_config_t timer_conf = {
+            .speed_mode      = LEDC_SPEED_MODE,
+            .duty_resolution = LEDC_DUTY_RES,
+            .timer_num       = LEDC_TIMER,
+            .freq_hz         = 5000,
+            .clk_cfg         = LEDC_AUTO_CLK,
+        };
+        ledc_timer_config(&timer_conf);
 
-    ledc_channel_config(&led2_channel_cfg);
-    ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL_0, 0);
-    ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL_0);
+        ledc_channel_config(&led2_channel_cfg);
+        ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL_0, 0);
+        ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL_0);
+    }
 }
 
 static void led_set_pattern(struct LedSlot *s, LedPattern p) {
@@ -133,6 +139,7 @@ void led1_set(LedPattern state) {
 }
 
 void led2_set(LedPattern state) {
+    if (!s_led2_available) return;
     g_data_flash_prev = state;
     led_set_pattern(&g_led2, state);
 }
@@ -176,7 +183,7 @@ static void led_tick_slot(struct LedSlot *s, bool is_led2) {
                 s->last_toggle_us = now;
                 s->breath_step += s->breath_dir;
                 uint32_t duty = (s->breath_step * 255) / BREATH_S;
-                if (is_led2) {
+                if (is_led2 && s_led2_available) {
                     ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL_0, duty);
                     ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL_0);
                 } else {
@@ -206,6 +213,8 @@ static void led_tick_slot(struct LedSlot *s, bool is_led2) {
 
 void led_tick(void) {
     led_tick_slot(&g_led1, false);
+
+    if (!s_led2_available) return;
 
     if (g_data_flash_active) {
         if (millis_now() - g_data_flash_start < DATA_FLASH_MS) {

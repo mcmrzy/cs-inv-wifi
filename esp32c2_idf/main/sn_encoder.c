@@ -7,6 +7,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include "esp_log.h"
+
+static const char *SN_TAG = "sn_encoder";
 
 // ==================== 年份编码表 ====================
 // 36 进制, 跳过 O(14) 和 I(8)
@@ -193,43 +196,65 @@ bool sn_parse(const char* sn, SNFields* out) {
 
 // ==================== SN 生成 ====================
 bool sn_generate(const SNFields* fields, char* out, size_t out_len) {
-    if (!fields || !out || out_len < SN_FULL_LEN + 1) return false;
+    if (!fields || !out || out_len < SN_FULL_LEN + 1) {
+        ESP_LOGE(SN_TAG, "sn_generate: invalid params (out_len=%u)", (unsigned)out_len);
+        return false;
+    }
     
     // 构建前 15 位
     char prefix[SN_PREFIX_LEN + 1];
     
     // 厂商码 (2位)
-    if (strlen(fields->manufacturer) < 2) return false;
+    if (strlen(fields->manufacturer) < 2) {
+        ESP_LOGE(SN_TAG, "sn_generate: manufacturer too short");
+        return false;
+    }
     prefix[0] = (char)toupper((unsigned char)fields->manufacturer[0]);
     prefix[1] = (char)toupper((unsigned char)fields->manufacturer[1]);
     
     // 国家码 (2位)
-    if (strlen(fields->country) < 2) return false;
+    if (strlen(fields->country) < 2) {
+        ESP_LOGE(SN_TAG, "sn_generate: country too short");
+        return false;
+    }
     prefix[2] = (char)toupper((unsigned char)fields->country[0]);
     prefix[3] = (char)toupper((unsigned char)fields->country[1]);
     
     // 客户码 (4位)
-    if (strlen(fields->customer) < 4) return false;
+    if (strlen(fields->customer) < 4) {
+        ESP_LOGE(SN_TAG, "sn_generate: customer too short");
+        return false;
+    }
     prefix[4] = (char)toupper((unsigned char)fields->customer[0]);
     for (int i = 5; i <= 7; i++) {
         prefix[i] = fields->customer[i - 4];
     }
     
     // 日期码 (2位)
-    if (strlen(fields->date_code) < 2) return false;
+    if (strlen(fields->date_code) < 2) {
+        ESP_LOGE(SN_TAG, "sn_generate: date_code too short");
+        return false;
+    }
     prefix[8] = (char)toupper((unsigned char)fields->date_code[0]);
     prefix[9] = (char)toupper((unsigned char)fields->date_code[1]);
     
     // 序列号 (5位)
-    if (strlen(fields->sequence) < 5) return false;
+    if (strlen(fields->sequence) < 5) {
+        ESP_LOGE(SN_TAG, "sn_generate: sequence too short");
+        return false;
+    }
     for (int i = 10; i <= 14; i++) {
         prefix[i] = fields->sequence[i - 10];
     }
     
     prefix[SN_PREFIX_LEN] = '\0';
+    ESP_LOGD(SN_TAG, "sn_generate: built prefix='%s'", prefix);
     
     // 校验前 15 位格式
-    if (!sn_validate_format(prefix)) return false;
+    if (!sn_validate_format(prefix)) {
+        ESP_LOGE(SN_TAG, "sn_generate: format validation failed for prefix='%s'", prefix);
+        return false;
+    }
     
     // 计算校验位
     char check = sn_compute_check_digit(prefix);

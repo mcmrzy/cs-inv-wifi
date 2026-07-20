@@ -3,14 +3,15 @@
 #include "nvs_storage.h"
 #include "uart_protocol.h"
 #include "led_status.h"
-#include "tcp_provision.h"
+#include "ap_api_server.h"
 #include "mqtt_handler.h"
 #include "mqtt_ota_handler.h"
 #include "sn_encoder.h"
-#include "ota_manager.h"
+#include "ota_service.h"
 #include "arm_ota.h"
 #include "offline_cache.h"
 #include "cs_protocol_defs.h"
+
 
 #include "esp_wifi.h"
 #include "esp_netif.h"
@@ -21,10 +22,13 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "cJSON.h"
 
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <time.h>
+#include <math.h>
 
 static const char *TAG = "sm";
 
@@ -40,10 +44,99 @@ static int g_wifi_reconnect_attempts = 0;
 static int64_t g_wifi_reconnect_delay = 1000;
 static int64_t g_wifi_retry_next = 0;
 
-static int64_t g_last_heartbeat = 0;
+// g_last_heartbeat 已移除：status 不再周期性发送
 static int64_t g_last_uart_heartbeat = 0;
 static int64_t g_last_cache_flush = 0;
 static int64_t g_last_debug = 0;
+
+#define CMD_DEDUP_SLOTS 8
+static char g_recent_task_ids[CMD_DEDUP_SLOTS][64];
+static char g_recent_responses[CMD_DEDUP_SLOTS][FRAME_DATA_MAX];
+static unsigned g_recent_task_next;
+static bool g_recent_loaded;
+
+static void load_recent_commands(void) {
+    if (g_recent_loaded) return;
+    for (unsigned i = 0; i < CMD_DEDUP_SLOTS; ++i) {
+        storage_load_cmd_result(i, g_recent_task_ids[i], sizeof(g_recent_task_ids[i]),
+                                g_recent_responses[i], sizeof(g_recent_responses[i]));
+    }
+    g_recent_task_next = storage_get_cmd_next();
+    g_recent_loaded = true;
+}
+
+static bool command_seen(const char *task_id)
+{
+    if (!task_id || !task_id[0]) return false;
+    load_recent_commands();
+    for (unsigned i = 0; i < CMD_DEDUP_SLOTS; ++i) {
+        if (strcmp(g_recent_task_ids[i], task_id) == 0) return true;
+    }
+    return false;
+}
+
+static bool remember_command(const char *task_id, const char *response)
+{
+    if (!task_id || !task_id[0] || !response) return false;
+    load_recent_commands();
+    unsigned slot = g_recent_task_next;
+    for (unsigned i = 0; i < CMD_DEDUP_SLOTS; ++i) {
+        if (strcmp(g_recent_task_ids[i], task_id) == 0) { slot = i; break; }
+    }
+    if (!storage_save_cmd_result(slot, task_id, response)) return false;
+    strlcpy(g_recent_task_ids[slot], task_id, sizeof(g_recent_task_ids[slot]));
+    strlcpy(g_recent_responses[slot], response, sizeof(g_recent_responses[slot]));
+    if (slot == g_recent_task_next) {
+        unsigned next = (g_recent_task_next + 1) % CMD_DEDUP_SLOTS;
+        if (!storage_set_cmd_next(next)) return false;
+        g_recent_task_next = next;
+    }
+    return true;
+}
+
+static void replay_command(const char* task_id) {
+    load_recent_commands();
+    for (unsigned i = 0; i < CMD_DEDUP_SLOTS; ++i) {
+        if (strcmp(g_recent_task_ids[i], task_id) == 0 && g_recent_responses[i][0]) {
+            mqtt_publish(PROTO_TOPIC_CMD_RESP, g_recent_responses[i],
+                         strlen(g_recent_responses[i]), 1, 0);
+            return;
+        }
+    }
+}
+
+static void publish_command_reply(const char *task_id, const char *cmd,
+                                  const char *stage, bool success,
+                                  const char *code, const char *message)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "task_id", task_id ? task_id : "");
+    cJSON_AddStringToObject(root, "cmd", cmd ? cmd : "");
+    cJSON_AddStringToObject(root, "stage", stage);
+    cJSON_AddBoolToObject(root, "success", success);
+    cJSON_AddStringToObject(root, "code", code);
+    cJSON_AddStringToObject(root, "message", message ? message : "");
+    cJSON_AddItemToObject(root, "result", cJSON_CreateArray());
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json) {
+        if (remember_command(task_id, json)) {
+            mqtt_publish(PROTO_TOPIC_CMD_RESP, json, strlen(json), 1, 0);
+        } else {
+            char fallback[256];
+            int n = snprintf(fallback, sizeof(fallback),
+                "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"done\","
+                "\"success\":false,\"code\":\"PERSIST_FAILED\","
+                "\"message\":\"Command result persistence failed\",\"result\":[]}",
+                task_id ? task_id : "", cmd ? cmd : "");
+            if (n > 0 && n < (int)sizeof(fallback)) {
+                mqtt_publish(PROTO_TOPIC_CMD_RESP, fallback, n, 1, 0);
+            }
+        }
+        free(json);
+    }
+}
 
 /* ARM 数据超时看门告警 */
 static int64_t g_last_data_received = 0;
@@ -95,6 +188,7 @@ static void init_wifi_sta(void)
 
 void build_ap_ssid(char *out, size_t out_len)
 {
+    // 1. 优先使用自定义 AP SSID
     char custom_ssid[AP_SSID_MAX_LEN];
     if (storage_get_ap_ssid(custom_ssid, sizeof(custom_ssid))) {
         size_t clen = strlen(custom_ssid);
@@ -115,15 +209,24 @@ void build_ap_ssid(char *out, size_t out_len)
         storage_clear_ap_ssid();
     }
 
-    size_t sn_len = strlen(g_device_sn);
+    // 2. 有 SN 时用 SN, 无 SN 时用 MAC 地址后 3 字节
     size_t prefix_len = strlen(AP_SSID_PREFIX);
-    size_t max_sn = (out_len > prefix_len + 1) ? (out_len - prefix_len - 1) : 0;
-    size_t copy_len = (sn_len < max_sn) ? sn_len : max_sn;
-    memcpy(out, AP_SSID_PREFIX, prefix_len);
-    memcpy(out + prefix_len, g_device_sn, copy_len);
-    out[prefix_len + copy_len] = '\0';
-    for (char *p = out + prefix_len; *p; p++) {
-        if (*p >= 'a' && *p <= 'z') *p = *p - 'a' + 'A';
+    if (g_device_sn[0] != '\0') {
+        size_t sn_len = strlen(g_device_sn);
+        size_t max_sn = (out_len > prefix_len + 1) ? (out_len - prefix_len - 1) : 0;
+        size_t copy_len = (sn_len < max_sn) ? sn_len : max_sn;
+        memcpy(out, AP_SSID_PREFIX, prefix_len);
+        memcpy(out + prefix_len, g_device_sn, copy_len);
+        out[prefix_len + copy_len] = '\0';
+        for (char *p = out + prefix_len; *p; p++) {
+            if (*p >= 'a' && *p <= 'z') *p = *p - 'a' + 'A';
+        }
+    } else {
+        // 无 SN, 用 MAC 地址后 3 字节: CS_INV_AABBCC
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        snprintf(out, out_len, "%s%02X%02X%02X",
+                 AP_SSID_PREFIX, mac[3], mac[4], mac[5]);
     }
 }
 
@@ -169,7 +272,7 @@ static void state_sta_connecting(void)
             g_sys_state = STATE_AP_PROVISION;
             led1_set(LED_SLOW_BLINK);
             led2_set(LED_OFF);
-            tcp_provision_init();
+            ap_api_server_start();
             g_wifi_retry_next = 0;
             return;
         }
@@ -211,7 +314,6 @@ static void state_mqtt_connecting(void)
         g_sys_state = STATE_RUNNING;
         led1_set(LED_SOLID);
         led2_set(LED_SOLID);
-        g_last_heartbeat = now_ms();
         g_last_data_received = now_ms();
         g_arm_alarm_sent = false;
         return;
@@ -225,7 +327,7 @@ static void state_running(void)
         ESP_LOGW(TAG, "WiFi lost!");
         led1_set(LED_FAST_BLINK);
         led2_set(LED_OFF);
-        mqtt_disconnect();
+        mqtt_on_network_lost();
         init_wifi_sta();
         g_sys_state = STATE_STA_CONNECTING;
         return;
@@ -237,23 +339,7 @@ static void state_running(void)
         return;
     }
 
-    if (now_ms() - g_last_heartbeat >= HEARTBEAT_INTERVAL) {
-        g_last_heartbeat = now_ms();
-
-        esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        esp_netif_ip_info_t ip_info = {0};
-        if (sta_netif) esp_netif_get_ip_info(sta_netif, &ip_info);
-
-        wifi_ap_record_t ap_info = {0};
-        esp_wifi_sta_get_ap_info(&ap_info);
-
-        char status_msg[256];
-        snprintf(status_msg, sizeof(status_msg),
-                 "{\"online\":true,\"rssi\":%d,\"ip\":\"" IPSTR "\"}",
-                 ap_info.rssi, IP2STR(&ip_info.ip));
-        mqtt_publish(PROTO_TOPIC_STATUS, status_msg, strlen(status_msg), 1, 1);
-        ESP_LOGI(TAG, "Heartbeat sent");
-    }
+    // status 仅在上线/主动下线/LWT 时发布（MQTT keepalive 维护连接状态）
 
     if (now_ms() - g_last_cache_flush >= 10000) {
         g_last_cache_flush = now_ms();
@@ -271,7 +357,7 @@ static void state_running(void)
                 snprintf(alarm_msg, sizeof(alarm_msg),
                     "{\"source\":%d,\"code\":%d,\"level\":%d,\"state\":%d}",
                     PROTO_SOURCE_COMM, ARM_ALARM_CODE, PROTO_LEVEL_FAULT, PROTO_STATE_ACTIVE);
-                mqtt_publish(PROTO_TOPIC_ALARM, alarm_msg, strlen(alarm_msg), 0, 0);
+                mqtt_publish(PROTO_TOPIC_ALARM, alarm_msg, strlen(alarm_msg), 1, 0);
                 ESP_LOGW(TAG, "ARM watchdog alarm: no data for %lld ms",
                          now_ms() - g_last_data_received);
             }
@@ -281,7 +367,7 @@ static void state_running(void)
             snprintf(recovery_msg, sizeof(recovery_msg),
                 "{\"source\":%d,\"code\":%d,\"level\":%d,\"state\":%d}",
                 PROTO_SOURCE_COMM, ARM_ALARM_CODE, PROTO_LEVEL_FAULT, PROTO_STATE_RECOVERED);
-            mqtt_publish(PROTO_TOPIC_ALARM, recovery_msg, strlen(recovery_msg), 0, 0);
+            mqtt_publish(PROTO_TOPIC_ALARM, recovery_msg, strlen(recovery_msg), 1, 0);
             ESP_LOGI(TAG, "ARM watchdog recovery: data resumed");
         }
     }
@@ -314,24 +400,19 @@ void state_machine_run(void)
     case STATE_INIT:
         break;
     case STATE_AP_PROVISION:
-        tcp_provision_process();
         break;
     case STATE_STA_CONNECTING:
         state_sta_connecting();
-        tcp_provision_process();
         break;
     case STATE_MQTT_CONNECTING:
         state_mqtt_connecting();
-        tcp_provision_process();
         break;
     case STATE_RUNNING:
         state_running();
-        tcp_provision_process();
         mqtt_ota_process();
         break;
     case STATE_OTA:
-        ota_manager_process();
-        tcp_provision_process();
+        ota_service_process();
         break;
     }
 }
@@ -359,17 +440,27 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
     switch (cmd) {
     case CMD_SET_BROKER: {
         char buf[128] = {0};
-        memcpy(buf, data, MIN((size_t)len, sizeof(buf) - 1));
-        char *colon = strchr(buf, ':');
-        if (colon) {
-            *colon = '\0';
-            storage_set_mqtt(buf, (uint16_t)atoi(colon + 1));
-            ESP_LOGI(TAG, "Broker: %s:%s", buf, colon + 1);
-            mqtt_disconnect();
-            mqtt_init(on_mqtt_message);
-            g_sys_state = STATE_MQTT_CONNECTING;
+        if (len == 0 || len >= sizeof(buf)) {
+            uart_send_nack();
+            break;
         }
-        uart_send_ack();
+        memcpy(buf, data, len);
+        char *colon = strrchr(buf, ':');
+        bool accepted = false;
+        if (colon && colon != buf && colon[1]) {
+            *colon = '\0';
+            errno = 0;
+            char *end = NULL;
+            const unsigned long port = strtoul(colon + 1, &end, 10);
+            if (errno == 0 && end != colon + 1 && *end == '\0' && port <= UINT16_MAX) {
+                accepted = mqtt_set_broker(buf, (uint16_t)port);
+                if (accepted) {
+                    ESP_LOGI(TAG, "Broker: %s:%lu", buf, port);
+                    g_sys_state = STATE_MQTT_CONNECTING;
+                }
+            }
+        }
+        if (accepted) uart_send_ack(); else uart_send_nack();
         break;
     }
 
@@ -382,6 +473,7 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
         char topic[64] = {0};
         char payload[FRAME_DATA_MAX - 80] = {0};
         char sn[SN_MAX_LEN] = {0};
+        int publish_result = -1;
 
         extract_str(json, "\"topic\"", topic, sizeof(topic));
         extract_str(json, "\"payload\"", payload, sizeof(payload));
@@ -392,11 +484,14 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
                     uart_send_nack();
                     return;
                 }
-                storage_set_sn(sn);
+                if (!storage_set_sn(sn)) {
+                    ESP_LOGE(TAG, "Failed to persist SN from PUBLISH");
+                    uart_send_nack();
+                    return;
+                }
                 strncpy(g_device_sn, sn, sizeof(g_device_sn) - 1);
                 ESP_LOGI(TAG, "SN updated via PUBLISH: %s", sn);
-                mqtt_disconnect();
-                mqtt_init(on_mqtt_message);
+                mqtt_reconfigure();
                 if (g_sys_state == STATE_RUNNING) g_sys_state = STATE_MQTT_CONNECTING;
 
                 char ap_ssid[32];
@@ -413,7 +508,7 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
         if (strlen(topic) > 0) {
             const char *send_payload = payload;
             char final_payload[FRAME_DATA_MAX - 80];
-            const char *esp_ver = ota_get_esp_version();
+            const char *esp_ver = FIRMWARE_VERSION;
             char *esp_pos = strstr(payload, "\"firmware_esp\"");
             if (esp_pos) {
                 char *ver_start = strchr(esp_pos + 14, ':');
@@ -436,7 +531,8 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
                     }
                 }
             }
-            mqtt_publish(topic, send_payload, strlen(send_payload), 0, 0);
+            int qos = strcmp(topic, PROTO_TOPIC_THREE_PHASE) == 0 ? 0 : 1;
+            publish_result = mqtt_publish(topic, send_payload, strlen(send_payload), qos, 0);
             g_last_data_received = now_ms();
             led_signal_data();
             ESP_LOGI(TAG, "PUBLISH -> cs_inv/%s/%s (%d bytes)",
@@ -444,7 +540,8 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
         } else {
             ESP_LOGW(TAG, "PUBLISH error: topic empty");
         }
-        uart_send_ack();
+        if (strlen(topic) > 0 && publish_result >= 0) uart_send_ack();
+        else uart_send_nack();
         break;
     }
 
@@ -471,7 +568,11 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
         }
 
         bool changed = (strcmp(g_device_sn, sn) != 0);
-        storage_set_sn(sn);
+        if (!storage_set_sn(sn)) {
+            ESP_LOGE(TAG, "Failed to persist SN");
+            uart_send_nack();
+            break;
+        }
         strncpy(g_device_sn, sn, sizeof(g_device_sn) - 1);
         uart_send_ack();
         if (changed) {
@@ -486,22 +587,44 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
 
     case CMD_SET_KEY: {
         char key[65] = {0};
-        memcpy(key, data, MIN((size_t)len, sizeof(key) - 1));
-        storage_set_key(key);
+        if (len == 0 || len >= sizeof(key)) {
+            uart_send_nack();
+            break;
+        }
+        memcpy(key, data, len);
+        if (!storage_set_key(key)) {
+            ESP_LOGE(TAG, "Failed to persist MQTT key");
+            uart_send_nack();
+            break;
+        }
         strncpy(g_device_key, key, sizeof(g_device_key) - 1);
+        mqtt_reconfigure();
+        if (s_wifi_event_group &&
+            (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT)) {
+            g_sys_state = STATE_MQTT_CONNECTING;
+        }
         uart_send_ack();
         break;
     }
 
     case CMD_SET_AP_SSID: {
         char ap_ssid[AP_SSID_MAX_LEN] = {0};
-        memcpy(ap_ssid, data, MIN((size_t)len, sizeof(ap_ssid) - 1));
+        if (len >= sizeof(ap_ssid)) {
+            uart_send_nack();
+            break;
+        }
+        memcpy(ap_ssid, data, len);
+        bool saved;
         if (strlen(ap_ssid) == 0) {
-            storage_clear_ap_ssid();
-            ESP_LOGI(TAG, "AP SSID reset to default");
+            saved = storage_clear_ap_ssid();
+            if (saved) ESP_LOGI(TAG, "AP SSID reset to default");
         } else {
-            storage_set_ap_ssid(ap_ssid);
-            ESP_LOGI(TAG, "AP SSID set to: %s", ap_ssid);
+            saved = storage_set_ap_ssid(ap_ssid);
+            if (saved) ESP_LOGI(TAG, "AP SSID set to: %s", ap_ssid);
+        }
+        if (!saved) {
+            uart_send_nack();
+            break;
         }
         uart_send_ack();
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -510,6 +633,7 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
     }
 
     case CMD_FACTORY_RESET:
+        offline_cache_clear();
         storage_factory_reset();
         uart_send_ack();
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -527,9 +651,21 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
         size_t copy_len = (len < sizeof(json) - 1) ? len : sizeof(json) - 1;
         memcpy(json, data, copy_len);
         json[copy_len] = '\0';
-        mqtt_publish(PROTO_TOPIC_CMD_RESP, json, copy_len, 1, 0);
-        ESP_LOGI(TAG, "ARM->MQTT cmd_result: %s", json);
-        uart_send_ack();
+        bool persisted = false;
+        cJSON* result = cJSON_Parse(json);
+        if (result) {
+            cJSON* task = cJSON_GetObjectItemCaseSensitive(result, "task_id");
+            if (cJSON_IsString(task)) persisted = remember_command(task->valuestring, json);
+            cJSON_Delete(result);
+        }
+        int publish_result = mqtt_publish(PROTO_TOPIC_CMD_RESP, json, copy_len, 1, 0);
+        if (persisted && publish_result >= 0) {
+            ESP_LOGI(TAG, "ARM command result accepted: result=%d", publish_result);
+            uart_send_ack();
+        } else {
+            ESP_LOGE(TAG, "ARM command result publish/cache failed: %d", publish_result);
+            uart_send_nack();
+        }
         break;
     }
 
@@ -539,10 +675,16 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
     }
 }
 
-void on_provision_done(const char *ssid, const char *password)
+static bool apply_provision(const char *ssid, const char *password)
 {
+    if (!ssid || !password || !ssid[0] || strlen(ssid) > 32 || strlen(password) > 64) {
+        return false;
+    }
     ESP_LOGI(TAG, "Provision: %s, pass_len=%d", ssid, (int)strlen(password));
-    storage_set_wifi(ssid, password);
+    if (!storage_set_wifi(ssid, password)) {
+        ESP_LOGE(TAG, "Failed to persist Wi-Fi configuration");
+        return false;
+    }
     strncpy(g_wifi_ssid, ssid, sizeof(g_wifi_ssid) - 1);
     strncpy(g_wifi_pass, password, sizeof(g_wifi_pass) - 1);
     init_wifi_sta();
@@ -550,6 +692,17 @@ void on_provision_done(const char *ssid, const char *password)
     led1_set(LED_FAST_BLINK);
     led2_set(LED_OFF);
     ESP_LOGI(TAG, "Connecting STA to %s", ssid);
+    return true;
+}
+
+void on_provision_done(const char *ssid, const char *password)
+{
+    apply_provision(ssid, password);
+}
+
+bool on_ap_provision_done(const char *ssid, const char *password)
+{
+    return apply_provision(ssid, password);
 }
 
 void on_mqtt_message(const char *topic, const char *payload, unsigned int len)
@@ -559,54 +712,73 @@ void on_mqtt_message(const char *topic, const char *payload, unsigned int len)
 
     if (strstr(topic, "/ota/cmd") != NULL) {
         ESP_LOGI(TAG, "OTA cmd topic=%s len=%u", topic, len);
-        if (mqtt_ota_handle_command(topic, (const uint8_t *)payload, len)) {
-            return;
-        }
+        mqtt_ota_handle_command(topic, (const uint8_t *)payload, len);
+        return;
     }
 
     /* ---- /cmd 下行命令：提取 task_id / t，过期校验，回复 ACK ---- */
     bool is_cmd_topic = (strcmp(sub, "cmd") == 0);
     if (is_cmd_topic) {
-        char task_id[72] = {0};
-        char t_str[16]   = {0};
-        char cmd_str[32] = {0};
-        extract_str(payload, "\"task_id\"", task_id, sizeof(task_id));
-        extract_str(payload, "\"t\"",       t_str,   sizeof(t_str));
-        extract_str(payload, "\"cmd\"",     cmd_str, sizeof(cmd_str));
-        time_t cmd_t = atol(t_str);
-        time_t now   = time(NULL);
+        if (len == 0 || len > FRAME_DATA_MAX || len > UINT16_MAX) {
+            publish_command_reply("", "", PROTO_CMD_STAGE_DONE, false,
+                                  PROTO_ERR_INVALID_ARGS, "Command exceeds UART frame limit");
+            return;
+        }
+        cJSON *root = cJSON_ParseWithLength(payload, len);
+        if (!root) {
+            publish_command_reply("", "", PROTO_CMD_STAGE_DONE, false,
+                                  PROTO_ERR_INVALID_ARGS, "Invalid JSON");
+            return;
+        }
+        const cJSON *task = cJSON_GetObjectItemCaseSensitive(root, "task_id");
+        const cJSON *cmd_item = cJSON_GetObjectItemCaseSensitive(root, "cmd");
+        const cJSON *timestamp = cJSON_GetObjectItemCaseSensitive(root, "t");
+        const char *task_id = cJSON_IsString(task) ? task->valuestring : "";
+        const char *cmd_str = cJSON_IsString(cmd_item) ? cmd_item->valuestring : "";
+        bool valid_t = cJSON_IsNumber(timestamp) && isfinite(timestamp->valuedouble) &&
+                       timestamp->valuedouble > 0 && timestamp->valuedouble <= UINT32_MAX &&
+                       floor(timestamp->valuedouble) == timestamp->valuedouble;
+        time_t cmd_t = valid_t ? (time_t)timestamp->valuedouble : 0;
+        time_t now = time(NULL);
 
-        /* 过期校验（NTP 未同步时跳过） */
-        if (now > 0 && cmd_t > 0 && (now - cmd_t) > PROTO_CMD_EXPIRE_S) {
-            char expired_resp[256];
-            snprintf(expired_resp, sizeof(expired_resp),
-                "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
-                "\"success\":false,\"code\":\"%s\",\"message\":\"Command expired\",\"result\":[]}",
-                task_id, cmd_str, PROTO_CMD_STAGE_DONE, PROTO_ERR_EXPIRED);
-            mqtt_publish(PROTO_TOPIC_CMD_RESP, expired_resp, (int)strlen(expired_resp), 0, 0);
-            ESP_LOGW(TAG, "CMD expired: task_id=%s cmd=%s t=%ld now=%ld",
-                     task_id, cmd_str, (long)cmd_t, (long)now);
-            return;  /* 不转发给 ARM */
+        if (!task_id[0] || !cmd_str[0] || !valid_t) {
+            publish_command_reply(task_id, cmd_str, PROTO_CMD_STAGE_DONE, false,
+                                  PROTO_ERR_INVALID_ARGS,
+                                  "task_id, cmd and numeric t are required");
+            cJSON_Delete(root);
+            return;
         }
 
-        /* 立即回复 acknowledged（QoS 0 低延迟） */
-        if (task_id[0] != '\0') {
-            char ack_resp[256];
-            snprintf(ack_resp, sizeof(ack_resp),
-                "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
-                "\"success\":true,\"code\":\"%s\",\"message\":\"\",\"result\":[]}",
-                task_id, cmd_str, PROTO_CMD_STAGE_ACK, PROTO_ERR_OK);
-            mqtt_publish(PROTO_TOPIC_CMD_RESP, ack_resp, (int)strlen(ack_resp), 0, 0);
-            ESP_LOGI(TAG, "CMD ACK sent: task_id=%s cmd=%s", task_id, cmd_str);
+        if (command_seen(task_id)) {
+            replay_command(task_id);
+            cJSON_Delete(root);
+            return;
         }
+        if (now >= 1704067200 && (now - cmd_t) > PROTO_CMD_EXPIRE_S) {
+            publish_command_reply(task_id, cmd_str, PROTO_CMD_STAGE_DONE, false,
+                                  PROTO_ERR_EXPIRED, "Command expired");
+            cJSON_Delete(root);
+            return;
+        }
+        if (!uart_send_frame(CMD_COMMAND_RECV, (const uint8_t *)payload, (uint16_t)len)) {
+            publish_command_reply(task_id, cmd_str, PROTO_CMD_STAGE_DONE, false,
+                                  PROTO_ERR_EXEC_FAILED, "UART delivery failed");
+            cJSON_Delete(root);
+            return;
+        }
+        publish_command_reply(task_id, cmd_str, PROTO_CMD_STAGE_ACK, true,
+                              PROTO_ERR_OK, "");
+        cJSON_Delete(root);
+        return;
+
     }
 
     /* 转发给 ARM */
-    char json[512];
-    int jslen = snprintf(json, sizeof(json),
-                         "{\"topic\":\"%s\",\"payload\":\"%.*s\"}",
-                         sub, (int)len, payload);
-    uart_send_frame(CMD_COMMAND_RECV, (const uint8_t *)json, jslen);
+    if (len == 0 || len > FRAME_DATA_MAX || len > UINT16_MAX) {
+        ESP_LOGE(TAG, "MQTT payload cannot fit UART frame: %u", len);
+        return;
+    }
+    uart_send_frame(CMD_COMMAND_RECV, (const uint8_t *)payload, (uint16_t)len);
     ESP_LOGI(TAG, "MQTT->ARM topic=%s len=%u", sub, len);
 }
 
@@ -627,6 +799,7 @@ void check_button(void)
             ESP_LOGW(TAG, "Factory reset!");
             led1_set(LED_3FLASH);
             led2_set(LED_3FLASH);
+            offline_cache_clear();
             storage_factory_reset();
             vTaskDelay(pdMS_TO_TICKS(1500));
             esp_restart();
@@ -653,7 +826,7 @@ void check_button(void)
                 esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
 
                 ESP_LOGI(TAG, "AP(%s) started alongside STA", ap_ssid);
-                tcp_provision_init();
+                ap_api_server_start();
             }
         }
     }

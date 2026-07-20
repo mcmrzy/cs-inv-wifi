@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
+#include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -56,6 +57,7 @@ static SemaphoreHandle_t s_mutex = NULL;
 static OfflineCacheItem *s_batch = NULL;
 static int s_batch_count = 0;
 static int64_t s_batch_start_ms = 0;
+static int64_t s_last_process_ms = 0;
 
 /* Persistent metadata */
 static uint32_t s_next_seq = 1;
@@ -231,13 +233,18 @@ static void cleanup_expired(void) {
 
 /* Evict oldest files if we have too many */
 static void evict_if_needed(void) {
+    bool changed = false;
     while (count_files() >= MAX_CACHE_FILES) {
         uint32_t min_seq = find_min_seq();
         if (min_seq == UINT32_MAX) break;
         char path[280];
         make_filename(min_seq, path, sizeof(path));
         ESP_LOGW(TAG, "Evicting oldest batch: %s", path);
-        remove(path);
+        if (remove(path) == 0) changed = true;
+    }
+    if (changed) {
+        s_total_msgs = count_all_messages();
+        save_meta();
     }
 }
 
@@ -250,7 +257,10 @@ static void evict_oldest_batch(void) {
     char path[280];
     make_filename(min_seq, path, sizeof(path));
     ESP_LOGW(TAG, "SPIFFS full, evicting oldest: %s", path);
-    remove(path);
+    if (remove(path) == 0) {
+        s_total_msgs = count_all_messages();
+        save_meta();
+    }
 }
 
 static esp_err_t flush_batch(void) {
@@ -263,6 +273,10 @@ static esp_err_t flush_batch(void) {
 
     for (int i = 0; i < s_batch_count; i++) {
         cJSON *item = cJSON_CreateObject();
+        if (!item) {
+            cJSON_Delete(arr);
+            return ESP_ERR_NO_MEM;
+        }
         cJSON_AddStringToObject(item, "t", s_batch[i].topic);
         cJSON_AddStringToObject(item, "p", s_batch[i].payload);
         cJSON_AddNumberToObject(item, "ts", s_batch[i].timestamp);
@@ -276,22 +290,25 @@ static esp_err_t flush_batch(void) {
     char path[280];
     make_filename(s_next_seq, path, sizeof(path));
 
-    FILE *f = fopen(path, "w");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to create %s", path);
-        free(json);
-        evict_oldest_batch();
-        s_batch_count = 0;  /* 防止缓冲区溢出 */
-        return ESP_FAIL;
+    size_t expected = strlen(json);
+    size_t written = 0;
+    bool synced = false;
+    for (int attempt = 0; attempt < 2 && !synced; ++attempt) {
+        FILE *f = fopen(path, "w");
+        if (f) {
+            written = fwrite(json, 1, expected, f);
+            synced = written == expected && fflush(f) == 0 && fsync(fileno(f)) == 0;
+            fclose(f);
+        }
+        if (!synced) {
+            remove(path);
+            if (attempt == 0) evict_oldest_batch();
+        }
     }
-    size_t written = fwrite(json, 1, strlen(json), f);
-    fclose(f);
     free(json);
 
-    if (written == 0) {
-        remove(path);
-        evict_oldest_batch();
-        s_batch_count = 0;
+    if (!synced) {
+        ESP_LOGE(TAG, "Failed to persist batch %s after retry", path);
         return ESP_FAIL;
     }
 
@@ -318,9 +335,10 @@ void offline_cache_init(void) {
     configASSERT(s_batch);
     s_batch_count = 0;
     s_batch_start_ms = now_ms();
+    s_last_process_ms = s_batch_start_ms;
 
     esp_vfs_spiffs_conf_t spiffs_cfg = {
-        .base_path = SPIFFS_PARTITION,
+        .base_path = SPIFFS_MOUNT,
         .partition_label = SPIFFS_PARTITION,
         .max_files = 5,
         .format_if_mount_failed = true,
@@ -335,9 +353,24 @@ void offline_cache_init(void) {
 
     size_t total = 0, used = 0;
     esp_spiffs_info(SPIFFS_PARTITION, &total, &used);
-    ESP_LOGI(TAG, "SPIFFS: total=%zu, used=%zu", total, used);
+    ESP_LOGI(TAG, "SPIFFS: total=%lu, used=%lu", (unsigned long)total, (unsigned long)used);
 
     cleanup_expired();
+    s_total_msgs = count_all_messages();
+    uint32_t max_seq = 0;
+    DIR *scan = opendir(SPIFFS_MOUNT);
+    if (scan) {
+        struct dirent *ent;
+        while ((ent = readdir(scan)) != NULL) {
+            if (ent->d_name[0] == 'b') {
+                uint32_t seq = (uint32_t)strtoul(ent->d_name + 1, NULL, 10);
+                if (seq > max_seq) max_seq = seq;
+            }
+        }
+        closedir(scan);
+    }
+    s_next_seq = max_seq + 1;
+    save_meta();
 
     int files = count_files();
     ESP_LOGI(TAG, "Initialized. Batch files: %d, total msgs: %lu",
@@ -347,9 +380,15 @@ void offline_cache_init(void) {
 }
 
 bool offline_cache_add(const char *topic, const char *payload, uint32_t timestamp) {
-    if (!s_initialized || !topic || !payload) return false;
+    if (!s_initialized || !topic || !payload || strlen(topic) >= sizeof(s_batch[0].topic) ||
+        strlen(payload) >= sizeof(s_batch[0].payload)) return false;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    if (s_batch_count >= MAX_BATCH_ITEMS && flush_batch() != ESP_OK) {
+        xSemaphoreGive(s_mutex);
+        return false;
+    }
 
     if (timestamp == 0) timestamp = now_epoch();
 
@@ -359,21 +398,33 @@ bool offline_cache_add(const char *topic, const char *payload, uint32_t timestam
     strncpy(item->payload, payload, sizeof(item->payload) - 1);
     item->timestamp = timestamp;
     item->index = s_batch_count;
+    if (s_batch_count == 0) s_batch_start_ms = now_ms();
     s_batch_count++;
 
     ESP_LOGD(TAG, "Buffered: %s (%d bytes), batch %d/%d",
              topic, (int)strlen(payload), s_batch_count, MAX_BATCH_ITEMS);
 
-    bool need_flush = (s_batch_count >= MAX_BATCH_ITEMS) ||
-                      (now_ms() - s_batch_start_ms >= FLUSH_INTERVAL_MS);
-
-    if (need_flush) {
-        flush_batch();
-        s_batch_start_ms = now_ms();
-    }
+    const bool stored = s_batch_count < MAX_BATCH_ITEMS || flush_batch() == ESP_OK;
 
     xSemaphoreGive(s_mutex);
-    return true;
+    return stored;
+}
+
+void offline_cache_process(void) {
+    if (!s_initialized || !s_mutex) return;
+
+    const int64_t current_ms = now_ms();
+    if (current_ms - s_last_process_ms < 1000) return;
+    s_last_process_ms = current_ms;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_batch_count > 0 && current_ms - s_batch_start_ms >= FLUSH_INTERVAL_MS) {
+        if (flush_batch() != ESP_OK) {
+            ESP_LOGW(TAG, "Periodic batch flush failed; retaining %d messages in RAM",
+                     s_batch_count);
+        }
+    }
+    xSemaphoreGive(s_mutex);
 }
 
 int offline_cache_count(void) {
@@ -413,9 +464,38 @@ void offline_cache_clear(void) {
     }
 
     s_total_msgs = 0;
-    save_meta();
+    s_next_seq = 1;
+    s_last_sync = 0;
+    nvs_handle_t meta;
+    if (nvs_open(META_NAMESPACE, NVS_READWRITE, &meta) == ESP_OK) {
+        nvs_erase_all(meta);
+        nvs_commit(meta);
+        nvs_close(meta);
+    }
     ESP_LOGI(TAG, "All cache cleared");
     xSemaphoreGive(s_mutex);
+}
+
+bool offline_cache_reserve_space(size_t bytes) {
+    if (!s_initialized || !s_mutex) return false;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    size_t total = 0, used = 0;
+    bool ok = esp_spiffs_info(SPIFFS_PARTITION, &total, &used) == ESP_OK;
+    while (ok && total - used < bytes) {
+        uint32_t before = find_min_seq();
+        if (before == UINT32_MAX) {
+            ok = false;
+            break;
+        }
+        evict_oldest_batch();
+        ok = esp_spiffs_info(SPIFFS_PARTITION, &total, &used) == ESP_OK;
+    }
+    if (ok) {
+        s_total_msgs = count_all_messages();
+        save_meta();
+    }
+    xSemaphoreGive(s_mutex);
+    return ok;
 }
 
 int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *payload, uint32_t timestamp)) {
@@ -470,6 +550,7 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
 
         int n = cJSON_GetArraySize(arr);
         bool batch_ok = true;
+        int first_unsent = n;
 
         for (int i = 0; i < n; i++) {
             cJSON *item = cJSON_GetArrayItem(arr, i);
@@ -488,8 +569,36 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
             } else {
                 failed++;
                 batch_ok = false;
+                first_unsent = i;
                 ESP_LOGW(TAG, "Send failed, pausing flush");
                 break;
+            }
+        }
+
+        if (!batch_ok && first_unsent > 0) {
+            cJSON *remaining = cJSON_CreateArray();
+            for (int i = first_unsent; remaining && i < n; ++i) {
+                cJSON *copy = cJSON_Duplicate(cJSON_GetArrayItem(arr, i), true);
+                if (!copy) {
+                    cJSON_Delete(remaining);
+                    remaining = NULL;
+                    break;
+                }
+                cJSON_AddItemToArray(remaining, copy);
+            }
+            char *remaining_json = remaining ? cJSON_PrintUnformatted(remaining) : NULL;
+            cJSON_Delete(remaining);
+            if (remaining_json) {
+                char tmp_path[300];
+                snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+                FILE *out = fopen(tmp_path, "w");
+                size_t expected = strlen(remaining_json);
+                bool saved = out && fwrite(remaining_json, 1, expected, out) == expected &&
+                             fflush(out) == 0 && fsync(fileno(out)) == 0;
+                if (out) fclose(out);
+                if (saved && rename(tmp_path, path) != 0) saved = false;
+                if (!saved) remove(tmp_path);
+                free(remaining_json);
             }
         }
 
@@ -503,6 +612,7 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
         }
     }
 
+    s_total_msgs = count_all_messages();
     if (sent > 0 && failed == 0) {
         s_last_sync = now_epoch();
         save_meta();

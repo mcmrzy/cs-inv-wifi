@@ -18,17 +18,19 @@
 
 // ==================== OTA 命令结构 ====================
 struct MqttOtaCommand {
+  uint16_t protocol_version;
   char action[16];              // start/cancel/query
   char target[8];
   char firmware_id[64];
   char url[256];
   char version[32];
   char sha256[65];              // SHA-256 hex (64 chars + null)
-  char signature[132];          // Ed25519 hex (128 chars + null)
+  char signature[132];          // Ed25519 standard Base64
   uint32_t security_version;    // 防降级单调递增
   uint32_t file_size;
   uint16_t timeout;
-  char task_id[64];
+  char task_id[64];             // command/request correlation id
+  char ota_task_id[64];         // optional active OTA id for cancel
   uint32_t timestamp;
 };
 

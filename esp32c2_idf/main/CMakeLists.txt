@@ -4,14 +4,15 @@ idf_component_register(
         "state_machine.c"
         "uart_protocol.c"
         "mqtt_handler.c"
-        "mqtt_ota_handler.c"
-        "ota_manager.c"
+        "mqtt_ota_adapter.c"
+        "ota_service.c"
+        "ota_signature.c"
         "arm_ota.c"
         "offline_cache.c"
         "nvs_storage.c"
         "sn_encoder.c"
         "led_status.c"
-        "tcp_provision.c"
+        "ap_api_server.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -28,8 +29,11 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_ledc
         esp_http_client
+        esp_http_server
         app_update
         json
         esp_https_ota
         spiffs
+        mbedtls
+        monocypher
 )

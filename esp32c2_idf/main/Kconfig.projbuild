@@ -13,8 +13,8 @@ menu "CS_INV WiFi Module"
         default 18
 
     config CS_INV_LED2_PIN
-        int "LED2 GPIO"
-        default 13
+        int "LED2 GPIO (-1 to disable)"
+        default -1
 
     config CS_INV_BTN_PIN
         int "Button GPIO"
@@ -38,7 +38,7 @@ menu "CS_INV WiFi Module"
 
     config CS_INV_MQTT_PASSWORD
         string "MQTT password"
-        default "CSKJINVDEVICE6K2"
+        default ""
 
     config CS_INV_CACHE_MAX_ITEMS
         int "Offline cache max items"

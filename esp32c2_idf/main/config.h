@@ -69,6 +69,7 @@ enum SystemState {
 #define KEY_DEVICE_SN       "dev_sn"
 #define KEY_DEVICE_KEY      "dev_key"
 #define KEY_AP_SSID         "ap_ssid"
+#define KEY_OTA_SEC_VER     "ota_sec_ver"
 
 #define AP_SSID_MAX_LEN     32
 #define AP_SSID_PREFIX      "CS_INV_"

@@ -16,6 +16,8 @@ void offline_cache_init(void);
 
 bool offline_cache_add(const char* topic, const char* payload, uint32_t timestamp);
 
+void offline_cache_process(void);
+
 int offline_cache_count(void);
 
 bool offline_cache_get(int index, OfflineCacheItem* item);
@@ -33,5 +35,6 @@ void offline_cache_set_last_sync_time(uint32_t timestamp);
 size_t offline_cache_total_bytes(void);
 
 void offline_cache_clear(void);
+bool offline_cache_reserve_space(size_t bytes);
 
 #endif // OFFLINE_CACHE_H

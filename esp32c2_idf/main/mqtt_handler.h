@@ -10,6 +10,8 @@ typedef void (*MQTTMessageHandler)(const char* topic, const char* payload, unsig
 
 bool mqtt_init(MQTTMessageHandler msg_handler);
 bool mqtt_connect(void);
+void mqtt_on_network_lost(void);
+bool mqtt_reconfigure(void);
 void mqtt_disconnect(void);
 
 int mqtt_publish(const char* sub_topic, const char* data, int len, int qos, int retain);

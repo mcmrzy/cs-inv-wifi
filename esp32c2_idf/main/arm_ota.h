@@ -55,6 +55,7 @@ typedef enum {
 } ArmOtaState;
 
 typedef void (*ArmOtaCallback)(ArmOtaState state, int percent, const char* message);
+typedef bool (*ArmOtaCancelCheck)(void);
 
 typedef struct {
     char version[64];
@@ -64,12 +65,15 @@ typedef struct {
 } ArmFirmwareInfo;
 
 bool arm_ota_start_streaming(size_t total_size);
+bool arm_ota_set_expected_md5(const uint8_t md5[ARM_OTA_MD5_SIZE]);
 bool arm_ota_feed(const uint8_t* data, size_t len);
 bool arm_ota_end_streaming();
+bool arm_ota_end_streaming_cancelable(const volatile bool* cancel_flag);
 bool arm_ota_is_streaming_mode();
 
 void arm_ota_init();
 void arm_ota_set_callback(ArmOtaCallback cb);
+void arm_ota_set_cancel_check(ArmOtaCancelCheck cb);
 bool arm_ota_start(const uint8_t* firmware, size_t len);
 void arm_ota_process();
 ArmOtaState arm_ota_get_state();
