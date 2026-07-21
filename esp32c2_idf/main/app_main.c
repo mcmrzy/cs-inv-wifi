@@ -266,10 +266,12 @@ void app_main(void)
     if (storage_has_sn()) {
         ble_prov_set_callback(on_ble_provision_done);
         if (ble_prov_start(g_device_sn, FIRMWARE_VERSION)) {
-            ESP_LOGI(TAG, "BLE advertising started: %s", ble_prov_get_service_name());
+            ESP_LOGW(TAG, "BLE advertising started: %s", ble_prov_get_service_name());
         } else {
-            ESP_LOGW(TAG, "BLE advertising start failed");
+            ESP_LOGE(TAG, "BLE advertising start failed");
         }
+    } else {
+        ESP_LOGW(TAG, "No SN in NVS, BLE advertising not started");
     }
 
     if (!ap_api_server_start()) {
