@@ -6,7 +6,6 @@
 
 #include "mqtt_handler.h"
 #include "nvs_storage.h"
-#include "sn_encoder.h"
 #include "offline_cache.h"
 #include "mqtt_ca_cert.h"
 #include "cs_protocol_defs.h"
@@ -259,12 +258,8 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
         ESP_LOGE(TAG, "SN not set in NVS");
         return false;
     }
-    if (!sn_validate(sn_buf)) {
-        ESP_LOGE(TAG, "Invalid SN in NVS: %s", sn_buf);
-        return false;
-    }
     strncpy(g_device_sn, sn_buf, sizeof(g_device_sn) - 1);
-    ESP_LOGI(TAG, "Loaded SN: %s (valid)", g_device_sn);
+    ESP_LOGI(TAG, "Loaded SN: %s", g_device_sn);
 
     char key_buf[sizeof(g_device_key)] = {0};
     if (storage_get_key(key_buf, sizeof(key_buf))) {

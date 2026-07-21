@@ -9,7 +9,6 @@
 #include "ota_service.h"
 #include "arm_ota.h"
 #include "offline_cache.h"
-#include "sn_encoder.h"
 #include "ble_prov.h"
 
 #include "nvs_flash.h"
@@ -181,22 +180,9 @@ void app_main(void)
     if (storage_has_sn()) {
         storage_get_sn(g_device_sn, sizeof(g_device_sn));
         storage_get_key(g_device_key, sizeof(g_device_key));
-
-        if (sn_validate(g_device_sn)) {
-            SNFields sf;
-            sn_parse(g_device_sn, &sf);
-            char readable[32];
-            sn_printable(g_device_sn, readable, sizeof(readable));
-            ESP_LOGI(TAG, "SN loaded (valid): %s", readable);
-            ESP_LOGI(TAG, "  Mfr=%s Country=%s Cust=%s Date=%s Seq=%s",
-                     sf.manufacturer, sf.country, sf.customer,
-                     sf.date_code, sf.sequence);
-        } else {
-            ESP_LOGW(TAG, "SN loaded (INVALID format): %s", g_device_sn);
-        }
+        ESP_LOGI(TAG, "SN loaded: %s", g_device_sn);
     } else {
         ESP_LOGI(TAG, "No SN in NVS, waiting for ARM to provide SN via UART");
-        // g_device_sn 保持为空, AP 名称将使用 MAC 地址
     }
 
     if (storage_has_sn()) mqtt_init(on_mqtt_message);

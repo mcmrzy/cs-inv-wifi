@@ -2,7 +2,6 @@
 #define MQTT_HANDLER_H
 
 #include "config.h"
-#include "sn_encoder.h"
 #include <stdint.h>
 #include <stdbool.h>
 

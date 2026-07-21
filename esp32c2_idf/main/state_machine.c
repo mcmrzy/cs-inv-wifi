@@ -6,7 +6,6 @@
 #include "ap_api_server.h"
 #include "mqtt_handler.h"
 #include "mqtt_ota_handler.h"
-#include "sn_encoder.h"
 #include "ota_service.h"
 #include "arm_ota.h"
 #include "offline_cache.h"
@@ -548,24 +547,7 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
     case CMD_SET_SN: {
         char sn[SN_MAX_LEN] = {0};
         memcpy(sn, data, MIN((size_t)len, sizeof(sn) - 1));
-
-        if (!sn_validate(sn)) {
-            ESP_LOGW(TAG, "SN REJECTED (invalid): %s", sn);
-            uart_send_nack();
-            break;
-        }
-
-        SNFields sf;
-        if (sn_parse(sn, &sf)) {
-            char readable[32];
-            sn_printable(sn, readable, sizeof(readable));
-            int year = sn_year_code_decode(sf.date_code[0]);
-            char month = sf.date_code[1];
-            ESP_LOGI(TAG, "SN validated: %s | Mfr=%s Country=%s Cust=%s "
-                     "Year=%d Month=%c Seq=%s Check=%c",
-                     readable, sf.manufacturer, sf.country, sf.customer,
-                     year, month, sf.sequence, sf.check_digit);
-        }
+        ESP_LOGI(TAG, "SN received from ARM: %s", sn);
 
         bool changed = (strcmp(g_device_sn, sn) != 0);
         if (!storage_set_sn(sn)) {
