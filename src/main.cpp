@@ -29,7 +29,10 @@
 #include "arm_ota.h"
 #include "offline_cache.h"
 #include "cs_protocol_defs.h"
+#include "ota_result.h"
 #include <esp_mac.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
 
 // min 宏定义
 #ifndef min
@@ -60,7 +63,7 @@ static int g_wifi_reconnect_attempts = 0;
 static unsigned long g_wifi_reconnect_delay = 1000;
 static bool g_wifi_provisioning = false;  // BLE 配网触发的连接，快速失败
 
-static unsigned long g_last_heartbeat = 0;
+// g_last_heartbeat 已移除：status 不再周期性发送
 static unsigned long g_last_uart_heartbeat = 0;
 static unsigned long g_last_led_tick = 0;
 static unsigned long g_last_debug = 0;
@@ -72,7 +75,7 @@ static unsigned long g_btn_press_start = 0;
 // mqtt_publish(TLS) 阻塞时间长，不能在 UART 回调中调用，否则 UART 缓冲区溢出
 #define PUB_QUEUE_SIZE 16
 #define PUB_TOPIC_LEN 64
-#define PUB_PAYLOAD_LEN 600
+#define PUB_PAYLOAD_LEN (FRAME_DATA_MAX - 80)
 struct PubQueueItem {
   char topic[PUB_TOPIC_LEN];
   char payload[PUB_PAYLOAD_LEN];
@@ -81,6 +84,14 @@ struct PubQueueItem {
 static PubQueueItem g_pub_queue[PUB_QUEUE_SIZE] = {};
 static int g_pub_queue_head = 0;
 static int g_pub_queue_tail = 0;
+
+#define RECENT_TASK_COUNT 8
+struct RecentTask {
+  char task_id[64];
+  char response[FRAME_DATA_MAX];
+};
+static RecentTask g_recent_tasks[RECENT_TASK_COUNT] = {};
+static uint8_t g_recent_task_next = 0;
 
 // ==================== 前向声明 ====================
 static void init_wifi_sta();
@@ -101,6 +112,11 @@ static void build_ap_ssid(char* out, size_t out_len);
 static bool json_extract_str(const char* json, const char* key, char* out, size_t max_len);
 static bool replace_firmware_version(const char* payload, char* out, size_t max_len, const char* version);
 static bool handle_sn_update(const char* new_sn);
+static RecentTask* find_task(const char* task_id);
+static void remember_task(const char* task_id, const char* response);
+static void update_task_response(const char* json);
+static void load_persisted_task_response();
+static void clear_persisted_task_response();
 
 // ==================== OTA 进度回调（用于传统 OTA 管理器） ====================
 static void ota_progress_mqtt_callback(OtaTarget target, int percent, OtaStatus status, const char* message) {
@@ -112,6 +128,11 @@ static void ota_progress_mqtt_callback(OtaTarget target, int percent, OtaStatus 
 
 // ==================== 队列辅助函数 ====================
 static bool pub_queue_push(const char* topic, const char* payload) {
+  if (!topic || !payload || strlen(topic) >= PUB_TOPIC_LEN ||
+      strlen(payload) >= PUB_PAYLOAD_LEN) {
+    Serial.println("[PUB-Q] Topic or payload too large");
+    return false;
+  }
   int next = (g_pub_queue_head + 1) % PUB_QUEUE_SIZE;
   if (next == g_pub_queue_tail) {
     Serial.println("[PUB-Q] Queue full, dropping message");
@@ -119,6 +140,8 @@ static bool pub_queue_push(const char* topic, const char* payload) {
   }
   strncpy(g_pub_queue[g_pub_queue_head].topic, topic, PUB_TOPIC_LEN - 1);
   strncpy(g_pub_queue[g_pub_queue_head].payload, payload, PUB_PAYLOAD_LEN - 1);
+  g_pub_queue[g_pub_queue_head].topic[PUB_TOPIC_LEN - 1] = '\0';
+  g_pub_queue[g_pub_queue_head].payload[PUB_PAYLOAD_LEN - 1] = '\0';
   g_pub_queue[g_pub_queue_head].used = true;
   g_pub_queue_head = next;
   return true;
@@ -128,11 +151,81 @@ static void pub_queue_process() {
   if (g_pub_queue_tail == g_pub_queue_head) return; // 空队列
   PubQueueItem* item = &g_pub_queue[g_pub_queue_tail];
   if (item->used) {
-    mqtt_publish_envelope(item->topic, item->payload, strlen(item->payload));
-    Serial.printf("[PUB-Q] Sent %s (%d bytes)\n", item->topic, strlen(item->payload));
+    int result = mqtt_publish(item->topic, item->payload, strlen(item->payload), 1, 0);
+    if (result != 0 && result != -1) {
+      Serial.printf("[PUB-Q] Publish failed (%d), retaining %s\n", result, item->topic);
+      return;
+    }
+    Serial.printf("[PUB-Q] Delivered or cached %s (%d bytes)\n",
+                  item->topic, strlen(item->payload));
     item->used = false;
   }
   g_pub_queue_tail = (g_pub_queue_tail + 1) % PUB_QUEUE_SIZE;
+}
+
+static RecentTask* find_task(const char* task_id) {
+  if (!task_id || !task_id[0]) return nullptr;
+  for (uint8_t i = 0; i < RECENT_TASK_COUNT; ++i) {
+    if (strcmp(g_recent_tasks[i].task_id, task_id) == 0) return &g_recent_tasks[i];
+  }
+  return nullptr;
+}
+
+static void remember_task(const char* task_id, const char* response) {
+  if (!task_id || !task_id[0] || !response) return;
+  RecentTask* entry = &g_recent_tasks[g_recent_task_next];
+  strncpy(entry->task_id, task_id, sizeof(entry->task_id) - 1);
+  entry->task_id[sizeof(entry->task_id) - 1] = '\0';
+  strncpy(entry->response, response, sizeof(entry->response) - 1);
+  entry->response[sizeof(entry->response) - 1] = '\0';
+  g_recent_task_next = (g_recent_task_next + 1) % RECENT_TASK_COUNT;
+}
+
+static void update_task_response(const char* json) {
+  if (!json) return;
+  char task_id[64] = {0};
+  if (!json_extract_str(json, "\"task_id\"", task_id, sizeof(task_id))) return;
+  RecentTask* entry = find_task(task_id);
+  if (!entry) return;
+  strncpy(entry->response, json, sizeof(entry->response) - 1);
+  entry->response[sizeof(entry->response) - 1] = '\0';
+  char stage[24] = {0};
+  if (json_extract_str(json, "\"stage\"", stage, sizeof(stage)) &&
+      strcmp(stage, PROTO_CMD_STAGE_DONE) == 0) {
+    Preferences prefs;
+    prefs.begin("cmd_idem", false);
+    uint8_t slot = prefs.getUChar("next", 0) % 4;
+    char task_key[4];
+    char response_key[4];
+    snprintf(task_key, sizeof(task_key), "t%u", slot);
+    snprintf(response_key, sizeof(response_key), "r%u", slot);
+    prefs.putString(task_key, task_id);
+    prefs.putString(response_key, entry->response);
+    prefs.putUChar("next", (slot + 1) % 4);
+    prefs.end();
+  }
+}
+
+static void load_persisted_task_response() {
+  Preferences prefs;
+  prefs.begin("cmd_idem", true);
+  for (uint8_t slot = 0; slot < 4; ++slot) {
+    char task_key[4];
+    char response_key[4];
+    snprintf(task_key, sizeof(task_key), "t%u", slot);
+    snprintf(response_key, sizeof(response_key), "r%u", slot);
+    String task = prefs.getString(task_key, "");
+    String response = prefs.getString(response_key, "");
+    if (task.length() && response.length()) remember_task(task.c_str(), response.c_str());
+  }
+  prefs.end();
+}
+
+static void clear_persisted_task_response() {
+  Preferences prefs;
+  prefs.begin("cmd_idem", false);
+  prefs.clear();
+  prefs.end();
 }
 
 // ==================== CMD_PUBLISH 辅助函数 ====================
@@ -278,6 +371,7 @@ void setup() {
   Serial.println("========================================");
 
   storage_init();
+  load_persisted_task_response();
   uart_protocol_init();
   led_init();
   offline_cache_init();  // 初始化离线缓存
@@ -604,7 +698,6 @@ static void state_mqtt_connecting() {
     g_sys_state = STATE_RUNNING;
     led1_set(LED_SOLID);        // 一切正常!
     led2_set(LED_SOLID);
-    g_last_heartbeat = millis();
     return;
   }
   // 只在首次进入时调用一次 mqtt_connect，
@@ -631,18 +724,7 @@ static void state_running() {
   }
   mqtt_loop();
 
-  // 心跳
-  if (millis() - g_last_heartbeat >= HEARTBEAT_INTERVAL) {
-    g_last_heartbeat = millis();
-    
-    char status_msg[256];
-    snprintf(status_msg, sizeof(status_msg),
-      "{\"online\":true,\"rssi\":%d,\"ip\":\"%s\"}",
-      WiFi.RSSI(), WiFi.localIP().toString().c_str());
-    
-    mqtt_publish_envelope(PROTO_TOPIC_STATUS, status_msg, strlen(status_msg), true);
-    Serial.printf("[HB] status sent, ip=%s\n", WiFi.localIP().toString().c_str());
-  }
+  // status 仅在上线/主动下线/LWT 时发布（MQTT keepalive 维护连接状态）
 }
 
 // ==================== UART 帧处理 (ARM → ESP32) ====================
@@ -702,15 +784,28 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
           Serial.printf("[UART] Replaced firmware_esp with %s\n", esp_ver);
         }
         
-        // 先回复 ACK，再入队（mqtt_publish 会阻塞 TLS，不能在 UART 回调中调用）
-        uart_send_ack();
-        pub_queue_push(topic, send_payload);
-        led_signal_data();    // LED2 短暂闪一下表示有数据活动
-        Serial.printf("[UART] PUBLISH queued -> cs_inv/%s/%s (%d bytes)\n",
-                      g_device_sn, topic, strlen(send_payload));
+        // While offline, persist before ACK so a reset cannot lose an accepted
+        // ARM message. Online TLS publishing remains deferred to the RAM queue.
+        if (!mqtt_is_connected()) {
+          int result = mqtt_publish(topic, send_payload, strlen(send_payload), 1, 0);
+          if (result == -1) {
+            uart_send_ack();
+            Serial.printf("[UART] PUBLISH persisted offline -> %s\n", topic);
+          } else {
+            uart_send_nack();
+            Serial.printf("[UART] PUBLISH cache failed -> %s (%d)\n", topic, result);
+          }
+        } else if (pub_queue_push(topic, send_payload)) {
+          uart_send_ack();
+          led_signal_data();    // LED2 短暂闪一下表示有数据活动
+          Serial.printf("[UART] PUBLISH queued -> cs_inv/%s/%s (%d bytes)\n",
+                        g_device_sn, topic, strlen(send_payload));
+        } else {
+          uart_send_nack();
+        }
       } else {
         Serial.println("[UART] PUBLISH error: topic empty");
-        uart_send_ack();
+        uart_send_nack();
       }
       break;
     }
@@ -780,6 +875,9 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
     }
 
     case CMD_FACTORY_RESET:
+      offline_cache_factory_reset();
+      clear_persisted_task_response();
+      ota_result_clear();
       storage_factory_reset();
       uart_send_ack();
       delay(100);
@@ -804,6 +902,7 @@ static void on_uart_frame(uint8_t cmd, const uint8_t* data, uint16_t len) {
       size_t copy_len = (len < sizeof(json) - 1) ? len : sizeof(json) - 1;
       memcpy(json, data, copy_len);
       json[copy_len] = '\0';
+      update_task_response(json);
       mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, json, copy_len);
       Serial.printf("[ARM→MQTT] cmd_result: %s\n", json);
       uart_send_ack();
@@ -842,22 +941,40 @@ static void on_mqtt_message(const char* topic, const char* payload, unsigned int
     Serial.printf("[OTA-CMD] 收到消息 topic=%s len=%d\n", topic, len);
     Serial.printf("[OTA-CMD] Payload: %.*s\n", (int)len, payload);
     // 使用新的 mqtt_ota_handler 处理
-    if (mqtt_ota_handle_command(topic, (const uint8_t*)payload, len)) {
-      return;  // OTA 命令已处理，不再转发给 ARM
-    }
+    mqtt_ota_handle_command(topic, (const uint8_t*)payload, len);
+    return;  // OTA topic is always consumed, including malformed commands.
   }
 
   // ---- /cmd 下行命令：提取 task_id / t，过期校验，回复 ACK ----
   bool is_cmd_topic = (strcmp(sub, "cmd") == 0);
   if (is_cmd_topic) {
-    char task_id[72] = {0};
-    char t_str[16] = {0};
-    char cmd_str[32] = {0};
-    json_extract_str(payload, "\"task_id\"", task_id, sizeof(task_id));
-    json_extract_str(payload, "\"t\"", t_str, sizeof(t_str));
-    json_extract_str(payload, "\"cmd\"", cmd_str, sizeof(cmd_str));
-    time_t cmd_t = atol(t_str);
+    StaticJsonDocument<1024> doc;
+    DeserializationError json_error = deserializeJson(doc, payload, len);
+    const char* task_id = doc["task_id"] | "";
+    const char* cmd_str = doc["cmd"] | "";
+    bool has_numeric_t = doc["t"].is<long>() || doc["t"].is<unsigned long>();
+    time_t cmd_t = has_numeric_t ? doc["t"].as<time_t>() : 0;
     time_t now = time(nullptr);
+
+    if (json_error || !task_id[0] || strlen(task_id) >= 64 ||
+        !cmd_str[0] || strlen(cmd_str) >= 32 || !has_numeric_t) {
+      char invalid_resp[256];
+      snprintf(invalid_resp, sizeof(invalid_resp),
+        "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
+        "\"success\":false,\"code\":\"%s\",\"message\":\"task_id, cmd and numeric t are required\",\"result\":[]}",
+        task_id, cmd_str, PROTO_CMD_STAGE_DONE, PROTO_ERR_INVALID_ARGS);
+      mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, invalid_resp, strlen(invalid_resp));
+      Serial.println("[CMD] Rejected malformed command");
+      return;
+    }
+
+    RecentTask* duplicate = find_task(task_id);
+    if (duplicate) {
+      mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, duplicate->response,
+                            strlen(duplicate->response));
+      Serial.printf("[CMD] Duplicate response replayed: %s\n", task_id);
+      return;
+    }
 
     // 过期校验（NTP 未同步时跳过）
     if (now > 0 && cmd_t > 0 && (now - cmd_t) > PROTO_CMD_EXPIRE_S) {
@@ -872,16 +989,21 @@ static void on_mqtt_message(const char* topic, const char* payload, unsigned int
       return;  // 不转发给 ARM
     }
 
-    // 立即回复 acknowledged（QoS 0 低延迟）
-    if (task_id[0] != '\0') {
-      char ack_resp[256];
-      snprintf(ack_resp, sizeof(ack_resp),
-        "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
-        "\"success\":true,\"code\":\"%s\",\"message\":\"\",\"result\":[]}",
-        task_id, cmd_str, PROTO_CMD_STAGE_ACK, PROTO_ERR_OK);
-      mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, ack_resp, strlen(ack_resp));
-      Serial.printf("[CMD] ACK sent: task_id=%s cmd=%s\n", task_id, cmd_str);
+    char ack_resp[256];
+    snprintf(ack_resp, sizeof(ack_resp),
+      "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"stage\":\"%s\","
+      "\"success\":true,\"code\":\"%s\",\"message\":\"\",\"result\":[]}",
+      task_id, cmd_str, PROTO_CMD_STAGE_ACK, PROTO_ERR_OK);
+    bool delivered = uart_send_frame(CMD_COMMAND_RECV,
+                                     (const uint8_t*)payload, len);
+    if (!delivered) {
+      Serial.printf("[CMD] UART delivery failed: %s\n", task_id);
+      return;
     }
+    remember_task(task_id, ack_resp);
+    mqtt_publish_envelope(PROTO_TOPIC_CMD_RESP, ack_resp, strlen(ack_resp));
+    Serial.printf("[CMD] ACK sent: task_id=%s cmd=%s\n", task_id, cmd_str);
+    return;
   }
 
   // 直接转发原始 MQTT payload 给 ARM（不包装 JSON，避免嵌套引号问题）
@@ -904,6 +1026,9 @@ static void check_button() {
       Serial.println("[BTN] Factory reset!");
       led1_set(LED_3FLASH);     // 两个LED同步快闪=恢复出厂确认
       led2_set(LED_3FLASH);
+      offline_cache_factory_reset();
+      clear_persisted_task_response();
+      ota_result_clear();
       storage_factory_reset();
       delay(1500);
       ESP.restart();

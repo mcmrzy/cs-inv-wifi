@@ -5,7 +5,8 @@
  *  通过 UART 自定义帧协议，ESP32 给 GD32F303 ARM 芯片做固件升级。
  *  使用状态机 + millis() 超时，不阻塞 loop()。
  *
- *  MD5 暂用全零占位，后续可替换为 mbedtls 实现。
+ *  Streaming images are staged in SPIFFS so their real MD5 is known before
+ *  the ARM receives START. Memory-backed images are hashed before START.
  * ================================================================
  */
 
@@ -13,6 +14,9 @@
 #include "uart_protocol.h"
 #include <Arduino.h>
 #include <string.h>
+#include "mbedtls/md5.h"
+#include <SPIFFS.h>
+#include "offline_cache.h"
 
 // ==================== 内部状态 ====================
 static ArmOtaState       g_ota_state     = ARM_OTA_IDLE;
@@ -43,6 +47,18 @@ static size_t     g_stream_total      = 0;      // 固件总大小
 static size_t     g_stream_sent       = 0;      // 已发送字节数
 static size_t     g_stream_buf_len    = 0;      // 缓冲区中有效数据长度
 static uint8_t    g_stream_buf[ARM_OTA_STREAM_BUF_SIZE];  // 流式缓冲区
+static size_t     g_pending_stream_len = 0;  // buffer-head bytes awaiting ACK
+static bool       g_waiting_end_ack = false;
+static uint8_t    g_expected_md5[ARM_OTA_MD5_SIZE] = {0};
+static bool       g_expected_md5_valid = false;
+static bool       g_stream_staging = false;
+static bool       g_stream_from_file = false;
+static File       g_stream_file;
+static mbedtls_md5_context g_stream_md5_ctx;
+static unsigned long g_data_complete_time = 0;
+#define ARM_OTA_END_QUIET_MS 100
+static bool       g_stream_input_complete = false;
+static size_t     g_stream_received = 0;
 
 // ==================== 内部辅助函数 ====================
 
@@ -109,8 +125,7 @@ static bool send_ota_start() {
   put_u32_le(buf + pos, (uint32_t)g_firmware_len);
   pos += 4;
 
-  // md5 (16B) — 暂用全零
-  memset(buf + pos, 0, ARM_OTA_MD5_SIZE);
+  memcpy(buf + pos, g_expected_md5, ARM_OTA_MD5_SIZE);
   pos += ARM_OTA_MD5_SIZE;
 
   // version_len (1B) + version_string — 暂为空
@@ -142,22 +157,28 @@ static bool send_ota_data(uint16_t packet_idx) {
   if (g_streaming_mode) {
     // 流式模式：从缓冲区头部读取，读取后移动数据
     remaining = g_stream_total - offset;
-    chunk = (remaining > ARM_OTA_PACKET_SIZE) ? ARM_OTA_PACKET_SIZE : remaining;
-    chunk = (chunk > (size_t)g_stream_buf_len) ? (size_t)g_stream_buf_len : chunk;
+    if (g_stream_from_file) {
+      chunk = (remaining > ARM_OTA_PACKET_SIZE) ? ARM_OTA_PACKET_SIZE : remaining;
+      if (!g_stream_file.seek(offset) ||
+          g_stream_file.read(buf + pos, chunk) != (int)chunk) return false;
+      pos += (int)chunk;
+      g_pending_stream_len = chunk;
+    } else if (g_pending_stream_len > 0) {
+      chunk = g_pending_stream_len;
+    } else {
+      chunk = (remaining > ARM_OTA_PACKET_SIZE) ? ARM_OTA_PACKET_SIZE : remaining;
+      chunk = (chunk > (size_t)g_stream_buf_len) ? (size_t)g_stream_buf_len : chunk;
+      g_pending_stream_len = chunk;
+    }
 
     // 缓冲区数据不足时，不发送空包
     if (chunk == 0) {
       return false;
     }
 
-    // 从缓冲区头部复制
-    memcpy(buf + pos, g_stream_buf, chunk);
-    pos += (int)chunk;
-
-    // 移动缓冲区数据（删除已发送的部分）
-    g_stream_buf_len -= (int)chunk;
-    if (g_stream_buf_len > 0) {
-      memmove(g_stream_buf, g_stream_buf + chunk, g_stream_buf_len);
+    if (!g_stream_from_file) {
+      memcpy(buf + pos, g_stream_buf, chunk);
+      pos += (int)chunk;
     }
   } else {
     // 内存模式：从固件指针读取
@@ -189,12 +210,12 @@ static bool send_ota_end() {
   put_u32_le(buf + pos, (uint32_t)g_firmware_len);
   pos += 4;
 
-  // md5 (16B) — 暂用全零
-  memset(buf + pos, 0, ARM_OTA_MD5_SIZE);
+  memcpy(buf + pos, g_expected_md5, ARM_OTA_MD5_SIZE);
   pos += ARM_OTA_MD5_SIZE;
 
   bool ok = uart_send_frame(CMD_ARM_OTA_END, buf, pos);
   if (ok) {
+    g_waiting_end_ack = true;
     Serial.printf("[ARM-OTA] END sent: packets=%u, size=%u\n",
                   g_total_packets, (unsigned)g_firmware_len);
   }
@@ -270,6 +291,8 @@ static void process_wait_ack() {
 static void process_verifying() {
   unsigned long now = millis();
 
+  if (now - g_data_complete_time < ARM_OTA_END_QUIET_MS) return;
+
   // 发送间隔控制
   if (now - g_last_send_time < ARM_OTA_SEND_INTERVAL) {
     return;
@@ -309,6 +332,7 @@ static bool stream_send_packet(uint16_t packet_idx, size_t offset, size_t len) {
 
 // 流式模式：尝试发送缓冲区中的数据
 static void stream_process() {
+  if (g_stream_staging) return;
   if (g_ota_state != ARM_OTA_SENDING && g_ota_state != ARM_OTA_WAIT_ACK) {
     return;
   }
@@ -343,17 +367,20 @@ static void stream_process() {
   }
 
   // 缓冲区数据不足时，等待更多数据
-  if (g_stream_buf_len == 0) {
+  if (!g_stream_from_file && g_stream_buf_len == 0) {
     return;
   }
 
-  // 计算本包要发送的数据范围
-  size_t packet_len = (remaining > ARM_OTA_PACKET_SIZE) ? ARM_OTA_PACKET_SIZE : remaining;
+  size_t expected_len = (remaining > ARM_OTA_PACKET_SIZE)
+      ? ARM_OTA_PACKET_SIZE : remaining;
+  if (!g_stream_from_file && g_pending_stream_len == 0 && g_stream_buf_len < expected_len &&
+      !g_stream_input_complete) {
+    return;  // ordinary packets must be full; only end_streaming releases tail
+  }
 
+  // 计算本包要发送的数据范围
   if (send_ota_data(g_current_packet)) {
     g_last_send_time = now;
-    g_stream_sent += packet_len;
-    g_progress = (int)((uint32_t)g_stream_sent * 100 / g_stream_total);
     update_progress();
     set_state(ARM_OTA_WAIT_ACK, "Waiting for ACK");
   }
@@ -378,6 +405,12 @@ bool arm_ota_start_streaming(size_t total_size) {
   g_stream_total = total_size;
   g_stream_sent = 0;
   g_stream_buf_len = 0;
+  g_pending_stream_len = 0;
+  g_waiting_end_ack = false;
+  g_stream_input_complete = false;
+  g_stream_received = 0;
+  g_stream_staging = true;
+  g_stream_from_file = false;
   g_current_packet = 0;
   g_retry_count = 0;
   g_progress = 0;
@@ -386,22 +419,42 @@ bool arm_ota_start_streaming(size_t total_size) {
   Serial.printf("[ARM-OTA] Streaming mode: size=%u, packets=%u\n",
                 (unsigned)total_size, g_total_packets);
 
-  // 发送 START 命令
-  g_firmware_len = total_size;  // 复用 g_firmware_len 用于计算
-  if (send_ota_start()) {
-    g_last_send_time = millis();
-    set_state(ARM_OTA_WAIT_READY, "Waiting for ARM IAP ready");
-    return true;
-  } else {
+  g_firmware_len = total_size;
+  if (!offline_cache_reserve_bytes(total_size + 4096)) {
     g_streaming_mode = false;
-    set_state(ARM_OTA_ERROR, "Failed to send START");
+    set_state(ARM_OTA_ERROR, "Insufficient SPIFFS space for ARM OTA staging");
     return false;
   }
+  if (!SPIFFS.begin(true)) {
+    offline_cache_release_reservation();
+    g_streaming_mode = false;
+    return false;
+  }
+  SPIFFS.remove("/arm_ota.tmp");
+  g_stream_file = SPIFFS.open("/arm_ota.tmp", FILE_WRITE);
+  if (!g_stream_file) {
+    offline_cache_release_reservation();
+    g_streaming_mode = false;
+    return false;
+  }
+  mbedtls_md5_init(&g_stream_md5_ctx);
+  mbedtls_md5_starts_ret(&g_stream_md5_ctx);
+  set_state(ARM_OTA_SENDING, "Staging firmware for MD5");
+  return true;
 }
 
 bool arm_ota_feed(const uint8_t* data, size_t len) {
-  if (!g_streaming_mode || len == 0) {
+  if (!g_streaming_mode || g_stream_input_complete || len == 0 ||
+      g_stream_received + len > g_stream_total) {
     return false;
+  }
+
+  if (g_stream_staging) {
+    size_t written = g_stream_file.write(data, len);
+    if (written != len) return false;
+    mbedtls_md5_update_ret(&g_stream_md5_ctx, data, len);
+    g_stream_received += len;
+    return true;
   }
 
   // 将数据追加到缓冲区（带反压：缓冲区满时等待状态机消费）
@@ -422,14 +475,51 @@ bool arm_ota_feed(const uint8_t* data, size_t len) {
       delay(5);
     }
     g_stream_buf[g_stream_buf_len++] = data[i];
+    g_stream_received++;
   }
 
   return true;
 }
 
 bool arm_ota_end_streaming() {
-  if (!g_streaming_mode) {
+  if (!g_streaming_mode || g_stream_received != g_stream_total) {
+    Serial.printf("[ARM-OTA] Stream length mismatch: received=%u expected=%u\n",
+                  (unsigned)g_stream_received, (unsigned)g_stream_total);
     return false;
+  }
+
+  g_stream_input_complete = true;
+
+  if (g_stream_staging) {
+    uint8_t calculated_md5[ARM_OTA_MD5_SIZE];
+    mbedtls_md5_finish_ret(&g_stream_md5_ctx, calculated_md5);
+    mbedtls_md5_free(&g_stream_md5_ctx);
+    g_stream_file.close();
+    if (g_expected_md5_valid &&
+        memcmp(g_expected_md5, calculated_md5, ARM_OTA_MD5_SIZE) != 0) {
+      set_state(ARM_OTA_ERROR, "Staged firmware MD5 mismatch");
+      SPIFFS.remove("/arm_ota.tmp");
+      offline_cache_release_reservation();
+      return false;
+    }
+    memcpy(g_expected_md5, calculated_md5, ARM_OTA_MD5_SIZE);
+    g_expected_md5_valid = true;
+    g_stream_file = SPIFFS.open("/arm_ota.tmp", FILE_READ);
+    if (!g_stream_file) {
+      offline_cache_release_reservation();
+      return false;
+    }
+    g_stream_staging = false;
+    g_stream_from_file = true;
+    g_current_packet = 0;
+    if (!send_ota_start()) {
+      g_stream_file.close();
+      SPIFFS.remove("/arm_ota.tmp");
+      offline_cache_release_reservation();
+      return false;
+    }
+    g_last_send_time = millis();
+    set_state(ARM_OTA_WAIT_READY, "Waiting for ARM IAP ready");
   }
 
   // 等待状态机发送完所有剩余数据包（带 ACK 确认）
@@ -458,6 +548,11 @@ bool arm_ota_end_streaming() {
     delay(10);
   }
 
+  while (millis() - g_data_complete_time < ARM_OTA_END_QUIET_MS) {
+    uart_protocol_process();
+    delay(2);
+  }
+
   Serial.printf("[ARM-OTA] All %u packets sent, sending END...\n", g_total_packets);
 
   // 所有包发送完毕，发送 END 命令
@@ -471,6 +566,16 @@ bool arm_ota_end_streaming() {
 
 bool arm_ota_is_streaming_mode() {
   return g_streaming_mode;
+}
+
+bool arm_ota_set_expected_md5(const uint8_t md5[ARM_OTA_MD5_SIZE]) {
+  if (!md5 || (g_ota_state != ARM_OTA_IDLE && g_ota_state != ARM_OTA_DONE &&
+               g_ota_state != ARM_OTA_ERROR && g_ota_state != ARM_OTA_TIMEOUT)) {
+    return false;
+  }
+  memcpy(g_expected_md5, md5, ARM_OTA_MD5_SIZE);
+  g_expected_md5_valid = true;
+  return true;
 }
 
 // ==================== 公共 API ====================
@@ -493,7 +598,15 @@ void arm_ota_init() {
   g_stream_total = 0;
   g_stream_sent = 0;
   g_stream_buf_len = 0;
+  g_pending_stream_len = 0;
+  g_waiting_end_ack = false;
+  g_stream_input_complete = false;
+  g_stream_received = 0;
+  g_stream_staging = false;
+  g_stream_from_file = false;
   memset(g_stream_buf, 0, sizeof(g_stream_buf));
+  memset(g_expected_md5, 0, sizeof(g_expected_md5));
+  g_expected_md5_valid = false;
 
   Serial.println("[ARM-OTA] Module initialized");
 }
@@ -519,6 +632,14 @@ bool arm_ota_start(const uint8_t* firmware, size_t length) {
   g_current_packet = 0;
   g_retry_count = 0;
   g_progress = 0;
+
+  mbedtls_md5_context md5_ctx;
+  mbedtls_md5_init(&md5_ctx);
+  mbedtls_md5_starts_ret(&md5_ctx);
+  mbedtls_md5_update_ret(&md5_ctx, firmware, length);
+  mbedtls_md5_finish_ret(&md5_ctx, g_expected_md5);
+  mbedtls_md5_free(&md5_ctx);
+  g_expected_md5_valid = true;
 
   // 计算总包数
   g_total_packets = (uint16_t)((length + ARM_OTA_PACKET_SIZE - 1) / ARM_OTA_PACKET_SIZE);
@@ -617,9 +738,22 @@ void arm_ota_cancel() {
     return;
   }
   Serial.printf("[ARM-OTA] Cancelled from state %d\n", g_ota_state);
+  if (g_stream_staging) mbedtls_md5_free(&g_stream_md5_ctx);
   g_firmware = nullptr;
   g_firmware_len = 0;
   g_progress = 0;
+  g_streaming_mode = false;
+  g_stream_buf_len = 0;
+  g_pending_stream_len = 0;
+  g_waiting_end_ack = false;
+  g_stream_input_complete = false;
+  g_stream_received = 0;
+  g_stream_staging = false;
+  g_stream_from_file = false;
+  if (g_stream_file) g_stream_file.close();
+  SPIFFS.remove("/arm_ota.tmp");
+  offline_cache_release_reservation();
+  g_expected_md5_valid = false;
   set_state(ARM_OTA_IDLE, "OTA cancelled");
 }
 
@@ -632,20 +766,67 @@ void arm_ota_handle_uart(uint8_t cmd, const uint8_t* data, uint16_t len) {
       // ARM 确认收到
       Serial.printf("[ARM-OTA] ACK received, len=%u\n", len);
 
-      if (g_ota_state == ARM_OTA_WAIT_READY) {
+      if (g_ota_state == ARM_OTA_WAIT_READY && g_waiting_end_ack) {
+        if (len != 0 && !(len == 1 && data[0] == CMD_ARM_OTA_END)) {
+          Serial.println("[ARM-OTA] Ignoring ACK without END context");
+          break;
+        }
+        g_waiting_end_ack = false;
+        g_progress = 100;
+        g_streaming_mode = false;
+        if (g_stream_file) g_stream_file.close();
+        SPIFFS.remove("/arm_ota.tmp");
+        offline_cache_release_reservation();
+        g_stream_from_file = false;
+        g_expected_md5_valid = false;
+        set_state(ARM_OTA_DONE, "OTA completed successfully");
+        g_firmware = nullptr;
+        g_firmware_len = 0;
+      }
+      else if (g_ota_state == ARM_OTA_WAIT_READY) {
         // ARM 已进入 IAP 模式，开始发送数据
         g_current_packet = 0;
         g_retry_count = 0;
         set_state(ARM_OTA_SENDING, "Sending firmware data");
       }
       else if (g_ota_state == ARM_OTA_WAIT_ACK) {
+        if (len == 1) {
+          Serial.println("[ARM-OTA] Ignoring malformed one-byte ACK");
+          break;
+        }
+        if (len >= 2) {
+          uint16_t ack_packet = get_u16_le(data);
+          if (ack_packet != g_current_packet) {
+            Serial.printf("[ARM-OTA] Ignoring stale ACK for packet %u, waiting for %u\n",
+                          ack_packet, g_current_packet);
+            break;
+          }
+        }
         // 数据包确认，发送下一包
+        if (g_streaming_mode && g_pending_stream_len > 0) {
+          if (g_stream_from_file) {
+            g_stream_sent += g_pending_stream_len;
+            g_pending_stream_len = 0;
+          } else {
+          if (g_pending_stream_len > g_stream_buf_len) {
+            set_state(ARM_OTA_ERROR, "Stream buffer accounting error");
+            break;
+          }
+          g_stream_buf_len -= g_pending_stream_len;
+          if (g_stream_buf_len > 0) {
+            memmove(g_stream_buf, g_stream_buf + g_pending_stream_len, g_stream_buf_len);
+          }
+          g_stream_sent += g_pending_stream_len;
+          g_pending_stream_len = 0;
+          }
+        }
         g_retry_count = 0;  // 重置重传计数
         g_current_packet++;
 
         if (g_current_packet >= g_total_packets) {
           // 所有包发送完毕，进入校验阶段
           g_progress = 100;
+          g_data_complete_time = millis();
           set_state(ARM_OTA_VERIFYING, "All packets sent, verifying");
         } else {
           update_progress();
@@ -657,21 +838,21 @@ void arm_ota_handle_uart(uint8_t cmd, const uint8_t* data, uint16_t len) {
         // （此时 WAIT_READY 状态下的 ACK 表示校验成功）
         // 注意：VERIFYING 发送 END 后会转到 WAIT_READY
       }
-      // WAIT_READY 状态下收到 ACK（END 校验成功）
-      else if (g_ota_state == ARM_OTA_WAIT_READY && g_progress == 100) {
-        // 这是 END 命令的 ACK，表示 ARM 校验成功
-        set_state(ARM_OTA_DONE, "OTA completed successfully");
-        g_firmware = nullptr;
-        g_firmware_len = 0;
-      }
       break;
     }
 
     case CMD_ARM_OTA_NACK: {
       // ARM 请求重传
+      if (len == 1) {
+        Serial.println("[ARM-OTA] Ignoring malformed one-byte NACK");
+        break;
+      }
       uint16_t nack_packet = 0;
-      if (len >= 2) {
+      bool has_packet_index = len >= 2;
+      if (has_packet_index) {
         nack_packet = get_u16_le(data);
+      } else {
+        nack_packet = g_current_packet;
       }
 
       Serial.printf("[ARM-OTA] NACK received, packet=%u\n", nack_packet);
@@ -683,8 +864,12 @@ void arm_ota_handle_uart(uint8_t cmd, const uint8_t* data, uint16_t len) {
           set_state(ARM_OTA_ERROR, msg);
         } else {
           g_retry_count++;
-          // 跳转到 NACK 指定的包序号重传
-          if (nack_packet < g_total_packets) {
+          // Streaming retains only the current unacknowledged packet.
+          if (has_packet_index && g_streaming_mode && nack_packet != g_current_packet) {
+            set_state(ARM_OTA_ERROR, "ARM requested unavailable old packet");
+            break;
+          }
+          if (has_packet_index && !g_streaming_mode && nack_packet < g_total_packets) {
             g_current_packet = nack_packet;
           }
           char msg[64];
@@ -693,7 +878,8 @@ void arm_ota_handle_uart(uint8_t cmd, const uint8_t* data, uint16_t len) {
           set_state(ARM_OTA_SENDING, msg);
         }
       }
-      else if (g_ota_state == ARM_OTA_WAIT_READY) {
+      else if (g_ota_state == ARM_OTA_WAIT_READY && g_waiting_end_ack) {
+        g_waiting_end_ack = false;
         // END 命令后 ARM 校验失败，发 NACK
         char msg[64];
         snprintf(msg, sizeof(msg), "ARM verify NACK, packet=%u", nack_packet);

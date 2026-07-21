@@ -1,0 +1,72 @@
+version: 1
+scope:
+  include: []
+  exclude:
+    - ".pio/**"
+    - "esp32c2_idf/build/**"
+    - "tools/arm_simulator/.dart_tool/**"
+    - "tools/arm_simulator/.idea/**"
+    - "tools/arm_simulator/build/**"
+    - "tools/data/**"
+    - "tools/qr_out/**"
+    - "tools/__pycache__/**"
+    - "docs/__pycache__/**"
+    - ".mimocode/**"
+
+repowiki:
+  template: architecture
+  notes:
+    - text: 本项目正处于旧协议（5 个分散 data/* topic + 具名 JSON）向新协议（heartbeat V1 合并 topic + 定长数组）切换的过渡期，wiki 必须明确标注哪些模块仍为旧协议、哪些已迁移到 V1，避免混淆。
+    - text: src/（Arduino）与 esp32c2_idf/（IDF）两套固件当前并行维护，wiki 需分别描述二者的入口函数、模块结构和差异，不能合并为一个 ESP32 模块讲解。
+    - text: ARM 模拟器（tools/arm_inverter_simulator_gui.py）是 2600+ 行的单文件 Python 程序，包含 EventBus、状态机、Modbus、Bootloader、InverterController、GD32F303Chip、SimulatorGUI 等多个类，wiki 需按类/职责拆分讲解。
+    - text: 协议文档（docs/*.md）是协议权威来源，wiki 中所有字段定义、数组下标、命令格式必须引用对应文档路径，禁止凭代码实现反推协议。
+    - text: 模拟器当前仅模拟单机模式（standalone），并机（single_phase/three_phase）和三相拓扑在数据模型中已定义但未实现完整仿真，wiki 需标注此边界。
+    - text: SN 编码遵循 CS-SN-STD-001 V1.1 标准（详见 tools/sn_encoder.py 与 docs/ 中相关规范），所有 SN 校验逻辑必须引用该标准。
+
+  documents:
+    - title: 项目总览与系统拓扑
+      goal: 描述 CS-I10-6k2 逆变器 WiFi 通信系统的整体架构，包括 ARM MCU、ESP32-C3、BMS/MPPT（RS485）、云端 MQTT、Web/App、本地工具链之间的关系和数据流方向。
+      parent: ""
+      hints: 含硬件连接图（TX/RX/GND）、软件分层图（协议层/业务层/驱动层）、两套固件版本定位
+    - title: ESP32-IDF 固件架构
+      goal: 解析 esp32c2_idf/main/ 下所有模块（app_main、state_machine、mqtt_handler、uart_protocol、tcp_provision、arm_ota、ota_manager、offline_cache、nvs_storage、led_status、sn_encoder、rf_diagnostic）的职责、调用关系和初始化顺序。
+      parent: ""
+      hints: 重点讲解 app_main.c 的启动流程、state_machine.c 的状态切换、CMD_PUBLISH 帧处理分支
+    - title: ESP32-Arduino 固件架构
+      goal: 解析 src/ 下所有模块（main.cpp、mqtt_handler、uart_protocol、tcp_provision、mqtt_ota_handler、arm_ota、offline_cache、nvs_storage、led_status、sn_encoder、BleProvisionManager、SmartConfigManager）的职责与 Arduino 框架集成方式。
+      parent: ""
+      hints: 标注与 IDF 版本的差异点（PubSubClient vs esp_mqtt、setup/loop 模型 vs 事件驱动、BLE/SmartConfig 组件）
+    - title: ARM 模拟器架构
+      goal: 剖析 tools/arm_inverter_simulator_gui.py 的类层次（EventBus、InverterState/StateMachine、DataPersistence、FrameReceiver、ModbusRTUMaster、GD32F303Bootloader、InverterController、GD32F303Chip、SimulatorGUI）和运行模型。
+      parent: ""
+      hints: 包含物理模型（能量守恒、效率曲线、SOC 变化）、告警引擎、新协议 Heartbeat V1 生成流程
+    - title: UART 帧协议栈
+      goal: 详解 ARM↔ESP32 二进制帧协议：帧头 0xAA、转义规则、CMD 命令码表、XOR 校验、长度编码、FrameReceiver 状态机。
+      parent: ""
+      hints: 关联 docs/ARM_ESP32_UART_Protocol.md，列出所有已定义 CMD 码（SET_BROKER/PUBLISH/COMMAND_RECV/ARM_OTA_* 等）
+    - title: MQTT 通信层
+      goal: 梳理 MQTT 主题命名空间、QoS 策略、LWT 遗嘱、离线缓存补传、heartbeat V1 合并上报、命令三阶段回复、OTA 状态流转。
+      parent: ""
+      hints: 对比旧版 8 个 data/* topic 与新版 heartbeat/info/config/alarm/parallel/three_phase 主题；引用 docs/MQTT协议文档.md 与 docs/48V离网逆变器遥测协议与存储重设计.md
+    - title: OTA 升级系统
+      goal: 描述 4 目标（ESP32/ARM/DSP/BMS）OTA 升级路径、IAP Bootloader 状态机、固件校验（魔数/CRC/MD5）、错误码、中转链路。
+      parent: ""
+      hints: 关联 docs/OTA_Design.md、docs/设备端OTA程序开发指南.md、tools/generate_arm_firmware.py
+    - title: 设备配网与 NVS 存储
+      goal: 覆盖 BLE 配网、SmartConfig、TCP 配网三种入网流程，以及 NVS 中存储的 SN/Broker/SSID/Key 等持久化字段。
+      parent: ""
+      hints: 区分 IDF 组件（components/ble_prov、components/smartconfig）与 Arduino 类（BleProvisionManager、SmartConfigManager）
+
+knowledgecard:
+  notes:
+    - text: "Heartbeat V1 数组格式（详见 docs/48V离网逆变器遥测协议与存储重设计.md §5）：ac[8]、bat[21]、pv[12]、sys[10]、eng[8]、cells[2][]，下标含义 V1 永久不变，扩展必须发布 V2。"
+    - text: "命令协议（详见 docs/48V离网逆变器遥测协议与存储重设计.md §7）：下行 {v, task_id, t, cmd, args[]}，回复三阶段 stage=acknowledged/executing/completed，设备必须缓存最近 32 个 task_id 实现幂等。"
+    - text: "MQTT 主题矩阵：旧版 data/ac、data/battery、data/pv、data/status、data/energy、data/cells 已被 heartbeat 合并替代；alarm/info/config/parallel/three_phase/cmd/response 仍为独立 topic。"
+    - text: "SNTP 时间同步：ESP32 IDF 在 app_main.c sntp_init_cst8() 启用，使用 ntp.aliyun.com + pool.ntp.org，时区 CST-8；ARM 固件无 RTC，需由 ESP32 周期性通过 UART 下发 NTP 时间。"
+    - text: "串口默认参数：波特率 115200、数据位 8、停止位 1、无校验；硬件连接 ARM TX→ESP32 RX (GPIO1)、ARM RX←ESP32 TX (GPIO0)。"
+    - text: "PlatformIO 核心命令：pio run（编译）、pio run --target upload（烧录）、pio device monitor（串口监视）、pio lib install（依赖安装）。"
+    - text: "IDF 状态机（state_machine.c）状态：INIT→WIFI_CONNECTING→WIFI_CONNECTED→MQTT_CONNECTING→MQTT_CONNECTED→RUNNING，事件驱动切换。"
+    - text: "IAP Bootloader（GD32F303Bootloader 类）状态：IDLE→IAP_READY→RECEIVING→VERIFYING→JUMPING→ERROR，包大小 480 字节，固件上限 256KB。"
+    - text: "开发工具入口：tools/arm_inverter_simulator.py（ARM 模拟器启动）、tools/arm_simulator/（Flutter GUI）、tools/esp32_gateway_simulator.py（网关模拟器）、tools/sn_batch_gui.py（SN 批量生成）、tools/generate_arm_firmware.py（固件生成）。"
+    - text: "CMD_PUBLISH 处理流程：ESP32 在 state_machine.c 中解析 ARM 帧 → 提取 topic/payload/sn → SN 校验 → 替换 firmware_esp → 包裹 {data, timestamp} → 通过 mqtt_handler 发布。"
+    - text: "告警 source 编码：1=PCS、2=BMS、3=MPPT、4=COMM；level 编码：1=warning、2=fault；state 编码：1=active、0=recovered（详见 docs/48V离网逆变器遥测协议与存储重设计.md §6.3）。"

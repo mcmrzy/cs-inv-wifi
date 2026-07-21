@@ -83,8 +83,12 @@ enum SystemState {
 #define MQTT_RECONNECT_MAX_ATTEMPTS 10
 
 // MQTT 认证凭据 (固定用户名/密码)
+#ifndef MQTT_USERNAME
 #define MQTT_USERNAME       "CSKJ-INV-DEVICE-6K2"
-#define MQTT_PASSWORD       "CSKJINVDEVICE6K2"
+#endif
+#ifndef MQTT_PASSWORD
+#define MQTT_PASSWORD       ""
+#endif
 
 // ==================== NVS / EEPROM 命名空间 ====================
 #define NVS_NAMESPACE "inv_cfg"
@@ -114,7 +118,7 @@ enum SystemState {
 
 // ==================== 固件版本 ====================
 // 版本格式: V主版本.次版本.补丁.日期
-#define FIRMWARE_VERSION "V1.3.0.20260701"
+#define FIRMWARE_VERSION "V1.0.26.713"
 
 // ==================== 宏工具 ====================
 #define SN_MAX_LEN 32      // 兼容旧代码的最大缓冲区 (标准 SN 为 16 字符)

@@ -562,7 +562,11 @@ static void arm_ota_download_and_flash(const char* url) {
         notify_callback(OTA_TARGET_ARM, percent, OTA_STATUS_DOWNLOADING, "Downloading...");
 
         // 喂给 ARM OTA 模块（缓冲区会自动分包发送）
-        arm_ota_feed(buf, read_len);
+        if (!arm_ota_feed(buf, read_len)) {
+          arm_ota_cancel();
+          set_state(OTA_STATUS_ERROR, "ARM OTA staging write failed");
+          return;
+        }
       }
     } else {
       delay(10);

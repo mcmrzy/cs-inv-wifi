@@ -379,9 +379,9 @@ bool ap_api_server_start(void)
 {
     if (g_server) return true;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.stack_size = 6144;
+    config.stack_size = 4096;
     config.max_uri_handlers = 7;
-    config.max_open_sockets = 5;
+    config.max_open_sockets = 3;
     config.recv_wait_timeout = 5;
     config.send_wait_timeout = 5;
     if (httpd_start(&g_server, &config) != ESP_OK) {

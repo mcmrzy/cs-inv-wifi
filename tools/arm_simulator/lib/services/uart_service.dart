@@ -30,13 +30,13 @@ class UartFrame {
 class UartService {
   static const int frameHeader = 0xAA;
   static const int frameEscape = 0x55;
-  static const int escHeader = 0x01;   // 0xAA → 0x55 0x01
-  static const int escEscape = 0x00;   // 0x55 → 0x55 0x00
+  static const int escHeader = 0x01; // 0xAA → 0x55 0x01
+  static const int escEscape = 0x00; // 0x55 → 0x55 0x00
   static const int maxDataLen = 1024;
 
   final _frameController = StreamController<UartFrame>.broadcast();
   final _logController = StreamController<String>.broadcast();
-  
+
   Stream<UartFrame> get frameStream => _frameController.stream;
   Stream<String> get logStream => _logController.stream;
 
@@ -75,7 +75,7 @@ class UartService {
     final lenHigh = (len >> 8) & 0xFF;
     final lenLow = len & 0xFF;
     final xor = _calcXor(command, lenHigh, lenLow, data.toList());
-    
+
     final buffer = BytesBuilder();
     buffer.addByte(frameHeader);
     _writeEscaped(buffer, command);
@@ -89,6 +89,10 @@ class UartService {
   }
 
   Future<bool> sendFrame(int command, Uint8List data) async {
+    if (data.length > maxDataLen) {
+      _log('[ERR] 数据长度 ${data.length} 超过单帧上限 $maxDataLen');
+      return false;
+    }
     if (_writeCallback == null) {
       _log('[WARN] 未设置串口写入回调');
       return false;
@@ -96,8 +100,12 @@ class UartService {
     try {
       final frame = _buildFrame(command, data);
       await _writeCallback!(frame);
-      final hexStr = frame.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-      _log('TX: CMD=0x${command.toRadixString(16).padLeft(2, '0')} LEN=${data.length} [$hexStr]');
+      final hexStr = frame
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join(' ');
+      _log(
+        'TX: CMD=0x${command.toRadixString(16).padLeft(2, '0')} LEN=${data.length} [$hexStr]',
+      );
       return true;
     } catch (e) {
       _log('[ERR] 发送失败: $e');
@@ -109,7 +117,9 @@ class UartService {
   Future<bool> sendNack() => sendFrame(CommandCodes.nack, Uint8List(0));
 
   void processReceivedData(Uint8List data) {
-    final hexStr = data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    final hexStr = data
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join(' ');
     _log('RX: [$hexStr]');
     for (var byte in data) {
       _processByte(byte);
@@ -117,18 +127,27 @@ class UartService {
   }
 
   void _processByte(int b) {
+    var decodedEscape = false;
     // 转义处理
     if (_rxEscNext) {
       _rxEscNext = false;
-      if (b == escHeader) b = frameHeader;
-      else if (b == escEscape) b = frameEscape;
+      decodedEscape = true;
+      if (b == escHeader) {
+        b = frameHeader;
+      } else if (b == escEscape) {
+        b = frameEscape;
+      } else {
+        _log('[WARN] 非法转义序列: 0x${b.toRadixString(16)}');
+        _rxBuffer.clear();
+        return;
+      }
     } else if (b == frameEscape) {
       _rxEscNext = true;
       return;
     }
 
     // 查找帧头
-    if (b == frameHeader) {
+    if (!decodedEscape && b == frameHeader) {
       _rxBuffer.clear();
       return;
     }
@@ -160,12 +179,16 @@ class UartService {
 
     // 验证XOR
     final expectedXor = _calcXor(cmd, lenHigh, lenLow, dataList);
-    
+
     if (receivedXor == expectedXor) {
-      _frameController.add(UartFrame(command: cmd, data: Uint8List.fromList(dataList)));
+      _frameController.add(
+        UartFrame(command: cmd, data: Uint8List.fromList(dataList)),
+      );
       _log('RX: CMD=0x${cmd.toRadixString(16).padLeft(2, '0')} LEN=$dataLen');
     } else {
-      _log('[WARN] XOR校验失败: 期望=0x${expectedXor.toRadixString(16)} 收到=0x${receivedXor.toRadixString(16)}');
+      _log(
+        '[WARN] XOR校验失败: 期望=0x${expectedXor.toRadixString(16)} 收到=0x${receivedXor.toRadixString(16)}',
+      );
     }
 
     _rxBuffer.clear();
@@ -173,7 +196,8 @@ class UartService {
 
   void _log(String message) {
     final now = DateTime.now();
-    final timeStr = '${now.hour.toString().padLeft(2, '0')}:'
+    final timeStr =
+        '${now.hour.toString().padLeft(2, '0')}:'
         '${now.minute.toString().padLeft(2, '0')}:'
         '${now.second.toString().padLeft(2, '0')}';
     _logController.add('[$timeStr] $message');

@@ -18,13 +18,15 @@
 
 // ==================== OTA 命令结构 ====================
 struct MqttOtaCommand {
+  uint8_t protocol_version;
   char action[16];              // start/cancel/query
   char target[8];                // "esp", "arm"
   char firmware_id[64];
   char url[256];                 // 固件下载 URL
   char version[32];
   char sha256[65];               // SHA-256 hex (64 chars + null)
-  char signature[132];           // Ed25519 hex (128 chars + null)
+  char md5[33];                  // ARM digest supplied by the trusted command
+  char signature[132];           // Ed25519 Base64 signature
   uint32_t security_version;     // 防降级单调递增
   uint32_t file_size;            // 文件大小
   uint16_t timeout;              // 超时（秒）

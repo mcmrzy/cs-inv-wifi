@@ -79,6 +79,10 @@ struct ArmFirmwareInfo {
 // 返回 true 表示已开始
 bool arm_ota_start_streaming(size_t total_size);
 
+// Supply the trusted MD5 before streaming. Streaming start fails closed if
+// no digest was provided because START must carry the real firmware digest.
+bool arm_ota_set_expected_md5(const uint8_t md5[ARM_OTA_MD5_SIZE]);
+
 // 写入固件数据块（流式模式专用）
 // 返回 true 表示数据已被接受（会被立即或稍后发送）
 // 返回 false 表示 OTA 未在流式模式或状态不对

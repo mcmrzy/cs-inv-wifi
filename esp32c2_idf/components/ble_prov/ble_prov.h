@@ -18,7 +18,7 @@ typedef void (*BleProvCallback)(const char *ssid, const char *password);
  * @param device_sn 设备 SN 号（显示在 BLE 广播中）
  * @param fw_version 固件版本号
  */
-void ble_prov_start(const char *device_sn, const char *fw_version);
+bool ble_prov_start(const char *device_sn, const char *fw_version);
 
 /**
  * @brief 停止 BLE 配网

@@ -119,3 +119,50 @@ test('ESP rollback and per-target security versions are configured', () => {
   assert.match(service, /esp_ota_mark_app_valid_cancel_rollback\s*\(/);
   assert.match(service, /ota_service_note_main_loop_alive\s*\(/);
 });
+
+test('ESP32-C2 keeps the App AP as the default transport and checks Wi-Fi failures', () => {
+  const app = read('esp32c2_idf/main/app_main.c');
+  const wifiMode = app.indexOf('esp_wifi_set_mode(WIFI_MODE_APSTA)');
+  const wifiStart = app.indexOf('esp_wifi_start()');
+  const apiStart = app.indexOf('ap_api_server_start()');
+  assert.ok(wifiMode >= 0 && wifiStart > wifiMode && apiStart > wifiStart,
+    'APSTA and the App API must be available during normal startup');
+  assert.doesNotMatch(app, /ble_prov_start\s*\(/,
+    'BLE must not exhaust the heap while the App AP and HTTP server are active');
+  assert.match(app, /ret\s*=\s*esp_wifi_set_mode\(WIFI_MODE_APSTA\)[\s\S]*ret\s*!=\s*ESP_OK/);
+  assert.match(app, /ret\s*=\s*esp_wifi_start\(\)[\s\S]*ret\s*!=\s*ESP_OK/);
+});
+
+test('short button press switches from App AP to the BLE provisioning transport', () => {
+  const state = read('esp32c2_idf/main/state_machine.c');
+  const button = state.slice(state.indexOf('void check_button(void)'));
+  const stopApi = button.indexOf('ap_api_server_stop()');
+  const staOnly = button.indexOf('esp_wifi_set_mode(WIFI_MODE_STA)');
+  const startBle = button.indexOf('ble_prov_start(g_device_sn, FIRMWARE_VERSION)');
+  assert.ok(stopApi >= 0 && staOnly > stopApi && startBle > staOnly,
+    'BLE provisioning must start only after AP/HTTP memory is released');
+});
+
+test('BLE provisioning releases its stack and excludes unused NimBLE features', () => {
+  const ble = read('esp32c2_idf/components/ble_prov/ble_prov.c');
+  assert.match(ble, /case\s+WIFI_PROV_END[\s\S]*wifi_prov_mgr_deinit\s*\(\)/);
+  assert.match(ble, /void ble_prov_stop\s*\([^)]*\)[\s\S]*wifi_prov_mgr_stop_provisioning\s*\(\)/);
+  assert.doesNotMatch(ble, /retrying in 2s|pdMS_TO_TICKS\(2000\)/,
+    'BTDM memory release is one-way, so a failed BLE start must return to AP instead of retrying');
+  const success = ble.indexOf('case WIFI_PROV_CRED_SUCCESS');
+  const ended = ble.indexOf('case WIFI_PROV_END');
+  const callback = ble.indexOf('s_callback(', ended);
+  assert.ok(success >= 0 && ended > success && callback > ended,
+    'Wi-Fi callback must run after BLE manager deinit has released memory');
+
+  const defaults = read('esp32c2_idf/sdkconfig.defaults');
+  for (const symbol of [
+    'PROX_SERVICE', 'ANS_SERVICE', 'CTS_SERVICE', 'HTP_SERVICE', 'IPSS_SERVICE',
+    'TPS_SERVICE', 'IAS_SERVICE', 'LLS_SERVICE', 'SPS_SERVICE', 'HR_SERVICE',
+    'BAS_SERVICE', 'DIS_SERVICE', 'DTM_MODE_TEST', 'SM_SIGN_CNT', 'CPFD_CAFD',
+    'RECONFIG_MTU', 'EXTRA_ADV_FIELDS',
+  ]) {
+    assert.match(defaults, new RegExp(`# CONFIG_BT_NIMBLE_${symbol} is not set`),
+      `unused NimBLE feature ${symbol} must be disabled`);
+  }
+});

@@ -17,7 +17,7 @@
 // 缓存数据结构
 typedef struct {
     char topic[64];           // 子主题
-    char payload[512];        // 消息内容
+    char payload[FRAME_DATA_MAX]; // full UART payload plus terminator
     uint32_t timestamp;       // Unix时间戳（秒）
     uint32_t index;           // 存储索引
 } OfflineCacheItem;
@@ -29,7 +29,7 @@ void offline_cache_init(void);
 // ==================== 缓存操作 ====================
 // 添加数据到缓存（MQTT未连接时调用）
 // timestamp: Unix时间戳，如果为0则自动获取
-// 返回: true=成功, false=失败（缓存满）
+// 返回: true=已同步落盘, false=校验或持久化失败
 bool offline_cache_add(const char* topic, const char* payload, uint32_t timestamp);
 
 // 获取缓存数量
@@ -47,7 +47,7 @@ void offline_cache_cleanup(void);
 
 // 发送所有缓存数据（MQTT连接成功时调用）
 // send_func: 发送回调，返回true表示发送成功
-// 返回: 成功发送的数据条数
+// 返回: 成功发送的数据条数，-1 表示落盘/读取失败
 int offline_cache_flush_all(bool (*send_func)(const char* topic, const char* payload, uint32_t timestamp));
 
 // 获取最后同步时间（用于状态显示）
@@ -64,5 +64,8 @@ void offline_cache_clear(void);
 
 // 保存当前 epoch 到 NVS（NTP 同步后调用）
 void offline_cache_save_epoch(void);
+bool offline_cache_reserve_bytes(size_t bytes);
+void offline_cache_release_reservation(void);
+void offline_cache_factory_reset(void);
 
 #endif // OFFLINE_CACHE_H

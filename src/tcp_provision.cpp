@@ -668,7 +668,10 @@ static void handle_ota_upload(HttpClientSlot& slot) {
       body_start += 4;
       int body_in_buf = buf_len - header_len;
       if (body_in_buf > 0) {
-        arm_ota_feed((uint8_t*)body_start, body_in_buf);
+        if (!arm_ota_feed((uint8_t*)body_start, body_in_buf)) {
+          arm_ota_cancel();
+          return;
+        }
         Serial.printf("[OTA-UPLOAD] Fed %d bytes from header buffer\n", body_in_buf);
       }
     }
@@ -692,7 +695,10 @@ static void handle_ota_upload(HttpClientSlot& slot) {
         if (to_read > (int)sizeof(g_ota_stream_buf)) to_read = sizeof(g_ota_stream_buf);
         int bytes_read = client.read(g_ota_stream_buf, to_read);
         if (bytes_read > 0) {
-          arm_ota_feed(g_ota_stream_buf, bytes_read);
+          if (!arm_ota_feed(g_ota_stream_buf, bytes_read)) {
+            arm_ota_cancel();
+            return;
+          }
           written += bytes_read;
           int progress = (written * 100) / content_length;
           ota_set_status(OTA_STATUS_WRITING, progress,
@@ -1004,7 +1010,10 @@ static void handle_ota_upload(HttpClientSlot& slot) {
               if (is_esp) {
                 Update.write(g_ota_stream_buf, i);
               } else {
-                arm_ota_feed(g_ota_stream_buf, i);
+                if (!arm_ota_feed(g_ota_stream_buf, i)) {
+                  arm_ota_cancel();
+                  return;
+                }
               }
               written += i;
               // 更新进度
@@ -1028,7 +1037,10 @@ static void handle_ota_upload(HttpClientSlot& slot) {
             if (is_esp) {
               Update.write(g_ota_stream_buf, safe_len);
             } else {
-              arm_ota_feed(g_ota_stream_buf, safe_len);
+              if (!arm_ota_feed(g_ota_stream_buf, safe_len)) {
+                arm_ota_cancel();
+                return;
+              }
             }
             written += safe_len;
             memmove(g_ota_stream_buf, g_ota_stream_buf + safe_len, stream_buf_len - safe_len);

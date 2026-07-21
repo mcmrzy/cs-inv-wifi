@@ -9,6 +9,7 @@
 #include "sn_encoder.h"
 #include "offline_cache.h"
 #include "cs_protocol_defs.h"
+#include "mqtt_ca_cert.h"
 #include <string.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
@@ -82,6 +83,19 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 bool mqtt_init(MQTTMessageHandler msg_handler) {
     g_msg_handler = msg_handler;
 
+    // mqtt_init() is also used after SN/broker changes. Release the previous
+    // pair before rebuilding it so repeated reconfiguration does not leak heap.
+    if (g_mqtt_client) {
+        if (g_mqtt_client->connected()) g_mqtt_client->disconnect();
+        delete g_mqtt_client;
+        g_mqtt_client = nullptr;
+    }
+    if (g_wifi_client) {
+        g_wifi_client->stop();
+        delete g_wifi_client;
+        g_wifi_client = nullptr;
+    }
+
     // 从 NVS 读取 SN
     char sn_buf[SN_FULL_LEN + 1] = {0};
     if (!storage_get_sn(sn_buf, sizeof(sn_buf))) {
@@ -96,15 +110,19 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
     Serial.printf("[MQTT] Loaded SN: %s (valid)\n", g_device_sn);
 
     // 读取 key（可选）
-    char key_buf[33] = {0};
+    char key_buf[65] = {0};
     if (storage_get_key(key_buf, sizeof(key_buf))) {
         strncpy(g_device_key, key_buf, sizeof(g_device_key) - 1);
         Serial.printf("[MQTT] Loaded key length: %zu\n", strlen(g_device_key));
     }
 
+    char mqtt_host[64] = MQTT_DEFAULT_HOST;
+    uint16_t mqtt_port = MQTT_DEFAULT_PORT;
+    storage_get_mqtt(mqtt_host, sizeof(mqtt_host), &mqtt_port);
+
     // 构建 MQTT URI
     snprintf(g_mqtt_uri, sizeof(g_mqtt_uri),
-             "%s:%d", MQTT_DEFAULT_HOST, MQTT_DEFAULT_PORT);
+             "%s:%d", mqtt_host, mqtt_port);
     Serial.printf("[MQTT] Broker: %s (TLS)\n", g_mqtt_uri);
 
     // 构建状态主题
@@ -121,8 +139,8 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
         return false;
     }
 
-    // 配置 TLS：跳过证书验证（私有 Broker，生产环境建议配置正确的 CA 证书）
-    g_wifi_client->setInsecure();
+    // Fail closed: authenticate the broker with the provisioned CA.
+    g_wifi_client->setCACert(MQTT_CA_CERT);
 
     // 创建 PubSubClient
     g_mqtt_client = new PubSubClient(*g_wifi_client);
@@ -131,9 +149,9 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
         return false;
     }
 
-    g_mqtt_client->setServer(MQTT_DEFAULT_HOST, MQTT_DEFAULT_PORT);
+    g_mqtt_client->setServer(mqtt_host, mqtt_port);
     g_mqtt_client->setCallback(mqtt_callback);
-    g_mqtt_client->setBufferSize(1024);  // 增大缓冲区
+    g_mqtt_client->setBufferSize(2048);
 
     Serial.printf("[MQTT] Final URI: mqtts://%s\n", g_mqtt_uri);
     return true;
@@ -170,7 +188,7 @@ bool mqtt_connect_ex(bool force) {
     bool connected = g_mqtt_client->connect(
         g_device_sn,           // Client ID
         MQTT_USERNAME,         // Username
-        MQTT_PASSWORD,         // Password
+        g_device_key[0] ? g_device_key : MQTT_PASSWORD,
         g_status_topic,        // Will Topic
         1,                     // Will QoS
         true,                  // Will Retain
@@ -187,8 +205,8 @@ bool mqtt_connect_ex(bool force) {
         char online_payload[128];
         time_t online_ts = time(nullptr);
         snprintf(online_payload, sizeof(online_payload),
-                 "{\"t\":%lu,\"v\":%d,\"data\":{\"online\":true}}",
-                 (unsigned long)online_ts, PROTO_ENVELOPE_VERSION);
+                 "{\"t\":%lu,\"v\":%d,\"data\":{\"online\":true,\"rssi\":%d}}",
+                 (unsigned long)online_ts, PROTO_ENVELOPE_VERSION, WiFi.RSSI());
         g_mqtt_client->publish(g_status_topic, online_payload, true);
 
         // 订阅命令主题
@@ -262,16 +280,31 @@ int mqtt_publish(const char* sub_topic, const char* data, int len, int qos, int 
         return -2;
     }
 
+    static bool qos_warning_logged = false;
+    if (qos > 0 && !qos_warning_logged) {
+        qos_warning_logged = true;
+        Serial.println("[MQTT] WARNING: PubSubClient outbound publish is QoS 0 only; QoS 1 requires an MQTT client migration");
+    }
+
     // 如果未连接，存储到离线缓存
     if (!g_mqtt_client || !g_mqtt_client->connected()) {
-        offline_cache_add(sub_topic, data, 0);
-        Serial.printf("[MQTT] Not connected, cached: topic=%s (%d bytes)\n", sub_topic, len);
-        return -1;  // 返回-1表示未发送但已缓存
+        if (offline_cache_add(sub_topic, data, 0)) {
+            Serial.printf("[MQTT] Not connected, cached: topic=%s (%d bytes)\n", sub_topic, len);
+            return -1;  // not sent, durably cached
+        }
+        Serial.printf("[MQTT] Not connected and cache failed: topic=%s\n", sub_topic);
+        return -4;
     }
 
     // 委托给信封格式发布
     bool result = mqtt_publish_envelope(sub_topic, data, (unsigned int)len, retain != 0);
-    return result ? 0 : -4;
+    if (result) return 0;
+
+    if (offline_cache_add(sub_topic, data, 0)) {
+        Serial.printf("[MQTT] Publish failed, cached: topic=%s (%d bytes)\n", sub_topic, len);
+        return -1;
+    }
+    return -4;
 }
 
 // ==================== 订阅 ====================

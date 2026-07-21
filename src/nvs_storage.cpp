@@ -54,11 +54,6 @@ bool storage_get_wifi(char* ssid, size_t ssid_len, char* pass, size_t pass_len) 
   String p = prefs.getString(KEY_WIFI_PASS, "");
   strncpy(pass, p.c_str(), pass_len - 1);
   pass[pass_len - 1] = '\0';
-  Serial.printf("[NVS] GET pass: len=%d, raw=", p.length());
-  for (int i = 0; i < min((int)p.length(), 16); i++) {
-    Serial.printf("%02X ", (uint8_t)p[i]);
-  }
-  Serial.println();
 #else
   for (size_t i = 0; i < ssid_len - 1; i++) {
     ssid[i] = EEPROM.read(EEPROM_SSID_OFFSET + i);
@@ -82,13 +77,14 @@ bool storage_get_wifi(char* ssid, size_t ssid_len, char* pass, size_t pass_len) 
 
 bool storage_set_wifi(const char* ssid, const char* pass) {
 #ifdef USE_PREFERENCES
-  Serial.printf("[NVS] SET wifi: ssid='%s' pass='%s' (len=%d)\n", ssid, pass, strlen(pass));
+  Serial.printf("[NVS] SET wifi: ssid='%s', credential_len=%u\n",
+                ssid, (unsigned)strlen(pass));
   // 先清除旧数据，避免新旧格式共存
   prefs.remove(KEY_WIFI_SSID);
   prefs.remove(KEY_WIFI_PASS);
-  prefs.putString(KEY_WIFI_SSID, ssid);
+  size_t ssid_written = prefs.putString(KEY_WIFI_SSID, ssid);
   prefs.putString(KEY_WIFI_PASS, pass);
-  prefs.end();  // 确保数据写入 Flash
+  return ssid_written == strlen(ssid) && prefs.isKey(KEY_WIFI_PASS);
 #else
   for (size_t i = 0; i < strlen(ssid) && i < 32; i++) {
     EEPROM.write(EEPROM_SSID_OFFSET + i, ssid[i]);
@@ -144,8 +140,8 @@ bool storage_get_mqtt(char* host, size_t host_len, uint16_t* port) {
 
 bool storage_set_mqtt(const char* host, uint16_t port) {
 #ifdef USE_PREFERENCES
-  prefs.putString(KEY_MQTT_HOST, host);
-  prefs.putUShort(KEY_MQTT_PORT, port);
+  return prefs.putString(KEY_MQTT_HOST, host) == strlen(host) &&
+         prefs.putUShort(KEY_MQTT_PORT, port) == sizeof(uint16_t);
 #else
   for (size_t i = 0; i < strlen(host) && i < 64; i++) {
     EEPROM.write(EEPROM_HOST_OFFSET + i, host[i]);
@@ -184,7 +180,7 @@ bool storage_get_sn(char* sn, size_t sn_len) {
 
 bool storage_set_sn(const char* sn) {
 #ifdef USE_PREFERENCES
-  prefs.putString(KEY_DEVICE_SN, sn);
+  return prefs.putString(KEY_DEVICE_SN, sn) == strlen(sn);
 #else
   for (size_t i = 0; i < strlen(sn) && i < 32; i++) {
     EEPROM.write(EEPROM_SN_OFFSET + i, sn[i]);
@@ -212,7 +208,7 @@ bool storage_get_key(char* key, size_t key_len) {
 
 bool storage_set_key(const char* key) {
 #ifdef USE_PREFERENCES
-  prefs.putString(KEY_DEVICE_KEY, key);
+  return prefs.putString(KEY_DEVICE_KEY, key) == strlen(key);
 #else
   for (size_t i = 0; i < strlen(key) && i < 64; i++) {
     EEPROM.write(EEPROM_KEY_OFFSET + i, key[i]);
@@ -250,7 +246,7 @@ bool storage_get_ap_ssid(char* ssid, size_t ssid_len) {
 
 bool storage_set_ap_ssid(const char* ssid) {
 #ifdef USE_PREFERENCES
-  prefs.putString(KEY_AP_SSID, ssid);
+  return prefs.putString(KEY_AP_SSID, ssid) == strlen(ssid);
 #else
   for (size_t i = 0; i < strlen(ssid) && i < 32; i++) {
     EEPROM.write(EEPROM_SN_OFFSET - 33 + i, ssid[i]);

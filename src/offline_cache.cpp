@@ -25,7 +25,7 @@
 #define SPIFFS_MOUNT      "/"
 #define MAX_BATCH_ITEMS   10        // flush after this many messages
 #define FLUSH_INTERVAL_MS 60000     // or after this many ms
-#define MAX_CACHE_FILES   500       // max batch files on disk
+#define MAX_CACHE_FILES   OFFLINE_CACHE_MAX_ITEMS
 
 // ---- NVS keys for metadata persistence ----
 #ifdef CHIP_ESP32C3
@@ -50,6 +50,7 @@ static unsigned long s_batch_start_ms = 0;
 static uint32_t s_next_seq = 1;
 static uint32_t s_total_msgs = 0;
 static uint32_t s_last_sync = 0;
+static size_t s_reserved_bytes = 0;
 
 // ---- Helpers ----
 
@@ -169,12 +170,26 @@ static uint32_t count_all_messages(void) {
     return total;
 }
 
+static uint32_t count_messages_in_file(const char* path) {
+    File file = SPIFFS.open(path, FILE_READ);
+    if (!file) return 0;
+    String content = file.readString();
+    file.close();
+    uint32_t count = 0;
+    int idx = 0;
+    while ((idx = content.indexOf("\"t\":", idx)) >= 0) {
+        count++;
+        idx += 4;
+    }
+    return count;
+}
+
 // Delete files older than TTL_DAYS
 static void cleanup_expired(void) {
     uint32_t now = now_epoch();
-    if (now == 0) return;
-
-    uint32_t cutoff = now - ((uint32_t)OFFLINE_CACHE_TTL_DAYS * 86400);
+    uint32_t retention = (uint32_t)OFFLINE_CACHE_TTL_DAYS * 86400U;
+    if (now < 1000000000U || now <= retention) return;
+    uint32_t cutoff = now - retention;
     int removed = 0;
 
     File root = SPIFFS.open("/");
@@ -189,13 +204,13 @@ static void cleanup_expired(void) {
             if (tsIdx >= 0) {
                 uint32_t ts = (uint32_t)atol(content.c_str() + tsIdx + 5);
                 if (ts < cutoff) {
-                    String path = String("/") + file.name();
+                    String path = file.name();
                     SPIFFS.remove(path);
                     removed++;
                 }
             } else {
                 // No timestamp, remove
-                String path = String("/") + file.name();
+                String path = file.name();
                 SPIFFS.remove(path);
                 removed++;
             }
@@ -218,7 +233,9 @@ static void evict_if_needed(void) {
         char path[32];
         make_filename(min_seq, path, sizeof(path));
         Serial.printf("[OFFLINE_CACHE] Evicting oldest batch: %s\n", path);
-        SPIFFS.remove(path);
+        uint32_t removed = count_messages_in_file(path);
+        if (!SPIFFS.remove(path)) break;
+        s_total_msgs -= min(s_total_msgs, removed);
     }
 }
 
@@ -231,7 +248,11 @@ static void evict_oldest_batch(void) {
     char path[32];
     make_filename(min_seq, path, sizeof(path));
     Serial.printf("[OFFLINE_CACHE] SPIFFS full, evicting oldest: %s\n", path);
-    SPIFFS.remove(path);
+    uint32_t removed = count_messages_in_file(path);
+    if (SPIFFS.remove(path)) {
+        s_total_msgs -= min(s_total_msgs, removed);
+        save_meta();
+    }
 }
 
 static bool flush_batch(void) {
@@ -267,18 +288,24 @@ static bool flush_batch(void) {
     File f = SPIFFS.open(path, FILE_WRITE);
     if (!f) {
         Serial.printf("[OFFLINE_CACHE] Failed to create %s\n", path);
-        // SPIFFS 满了：删除最旧的批次腾出空间，然后丢弃当前批次
+        // Keep the RAM batch intact so the caller can retry or return NACK.
         evict_oldest_batch();
-        s_batch_count = 0;  // 防止缓冲区溢出
         return false;
     }
     size_t written = f.print(json);
     f.close();
 
-    if (written == 0) {
+    if (written != json.length()) {
         SPIFFS.remove(path);
         evict_oldest_batch();
-        s_batch_count = 0;
+        return false;
+    }
+
+    File verify = SPIFFS.open(path, FILE_READ);
+    bool persisted = verify && verify.size() == json.length();
+    if (verify) verify.close();
+    if (!persisted) {
+        SPIFFS.remove(path);
         return false;
     }
 
@@ -314,6 +341,13 @@ void offline_cache_init(void) {
     restore_rtc_from_nvs();  // 恢复上次 epoch 到 RTC
     load_meta();
     cleanup_expired();
+    uint32_t scanned_total = count_all_messages();
+    if (scanned_total != s_total_msgs) {
+        Serial.printf("[OFFLINE_CACHE] Rebuilt message count: meta=%lu scan=%lu\n",
+                      (unsigned long)s_total_msgs, (unsigned long)scanned_total);
+        s_total_msgs = scanned_total;
+        save_meta();
+    }
 
     Serial.printf("[OFFLINE_CACHE] Initialized. Batch files: %d, total msgs: %lu\n",
                   count_files(), (unsigned long)s_total_msgs);
@@ -324,7 +358,29 @@ void offline_cache_init(void) {
 bool offline_cache_add(const char *topic, const char *payload, uint32_t timestamp) {
     if (!s_initialized || !topic || !payload) return false;
 
+    size_t topic_len = strlen(topic);
+    size_t payload_len = strlen(payload);
+    if (topic_len == 0 || topic_len >= sizeof(s_batch[0].topic) ||
+        payload_len >= sizeof(s_batch[0].payload)) {
+        Serial.printf("[OFFLINE_CACHE] Reject oversized item: topic=%u payload=%u\n",
+                      (unsigned)topic_len, (unsigned)payload_len);
+        return false;
+    }
+
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    size_t estimated_write = payload_len * 2 + topic_len * 2 + 128;
+    size_t free_bytes = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+    if (free_bytes < s_reserved_bytes + estimated_write) {
+        Serial.println("[OFFLINE_CACHE] Write blocked by OTA space reservation");
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return false;
+    }
+
+    if (s_batch_count > 0 && !flush_batch()) {
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return false;
+    }
 
     if (timestamp == 0) timestamp = now_epoch();
 
@@ -339,16 +395,13 @@ bool offline_cache_add(const char *topic, const char *payload, uint32_t timestam
     Serial.printf("[OFFLINE_CACHE] Cached: %s (ts=%u)\n",
                   topic, (unsigned)timestamp);
 
-    bool need_flush = (s_batch_count >= MAX_BATCH_ITEMS) ||
-                      (millis() - s_batch_start_ms >= FLUSH_INTERVAL_MS);
-
-    if (need_flush) {
-        flush_batch();
-        s_batch_start_ms = millis();
-    }
+    // A true return is used to ACK the ARM, so it must mean power-loss-safe,
+    // not merely queued in volatile RAM.
+    bool persisted = flush_batch();
+    s_batch_start_ms = millis();
 
     if (s_mutex) xSemaphoreGive(s_mutex);
-    return true;
+    return persisted;
 }
 
 int offline_cache_count(void) {
@@ -389,7 +442,7 @@ void offline_cache_clear(void) {
         File file = root.openNextFile();
         while (file) {
             if (cache_basename(file.name())[0] == 'b') {
-                String path = String("/") + file.name();
+                String path = file.name();
                 SPIFFS.remove(path);
             }
             file = root.openNextFile();
@@ -402,6 +455,19 @@ void offline_cache_clear(void) {
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
+void offline_cache_factory_reset(void) {
+    offline_cache_clear();
+#ifdef CHIP_ESP32C3
+    g_meta_prefs.begin(META_NAMESPACE, false);
+    g_meta_prefs.clear();
+    g_meta_prefs.end();
+#endif
+    s_next_seq = 1;
+    s_total_msgs = 0;
+    s_last_sync = 0;
+    s_reserved_bytes = 0;
+}
+
 int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *payload, uint32_t timestamp)) {
     if (!s_initialized || !send_func) return 0;
 
@@ -409,7 +475,10 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
 
     // First flush any buffered messages
     if (s_batch_count > 0) {
-        flush_batch();
+        if (!flush_batch()) {
+            if (s_mutex) xSemaphoreGive(s_mutex);
+            return -1;
+        }
         s_batch_start_ms = millis();
     }
 
@@ -442,12 +511,14 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
         // Parse the JSON array manually
         // Format: [{"t":"topic","p":"payload","ts":123}, ...]
         bool batch_ok = true;
+        bool parsed_any = false;
         int pos = 0;
 
         while (pos < (int)content.length()) {
             // Find next item start
             int itemStart = content.indexOf('{', pos);
             if (itemStart < 0) break;
+            parsed_any = true;
 
             // 用花括号深度计数找到正确的闭合 }，避免 payload 内嵌套 {} 导致截断
             int depth = 0;
@@ -459,17 +530,17 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
                     if (depth == 0) { itemEnd = i; break; }
                 }
             }
-            if (itemEnd < 0) break;
+            if (itemEnd < 0) { batch_ok = false; break; }
 
             String itemStr = content.substring(itemStart, itemEnd + 1);
             pos = itemEnd + 1;
 
             // Parse "t":"..."
             int tIdx = itemStr.indexOf("\"t\":\"");
-            if (tIdx < 0) continue;
+            if (tIdx < 0) { batch_ok = false; break; }
             int tStart = tIdx + 5;
             int tEnd = itemStr.indexOf('"', tStart);
-            if (tEnd < 0) continue;
+            if (tEnd < 0) { batch_ok = false; break; }
 
             // Handle escaped quotes in topic
             String topic = "";
@@ -484,7 +555,7 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
 
             // Parse "p":"..."
             int pIdx = itemStr.indexOf("\"p\":\"");
-            if (pIdx < 0) continue;
+            if (pIdx < 0) { batch_ok = false; break; }
             int pStart = pIdx + 5;
             // 逐字符扫描，跳过 \" 转义，找到 payload 结束的真正引号
             int pEnd = -1;
@@ -496,7 +567,7 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
                     break;
                 }
             }
-            if (pEnd < 0) continue;
+            if (pEnd < 0) { batch_ok = false; break; }
 
             String payload = "";
             for (int i = pStart; i < pEnd; i++) {
@@ -530,8 +601,13 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
             }
         }
 
+        if (!parsed_any) batch_ok = false;
+
         if (batch_ok) {
-            SPIFFS.remove(path);
+            if (!SPIFFS.remove(path)) {
+                failed++;
+                break;
+            }
             uint32_t msgCount = 0;
             int idx = 0;
             while ((idx = content.indexOf("\"t\":", idx)) >= 0) {
@@ -554,7 +630,7 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
                   sent, failed, count_files());
 
     if (s_mutex) xSemaphoreGive(s_mutex);
-    return sent;
+    return failed > 0 ? -1 : sent;
 }
 
 uint32_t offline_cache_get_last_sync_time(void) {
@@ -584,4 +660,30 @@ size_t offline_cache_total_bytes(void) {
 
     if (s_mutex) xSemaphoreGive(s_mutex);
     return total;
+}
+
+bool offline_cache_reserve_bytes(size_t bytes) {
+    if (!s_initialized || bytes == 0 || bytes > SPIFFS.totalBytes()) return false;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_batch_count > 0 && !flush_batch()) {
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return false;
+    }
+    while (SPIFFS.totalBytes() - SPIFFS.usedBytes() < bytes) {
+        size_t before = SPIFFS.usedBytes();
+        evict_oldest_batch();
+        if (SPIFFS.usedBytes() >= before) {
+            if (s_mutex) xSemaphoreGive(s_mutex);
+            return false;
+        }
+    }
+    s_reserved_bytes = bytes;
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return true;
+}
+
+void offline_cache_release_reservation(void) {
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_reserved_bytes = 0;
+    if (s_mutex) xSemaphoreGive(s_mutex);
 }
