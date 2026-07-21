@@ -478,11 +478,6 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
         extract_str(json, "\"payload\"", payload, sizeof(payload));
         if (extract_str(json, "\"sn\"", sn, sizeof(sn))) {
             if (strlen(sn) > 0 && strcmp(sn, g_device_sn) != 0) {
-                if (!sn_validate(sn)) {
-                    ESP_LOGW(TAG, "PUBLISH SN REJECTED (invalid): %s", sn);
-                    uart_send_nack();
-                    return;
-                }
                 if (!storage_set_sn(sn)) {
                     ESP_LOGE(TAG, "Failed to persist SN from PUBLISH");
                     uart_send_nack();

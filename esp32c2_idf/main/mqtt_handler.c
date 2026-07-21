@@ -253,12 +253,10 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
         atomic_store(&g_mqtt_started, false);
     }
 
-    char sn_buf[SN_BUF_LEN + 1] = {0};
-    if (!storage_get_sn(sn_buf, sizeof(sn_buf))) {
+    if (!storage_get_sn(g_device_sn, sizeof(g_device_sn))) {
         ESP_LOGE(TAG, "SN not set in NVS");
         return false;
     }
-    strncpy(g_device_sn, sn_buf, sizeof(g_device_sn) - 1);
     ESP_LOGI(TAG, "Loaded SN: %s", g_device_sn);
 
     char key_buf[sizeof(g_device_key)] = {0};
