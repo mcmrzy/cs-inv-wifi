@@ -697,7 +697,11 @@ static bool apply_provision(const char *ssid, const char *password)
 
 void on_provision_done(const char *ssid, const char *password)
 {
-    apply_provision(ssid, password);
+    if (apply_provision(ssid, password)) {
+        if (!ap_api_server_start()) {
+            ESP_LOGE(TAG, "Failed to restore App API after BLE provisioning");
+        }
+    }
 }
 
 bool on_ap_provision_done(const char *ssid, const char *password)
@@ -804,30 +808,8 @@ void check_button(void)
             vTaskDelay(pdMS_TO_TICKS(1500));
             esp_restart();
         } else if (duration > 200 && duration < BUTTON_LONG_PRESS) {
-            ESP_LOGI(TAG, "Toggle AP mode");
-            if (g_sys_state == STATE_AP_PROVISION) {
-                if (storage_has_wifi_config()) {
-                    storage_get_wifi(g_wifi_ssid, sizeof(g_wifi_ssid), g_wifi_pass, sizeof(g_wifi_pass));
-                    init_wifi_sta();
-                    g_sys_state = STATE_STA_CONNECTING;
-                    led1_set(LED_FAST_BLINK);
-                    led2_set(LED_OFF);
-                }
-            } else {
-                esp_wifi_set_mode(WIFI_MODE_APSTA);
-
-                char ap_ssid[32];
-                build_ap_ssid(ap_ssid, sizeof(ap_ssid));
-                wifi_config_t ap_cfg = {0};
-                strncpy((char *)ap_cfg.ap.ssid, ap_ssid, sizeof(ap_cfg.ap.ssid) - 1);
-                ap_cfg.ap.ssid_len = strlen(ap_ssid);
-                ap_cfg.ap.max_connection = 1;
-                ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
-                esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
-
-                ESP_LOGI(TAG, "AP(%s) started alongside STA", ap_ssid);
-                ap_api_server_start();
-            }
+            // 短按：无操作或LED指示
+            ESP_LOGI(TAG, "Short press detected");
         }
     }
 }

@@ -12,7 +12,6 @@
 #include "sn_encoder.h"
 #include "ble_prov.h"
 
-
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
@@ -22,6 +21,7 @@
 #include "esp_sntp.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -33,6 +33,14 @@ static const char *TAG = "app";
 
 EventGroupHandle_t s_wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
+
+static void log_heap(const char *stage)
+{
+    ESP_LOGW(TAG, "Heap %-16s free=%lu largest=%lu min=%lu", stage,
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned long)esp_get_minimum_free_heap_size());
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *data)
@@ -104,6 +112,15 @@ static void main_loop_task(void *arg)
     }
 }
 
+static void on_ble_provision_done(const char *ssid, const char *password)
+{
+    ESP_LOGI(TAG, "BLE provision received: SSID=%s", ssid);
+
+    storage_set_wifi(ssid, password);
+
+    esp_restart();
+}
+
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
@@ -128,7 +145,11 @@ void app_main(void)
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
+    ret = esp_wifi_init(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi init failed: %s", esp_err_to_name(ret));
+        return;
+    }
 
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
@@ -178,29 +199,33 @@ void app_main(void)
         // g_device_sn 保持为空, AP 名称将使用 MAC 地址
     }
 
-    mqtt_init(on_mqtt_message);
+    if (storage_has_sn()) mqtt_init(on_mqtt_message);
     if (!ota_service_init()) {
         ESP_LOGE(TAG, "OTA service initialization failed");
         return;
     }
     mqtt_ota_init();
 
-    // 先启动 BLE 配网（此时 WiFi 仅 init 未 start，避免 RF 状态冲突导致 BLE 控制器崩溃）
-    ble_prov_set_callback(on_provision_done);
-    ble_prov_start(g_device_sn, FIRMWARE_VERSION);
+    const bool has_wifi_config = storage_has_wifi_config();
+    log_heap("before APSTA");
+    ret = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi APSTA mode failed: %s", esp_err_to_name(ret));
+        return;
+    }
 
-    // BLE 启动后再启动 WiFi
-    vTaskDelay(pdMS_TO_TICKS(500));
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-
-    if (storage_has_wifi_config()) {
+    if (has_wifi_config) {
         storage_get_wifi(g_wifi_ssid, sizeof(g_wifi_ssid), g_wifi_pass, sizeof(g_wifi_pass));
         ESP_LOGI(TAG, "Loaded WiFi from NVS: %s", g_wifi_ssid);
 
         wifi_config_t sta_cfg = {0};
         strncpy((char *)sta_cfg.sta.ssid, g_wifi_ssid, sizeof(sta_cfg.sta.ssid) - 1);
         strncpy((char *)sta_cfg.sta.password, g_wifi_pass, sizeof(sta_cfg.sta.password) - 1);
-        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        ret = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "STA configuration failed: %s", esp_err_to_name(ret));
+            return;
+        }
 
         g_sys_state = STATE_STA_CONNECTING;
         led1_set(LED_FAST_BLINK);
@@ -220,23 +245,40 @@ void app_main(void)
         ap_cfg.ap.channel = 1;
         ap_cfg.ap.max_connection = 4;
         ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
-        esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+        ret = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "AP configuration failed: %s", esp_err_to_name(ret));
+            return;
+        }
     }
 
-    esp_wifi_start();
-    if (storage_has_wifi_config()) {
-        esp_wifi_connect();
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi start failed: %s", esp_err_to_name(ret));
+        return;
     }
-    ESP_LOGI(TAG, "WiFi started after BLE init");
+    if (has_wifi_config) {
+        ret = esp_wifi_connect();
+        if (ret != ESP_OK) ESP_LOGW(TAG, "Initial STA connect failed: %s", esp_err_to_name(ret));
+    }
+    log_heap("after WiFi");
+
+    if (storage_has_sn()) {
+        ble_prov_set_callback(on_ble_provision_done);
+        if (ble_prov_start(g_device_sn, FIRMWARE_VERSION)) {
+            ESP_LOGI(TAG, "BLE advertising started: %s", ble_prov_get_service_name());
+        } else {
+            ESP_LOGW(TAG, "BLE advertising start failed");
+        }
+    }
 
     if (!ap_api_server_start()) {
         ESP_LOGE(TAG, "AP App API failed to start");
         return;
     }
+    log_heap("after App API");
     sntp_init_cst8();
     state_machine_init();
-
-    ESP_LOGI(TAG, "Setup done");
 
     if (xTaskCreate(main_loop_task, "main_loop", 4096, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Main loop task creation failed");
@@ -246,4 +288,6 @@ void app_main(void)
         ESP_LOGE(TAG, "OTA health-check task creation failed");
         return;
     }
+
+    ESP_LOGI(TAG, "Setup done");
 }
