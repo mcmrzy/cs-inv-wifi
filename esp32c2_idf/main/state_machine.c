@@ -3,7 +3,6 @@
 #include "nvs_storage.h"
 #include "uart_protocol.h"
 #include "mqtt_handler.h"
-#include "mqtt_ota_handler.h"
 #include "ota_service.h"
 #include "arm_ota.h"
 #include "offline_cache.h"
