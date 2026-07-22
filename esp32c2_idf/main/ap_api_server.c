@@ -17,7 +17,7 @@
 #include "ota_service.h"
 #include "state_machine.h"
 
-#define LOCAL_UPLOAD_TASK_STACK  6144
+#define LOCAL_UPLOAD_TASK_STACK  3072
 #define LOCAL_UPLOAD_TASK_PRIO   5
 
 extern EventGroupHandle_t s_wifi_event_group;
@@ -261,9 +261,9 @@ bool ap_api_server_start(void)
 {
     if (g_server) return true;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.stack_size = 4096;
+    config.stack_size = 2048;
     config.max_uri_handlers = 4;
-    config.max_open_sockets = 2;
+    config.max_open_sockets = 1;
     config.recv_wait_timeout = 5;
     config.send_wait_timeout = 5;
     if (httpd_start(&g_server, &config) != ESP_OK) {

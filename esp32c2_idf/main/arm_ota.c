@@ -21,7 +21,7 @@
 
 static const char* TAG = "ARM-OTA";
 
-#define ARM_OTA_STREAM_BUF_SIZE  8192
+#define ARM_OTA_STREAM_BUF_SIZE  2048
 #define ARM_OTA_END_QUIET_MS     100
 
 static ArmOtaState       g_ota_state     = ARM_OTA_IDLE;

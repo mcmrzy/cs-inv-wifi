@@ -21,9 +21,9 @@
 #include "monocypher-ed25519.h"
 #include "ota_release_pubkey.h"
 
-#define OTA_BUFFER_SIZE       4096U
+#define OTA_BUFFER_SIZE       2048U
 #define OTA_ARM_MAX_SIZE      (256U * 1024U)
-#define OTA_TASK_STACK_SIZE   8192U
+#define OTA_TASK_STACK_SIZE   6144U
 #define OTA_TASK_PRIORITY     5U
 #define OTA_READ_IDLE_MS      10U
 #define OTA_HEALTH_DELAY_MS   10000U
@@ -237,7 +237,7 @@ static void boot_health_task(void* parameter)
 bool ota_service_start_boot_health_check(void)
 {
     if (!g_boot_validation_required) return true;
-    return xTaskCreate(boot_health_task, "ota_health", 3072, NULL,
+    return xTaskCreate(boot_health_task, "ota_health", 2048, NULL,
                        OTA_TASK_PRIORITY, NULL) == pdPASS;
 }
 

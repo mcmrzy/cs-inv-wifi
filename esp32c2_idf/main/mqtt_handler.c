@@ -49,7 +49,7 @@ static atomic_bool g_cache_flush_running;
 static QueueHandle_t g_offline_ack_queue = NULL;
 
 #define OFFLINE_ACK_TIMEOUT_MS 5000
-#define OFFLINE_FLUSH_TASK_STACK 4096
+#define OFFLINE_FLUSH_TASK_STACK 2048
 
 #define MQTT_RX_MAX 4096
 static char g_rx_topic[128];
