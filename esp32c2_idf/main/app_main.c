@@ -2,7 +2,6 @@
 #include "state_machine.h"
 #include "nvs_storage.h"
 #include "uart_protocol.h"
-#include "ap_api_server.h"
 #include "mqtt_handler.h"
 #include "mqtt_ota_handler.h"
 #include "ota_service.h"
@@ -161,7 +160,6 @@ void app_main(void)
     esp_log_level_set("*", ESP_LOG_WARN);
 
     uart_protocol_set_callback(on_uart_frame);
-    ap_api_server_set_provision_callback(on_ap_provision_done);
 
     if (storage_has_sn()) {
         storage_get_sn(g_device_sn, sizeof(g_device_sn));
@@ -241,11 +239,7 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE advertising start failed");
     }
 
-    if (!ap_api_server_start()) {
-        ESP_LOGE(TAG, "AP App API failed to start");
-        return;
-    }
-    log_heap("after App API");
+    log_heap("after BLE");
     sntp_init_cst8();
     state_machine_init();
 

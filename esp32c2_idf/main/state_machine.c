@@ -2,7 +2,6 @@
 #include "config.h"
 #include "nvs_storage.h"
 #include "uart_protocol.h"
-#include "ap_api_server.h"
 #include "mqtt_handler.h"
 #include "mqtt_ota_handler.h"
 #include "ota_service.h"
@@ -264,7 +263,6 @@ static void state_sta_connecting(void)
             esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
 
             g_sys_state = STATE_AP_PROVISION;
-            ap_api_server_start();
             g_wifi_retry_next = 0;
             return;
         }
@@ -656,16 +654,7 @@ static bool apply_provision(const char *ssid, const char *password)
 
 void on_provision_done(const char *ssid, const char *password)
 {
-    if (apply_provision(ssid, password)) {
-        if (!ap_api_server_start()) {
-            ESP_LOGE(TAG, "Failed to restore App API after BLE provisioning");
-        }
-    }
-}
-
-bool on_ap_provision_done(const char *ssid, const char *password)
-{
-    return apply_provision(ssid, password);
+    apply_provision(ssid, password);
 }
 
 void on_mqtt_message(const char *topic, const char *payload, unsigned int len)

@@ -8,7 +8,6 @@ void state_machine_run(void);
 
 void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len);
 void on_provision_done(const char *ssid, const char *password);
-bool on_ap_provision_done(const char *ssid, const char *password);
 void on_mqtt_message(const char *topic, const char *payload, unsigned int len);
 
 void build_ap_ssid(char *out, size_t out_len);
