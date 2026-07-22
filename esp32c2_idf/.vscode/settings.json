@@ -1,4 +1,17 @@
 {
-    "idf.currentSetup": "D:\\.espressif\\v5.5.4\\esp-idf",
-    "idf.portWin": "COM3"
+  "idf.currentSetup": "D:\\.espressif\\v5.5.4\\esp-idf",
+  "idf.portWin": "COM4",
+  "idf.openOcdConfigs": [
+    "board/esp32c2-ftdi.cfg"
+  ],
+  "idf.customExtraVars": {
+    "IDF_CCACHE_ENABLE": "1",
+    "IDF_TARGET": "esp32c2"
+  },
+  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-19.1.2_20250312\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=d:\\CS_INV_WIFI\\esp32c2_idf\\build"
+  ]
 }
