@@ -2,7 +2,6 @@
 #include "config.h"
 #include "nvs_storage.h"
 #include "uart_protocol.h"
-#include "led_status.h"
 #include "ap_api_server.h"
 #include "mqtt_handler.h"
 #include "mqtt_ota_handler.h"
@@ -145,9 +144,6 @@ static bool g_arm_alarm_sent = false;
 #define ARM_ALARM_CHECK_MS    (30LL * 1000)        /* 每 30 秒检查一次 */
 #define ARM_ALARM_CODE        13                    /* 告警码 */
 
-static bool g_btn_pressed = false;
-static int64_t g_btn_press_start = 0;
-
 extern EventGroupHandle_t s_wifi_event_group;
 extern const int WIFI_CONNECTED_BIT;
 
@@ -244,8 +240,7 @@ static void state_sta_connecting(void)
         g_wifi_retry_next = 0;
 
         g_sys_state = STATE_MQTT_CONNECTING;
-        led1_set(LED_SOLID);
-        led2_set(LED_SLOW_BLINK);
+        // LED removed
         return;
     }
 
@@ -269,8 +264,6 @@ static void state_sta_connecting(void)
             esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
 
             g_sys_state = STATE_AP_PROVISION;
-            led1_set(LED_SLOW_BLINK);
-            led2_set(LED_OFF);
             ap_api_server_start();
             g_wifi_retry_next = 0;
             return;
@@ -304,15 +297,11 @@ static void state_mqtt_connecting(void)
     if (!(xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT)) {
         init_wifi_sta();
         g_sys_state = STATE_STA_CONNECTING;
-        led1_set(LED_FAST_BLINK);
-        led2_set(LED_OFF);
         return;
     }
     if (mqtt_is_connected()) {
         ESP_LOGI(TAG, ">>> RUNNING <<<");
         g_sys_state = STATE_RUNNING;
-        led1_set(LED_SOLID);
-        led2_set(LED_SOLID);
         g_last_data_received = now_ms();
         g_arm_alarm_sent = false;
         return;
@@ -324,16 +313,12 @@ static void state_running(void)
 {
     if (!(xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT)) {
         ESP_LOGW(TAG, "WiFi lost!");
-        led1_set(LED_FAST_BLINK);
-        led2_set(LED_OFF);
         mqtt_on_network_lost();
         init_wifi_sta();
         g_sys_state = STATE_STA_CONNECTING;
         return;
     }
     if (!mqtt_is_connected()) {
-        led1_set(LED_SOLID);
-        led2_set(LED_FAULT);
         g_sys_state = STATE_MQTT_CONNECTING;
         return;
     }
@@ -528,7 +513,6 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
             int qos = strcmp(topic, PROTO_TOPIC_THREE_PHASE) == 0 ? 0 : 1;
             publish_result = mqtt_publish(topic, send_payload, strlen(send_payload), qos, 0);
             g_last_data_received = now_ms();
-            led_signal_data();
             ESP_LOGI(TAG, "PUBLISH -> cs_inv/%s/%s (%d bytes)",
                      g_device_sn, topic, (int)strlen(send_payload));
         } else {
@@ -666,8 +650,6 @@ static bool apply_provision(const char *ssid, const char *password)
     strncpy(g_wifi_pass, password, sizeof(g_wifi_pass) - 1);
     init_wifi_sta();
     g_sys_state = STATE_STA_CONNECTING;
-    led1_set(LED_FAST_BLINK);
-    led2_set(LED_OFF);
     ESP_LOGI(TAG, "Connecting STA to %s", ssid);
     return true;
 }
@@ -761,32 +743,4 @@ void on_mqtt_message(const char *topic, const char *payload, unsigned int len)
     }
     uart_send_frame(CMD_COMMAND_RECV, (const uint8_t *)payload, (uint16_t)len);
     ESP_LOGI(TAG, "MQTT->ARM topic=%s len=%u", sub, len);
-}
-
-void check_button(void)
-{
-    int level = gpio_get_level(PIN_BTN);
-    bool pressed = (level == 0);
-    int64_t now = now_ms();
-
-    if (pressed && !g_btn_pressed) {
-        g_btn_pressed = true;
-        g_btn_press_start = now;
-    }
-    if (!pressed && g_btn_pressed) {
-        g_btn_pressed = false;
-        int64_t duration = now - g_btn_press_start;
-        if (duration >= BUTTON_LONG_PRESS) {
-            ESP_LOGW(TAG, "Factory reset!");
-            led1_set(LED_3FLASH);
-            led2_set(LED_3FLASH);
-            offline_cache_clear();
-            storage_factory_reset();
-            vTaskDelay(pdMS_TO_TICKS(1500));
-            esp_restart();
-        } else if (duration > 200 && duration < BUTTON_LONG_PRESS) {
-            // 短按：无操作或LED指示
-            ESP_LOGI(TAG, "Short press detected");
-        }
-    }
 }

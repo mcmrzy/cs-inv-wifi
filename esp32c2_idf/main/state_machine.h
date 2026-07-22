@@ -11,7 +11,6 @@ void on_provision_done(const char *ssid, const char *password);
 bool on_ap_provision_done(const char *ssid, const char *password);
 void on_mqtt_message(const char *topic, const char *payload, unsigned int len);
 
-void check_button(void);
 void build_ap_ssid(char *out, size_t out_len);
 
 extern char g_device_sn[SN_MAX_LEN];

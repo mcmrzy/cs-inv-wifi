@@ -2,7 +2,6 @@
 #include "state_machine.h"
 #include "nvs_storage.h"
 #include "uart_protocol.h"
-#include "led_status.h"
 #include "ap_api_server.h"
 #include "mqtt_handler.h"
 #include "mqtt_ota_handler.h"
@@ -101,8 +100,6 @@ static void main_loop_task(void *arg)
 
     for (;;) {
         uart_protocol_process();
-        check_button();
-        led_tick();
         state_machine_run();
         offline_cache_process();
         ota_service_note_main_loop_alive();
@@ -158,21 +155,10 @@ void app_main(void)
         return;
     }
     uart_protocol_init();
-    led_init();
     offline_cache_init();
 
     // 控制台在 UART1, 协议在 UART0, 物理隔离
     esp_log_level_set("*", ESP_LOG_WARN);
-
-    gpio_config_t btn_cfg = {
-        .pin_bit_mask = (1ULL << PIN_BTN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&btn_cfg);
-    ESP_LOGI(TAG, "BTN=GPIO%d", PIN_BTN);
 
     uart_protocol_set_callback(on_uart_frame);
     ap_api_server_set_provision_callback(on_ap_provision_done);
@@ -214,11 +200,9 @@ void app_main(void)
         }
 
         g_sys_state = STATE_STA_CONNECTING;
-        led1_set(LED_FAST_BLINK);
     } else {
         ESP_LOGI(TAG, "No saved WiFi -> AP Provision mode");
         g_sys_state = STATE_AP_PROVISION;
-        led1_set(LED_SLOW_BLINK);
     }
 
     {
