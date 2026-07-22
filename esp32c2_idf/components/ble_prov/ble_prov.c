@@ -120,10 +120,9 @@ bool ble_prov_start(const char *device_sn, const char *fw_version)
     s_pending_ssid[0] = '\0';
     s_pending_password[0] = '\0';
 
-    /* 构建 service name: CS_INV + SN后6位 */
-    if (device_sn && strlen(device_sn) >= 6) {
-        snprintf(s_service_name, sizeof(s_service_name), "CS_INV_%s",
-                 device_sn + strlen(device_sn) - 6);
+    /* 构建 service name: CS_INV_ + 完整SN */
+    if (device_sn && strlen(device_sn) > 0) {
+        snprintf(s_service_name, sizeof(s_service_name), "CS_INV_%s", device_sn);
     } else {
         snprintf(s_service_name, sizeof(s_service_name), "CS_INV");
     }

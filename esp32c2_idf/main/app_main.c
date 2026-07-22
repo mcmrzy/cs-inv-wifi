@@ -169,7 +169,14 @@ void app_main(void)
         ESP_LOGI(TAG, "No SN in NVS, waiting for ARM to provide SN via UART");
     }
 
-    if (storage_has_sn()) mqtt_init(on_mqtt_message);
+    // 只有同时有SN和Key时才初始化MQTT
+    if (g_device_sn[0] && g_device_key[0]) {
+        mqtt_init(on_mqtt_message);
+    } else {
+        ESP_LOGW(TAG, "MQTT skipped: SN=%s, Key=%s",
+                 g_device_sn[0] ? "ok" : "missing",
+                 g_device_key[0] ? "ok" : "missing");
+    }
     if (!ota_service_init()) {
         ESP_LOGE(TAG, "OTA service initialization failed");
         return;
