@@ -44,6 +44,7 @@ static int64_t g_wifi_retry_next = 0;
 static int64_t g_last_uart_heartbeat = 0;
 static int64_t g_last_cache_flush = 0;
 static int64_t g_last_debug = 0;
+static volatile bool g_pending_mqtt_reconfigure = false;
 
 #define CMD_DEDUP_SLOTS 8
 static char g_recent_task_ids[CMD_DEDUP_SLOTS][64];
@@ -364,6 +365,12 @@ void state_machine_run(void)
 {
     int64_t now = now_ms();
 
+    if (g_pending_mqtt_reconfigure) {
+        g_pending_mqtt_reconfigure = false;
+        ESP_LOGI(TAG, "Deferred MQTT reconfigure after SN update");
+        mqtt_reconfigure();
+    }
+
     if (now - g_last_debug >= 60000) {
         g_last_debug = now;
         int cached = offline_cache_count();
@@ -467,7 +474,7 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
                 }
                 strncpy(g_device_sn, sn, sizeof(g_device_sn) - 1);
                 ESP_LOGI(TAG, "SN updated via PUBLISH: %s", sn);
-                mqtt_reconfigure();
+                g_pending_mqtt_reconfigure = true;
                 if (g_sys_state == STATE_RUNNING) g_sys_state = STATE_MQTT_CONNECTING;
 
                 char ap_ssid[32];
