@@ -10,6 +10,7 @@ idf_component_register(
         "arm_ota.c"
         "offline_cache.c"
         "nvs_storage.c"
+        "ap_api_server.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

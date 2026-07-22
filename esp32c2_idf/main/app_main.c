@@ -2,6 +2,7 @@
 #include "state_machine.h"
 #include "nvs_storage.h"
 #include "uart_protocol.h"
+#include "ap_api_server.h"
 #include "mqtt_handler.h"
 #include "mqtt_ota_handler.h"
 #include "ota_service.h"
@@ -239,7 +240,12 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE advertising start failed");
     }
 
-    log_heap("after BLE");
+    // 启动OTA HTTP服务器（仅用于本地OTA上传）
+    if (!ap_api_server_start()) {
+        ESP_LOGE(TAG, "OTA HTTP server failed to start");
+    }
+
+    log_heap("after BLE+HTTP");
     sntp_init_cst8();
     state_machine_init();
 
