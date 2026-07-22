@@ -4,6 +4,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+/* 设置为 1 启用 UART1 原始数据打印（调试用） */
+#define UART_RAW_DUMP 1
+
 static const char *TAG = "uart_proto";
 
 static FrameCallback g_frame_callback = NULL;
@@ -95,6 +98,23 @@ void uart_protocol_process() {
     if (!g_rx_mutex || xSemaphoreTake(g_rx_mutex, 0) != pdTRUE) return;
     size_t available = 0;
     uart_get_buffered_data_len(UART_PORT_NUM, &available);
+
+#if UART_RAW_DUMP
+    /* 打印原始 hex 数据（不解析，纯调试） */
+    if (available > 0) {
+        uint8_t raw[256];
+        int to_read = available > sizeof(raw) ? sizeof(raw) : (int)available;
+        int got = uart_read_bytes(UART_PORT_NUM, raw, to_read, 0);
+        char hex[770]; /* 256*3+1 */
+        int pos = 0;
+        for (int i = 0; i < got && pos < (int)sizeof(hex) - 4; i++) {
+            pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", raw[i]);
+        }
+        ESP_LOGI(TAG, "UART1 RX [%d]: %s", got, hex);
+        available -= got;
+    }
+#endif
+
     while (available > 0) {
         uint8_t b;
         int n = uart_read_bytes(UART_PORT_NUM, &b, 1, 0);
