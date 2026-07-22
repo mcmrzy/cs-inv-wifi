@@ -248,7 +248,7 @@ void app_main(void)
     sntp_init_cst8();
     state_machine_init();
 
-    if (xTaskCreate(main_loop_task, "main_loop", 2048, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(main_loop_task, "main_loop", 4096, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Main loop task creation failed");
         return;
     }
