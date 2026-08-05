@@ -16,6 +16,7 @@
 #include "ota_mqtt_adapter.h"
 #include "cJSON.h"
 #include <string.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -53,7 +54,10 @@ static atomic_bool g_cache_flush_running;
 static QueueHandle_t g_offline_ack_queue = NULL;
 
 #define OFFLINE_ACK_TIMEOUT_MS  5000
-#define OFFLINE_FLUSH_TASK_STACK 2048
+/* 补传任务内包含 offline_send_callback 的 1KB 级局部缓冲、
+ * esp_mqtt_client_publish 内部调用链及 ESP_LOGI 格式化，
+ * 2048 字节会发生栈溢出 (Stack protection fault)，需留足余量 */
+#define OFFLINE_FLUSH_TASK_STACK 4096
 
 static char g_rx_topic[128];
 static char g_rx_payload[MQTT_RX_MAX + 1];
@@ -78,18 +82,29 @@ static bool offline_send_callback(const char *topic, const char *payload,
         return false;
     }
 
-    char full_topic[128];
-    int n = snprintf(full_topic, sizeof(full_topic), PROTO_TOPIC_FMT,
+    /* 大缓冲放堆上，避免占用已紧张的补传任务栈 */
+    char *full_topic = malloc(128);
+    if (!full_topic) {
+        return false;
+    }
+    int n = snprintf(full_topic, 128, PROTO_TOPIC_FMT,
                      g_device_sn, topic);
-    if (n < 0 || n >= (int)sizeof(full_topic)) {
+    if (n < 0 || n >= 128) {
+        free(full_topic);
         return false;
     }
 
-    char full_payload[1024];
-    int len = snprintf(full_payload, sizeof(full_payload),
+    char *full_payload = malloc(1024);
+    if (!full_payload) {
+        free(full_topic);
+        return false;
+    }
+    int len = snprintf(full_payload, 1024,
         "{\"t\":%" PRIu32 ",\"v\":%d,\"data\":%s}",
         timestamp, PROTO_ENVELOPE_VERSION, payload);
-    if (len <= 0 || len >= (int)sizeof(full_payload)) {
+    if (len <= 0 || len >= 1024) {
+        free(full_topic);
+        free(full_payload);
         return false;
     }
 
@@ -98,6 +113,8 @@ static bool offline_send_callback(const char *topic, const char *payload,
 
     const int msg_id = esp_mqtt_client_publish(g_mqtt_client, full_topic,
                                                full_payload, len, 1, 0);
+    free(full_topic);
+    free(full_payload);
     if (msg_id < 0) return false;
 
     const TickType_t started = xTaskGetTickCount();
