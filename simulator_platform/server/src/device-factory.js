@@ -28,10 +28,10 @@ const crypto = require('crypto');
 
 const PRODUCT_SECRET = 'CS_INV_L10_2026_SECRET';
 
-// 默认生产参数（内测 NC）
+// 默认生产参数（内测 CN；NC 为内测自造码，不在手机 App ISO 3166 白名单中，扫描会报 SN 格式错误）
 const DEFAULTS = {
   manufacturer:  'H1',   // 厂商码 H1=总部1号工厂
-  country:       'NC',   // NC=内测（ISO 3166-1 alpha-2）
+  country:       'CN',   // CN=中国（App 白名单内）
   grade:         'A',    // 客户等级 A=战略大客户
   customerStart: 1,     // 客户流水起始
   year:          2025,  // 生产年份
@@ -192,21 +192,13 @@ function computePin(sn) {
 }
 
 // ==================== 二维码 Payload ====================
+// App (sn_utils.dart parseQRCode) 支持格式:
+//   "SN:<sn> PIN:<pin>" → 自动提取 SN+PIN，直接绑定免弹窗
+//   "https://xxx/bind?sn=..&pin=.." → 自动提取
+//   纯 "SN:<sn>" → 无 PIN，App 弹窗要求手动输入
+// 对齐 tools/sn_batch_gui.py 风格并追加 PIN，保证 App 免弹窗绑定
 function qrcodePayload(dev) {
-  const link = `${process.env.BASE_URL || ''}/scenario.html?sn=${encodeURIComponent(dev.sn)}`;
-  const parsed = parseSN(dev.sn);
-  return JSON.stringify({
-    sn:        dev.sn,
-    pin:       dev.pin,
-    model:     'CS-L10-6K2',
-    rated_kw:  6.2,
-    country:   parsed ? parsed.country : 'NC',
-    year:      parsed ? parsed.year : null,
-    month:     parsed ? parsed.month : null,
-    grade:     parsed ? parsed.grade : null,
-    seq:       parsed ? parsed.seqNum : null,
-    link,
-  });
+  return `SN:${dev.sn} PIN:${dev.pin}`;
 }
 
 // ==================== 工厂函数 ====================

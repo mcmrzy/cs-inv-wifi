@@ -17,6 +17,12 @@
     #hud { position:fixed; inset:0; pointer-events:none; opacity:0; transition:opacity .5s; z-index:10; }
     #hud.show { opacity:1; }
     .panel { background:var(--card); backdrop-filter:blur(14px); border:1px solid var(--border); border-radius:14px; box-shadow:0 6px 24px rgba(0,0,0,.4), 0 0 18px rgba(0,212,255,.06); }
+    .kpi-col { display:flex; flex-direction:column; gap:8px; }
+    .kpi-card { padding:11px 20px; min-width:132px; text-align:center; border-left:3px solid transparent; }
+    .kpi-card:nth-child(1) { border-left-color:var(--amber); }
+    .kpi-card:nth-child(2) { border-left-color:var(--blue); }
+    .kpi-card:nth-child(3) { border-left-color:var(--green); }
+    .kpi-card:nth-child(4) { border-left-color:var(--orange); }
 
     #loading { position:fixed; inset:0; background:var(--bg); display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:999; gap:14px; }
     .spin { width:44px; height:44px; border:3px solid rgba(0,212,255,.2); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
@@ -24,9 +30,8 @@
     .ld-txt { font-size:15px; font-weight:600; color:var(--muted); }
     .ld-sub { font-size:12px; color:#4a6387; }
     @media (max-width:900px){
-      .kpi-col { top:auto; bottom:120px; left:8px; flex-direction:row; flex-wrap:wrap; }
+      .kpi-col { top:auto; bottom:120px; left:8px; flex-direction:row; flex-wrap:wrap; gap:6px; }
       .kpi-col .panel { min-width:74px; padding:8px 10px; }
-      .kpi-col .panel div:nth-child(2) { font-size:16px !important; }
       #topbar .wxgrid { display:none; }
     }
   </style>
@@ -36,54 +41,67 @@
 <div id="loading">
   <div class="spin"></div>
   <div class="ld-txt">正在构建 3D 场景…</div>
-  <div class="ld-sub">真实太阳轨迹 · 天气驱动光照 · 程序化别墅（可放 models/villa.glb 自动替换）</div>
+  <div class="ld-sub">真实太阳轨迹 · 天气驱动光照 · 程序化场景（可放 models/villa.glb 自动替换）</div>
 </div>
 
 <div id="hud">
-  <!-- 顶栏 -->
+  <!-- ═══ 顶栏：标题（左）· 天气（中）· 时间（右） ═══ -->
   <div id="topbar" style="position:absolute;top:12px;left:12px;right:12px;display:flex;gap:10px;align-items:flex-start">
     <a href="/" class="panel" style="pointer-events:auto;padding:10px 16px;color:var(--muted);font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">← 返回地图</a>
     <div style="flex:1;pointer-events:auto" class="panel">
-      <div style="display:flex;align-items:center;gap:14px;padding:12px 18px;flex-wrap:wrap">
-        <div>
-          <div style="font-size:17px;font-weight:700;color:var(--text)">🏠 别墅电站 3D</div>
-          <div style="font-size:12px;color:var(--muted);font-family:monospace;margin-top:2px" id="sSn">—</div>
-        </div>
-        <div class="wxgrid" style="display:flex;align-items:center;gap:10px">
-          <span id="wxIcon" style="font-size:32px">⛅</span>
-          <div style="display:grid;grid-template-columns:auto auto;gap:3px 12px;font-size:13px">
-            <span style="color:var(--muted)">天气</span><span id="wxTxt" style="color:var(--text);font-weight:600">—</span>
-            <span style="color:var(--muted)">温度</span><span id="wxTemp" style="color:var(--text);font-weight:600">—°C</span>
-            <span style="color:var(--muted)">辐照</span><span id="wxIrr" style="color:var(--amber);font-weight:700">—</span>
-            <span style="color:var(--muted)">日照</span><span id="wxDay" style="color:var(--amber);font-weight:600">—</span>
+      <div style="display:flex;align-items:center;gap:18px;padding:10px 18px;flex-wrap:wrap;min-height:52px">
+
+        <!-- 标题区 -->
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#0ea5e9,#2563eb);display:flex;align-items:center;justify-content:center;font-size:19px;box-shadow:0 2px 10px rgba(37,99,235,.4)">⚡</div>
+          <div>
+            <div style="font-size:16px;font-weight:800;color:var(--text);letter-spacing:.3px;line-height:1.2">模拟电站</div>
+            <div style="font-size:11px;color:var(--muted);font-family:monospace" id="sSn">—</div>
           </div>
         </div>
-        <div style="margin-left:auto;font-size:12px;color:var(--muted);white-space:nowrap" id="sUpdated"></div>
+
+        <!-- 天气紧凑条 -->
+        <div class="wxgrid" style="display:flex;align-items:center;gap:14px;font-size:12.5px;margin-left:6px">
+          <span style="display:flex;align-items:center;gap:5px"><span id="wxIcon" style="font-size:19px">⛅</span><span id="wxTxt" style="color:var(--text);font-weight:700">—</span></span>
+          <span style="display:flex;align-items:center;gap:4px;color:var(--muted)">🌡<span id="wxTemp" style="color:var(--text);font-weight:700">—°C</span></span>
+          <span style="display:flex;align-items:center;gap:4px;color:var(--muted)">☀<span id="wxIrr" style="color:var(--amber);font-weight:800">—</span></span>
+          <span style="display:flex;align-items:center;gap:4px;color:var(--muted)"><span id="wxDayIcon" style="font-size:15px">☀️</span><span id="wxDay" style="color:var(--amber);font-weight:700">—</span></span>
+        </div>
+
+        <div style="margin-left:auto;font-size:11.5px;color:var(--muted);white-space:nowrap" id="sUpdated"></div>
       </div>
     </div>
   </div>
 
-  <!-- 左侧 KPI -->
-  <div class="kpi-col" style="position:absolute;top:96px;left:12px;display:flex;flex-direction:column;gap:8px;pointer-events:auto">
-    <div class="panel" style="padding:12px 18px;min-width:110px;text-align:center">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">☀ 光伏功率</div>
-      <div id="kPv" style="font-size:24px;font-weight:700;color:var(--amber)">—</div>
-      <div style="font-size:11px;color:#94a3b8">W</div>
+  <!-- ═══ 左侧 KPI（居中大数字卡） ═══ -->
+  <div class="kpi-col" style="position:absolute;top:104px;left:12px;pointer-events:auto">
+    <div class="panel kpi-card">
+      <div style="display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;color:var(--muted);margin-bottom:6px"><span style="font-size:14px">☀</span>光伏功率</div>
+      <div style="display:flex;align-items:baseline;justify-content:center;gap:4px">
+        <span id="kPv" style="font-size:23px;font-weight:800;color:var(--amber);font-variant-numeric:tabular-nums">—</span>
+        <span style="font-size:11px;color:#64748b">W</span>
+      </div>
     </div>
-    <div class="panel" style="padding:12px 18px;min-width:110px;text-align:center">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">⚡ 逆变输出</div>
-      <div id="kOut" style="font-size:24px;font-weight:700;color:var(--blue)">—</div>
-      <div style="font-size:11px;color:#94a3b8">W</div>
+    <div class="panel kpi-card">
+      <div style="display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;color:var(--muted);margin-bottom:6px"><span style="font-size:14px">⚡</span>逆变输出</div>
+      <div style="display:flex;align-items:baseline;justify-content:center;gap:4px">
+        <span id="kOut" style="font-size:23px;font-weight:800;color:var(--blue);font-variant-numeric:tabular-nums">—</span>
+        <span style="font-size:11px;color:#64748b">W</span>
+      </div>
     </div>
-    <div class="panel" style="padding:12px 18px;min-width:110px;text-align:center">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">🔋 电池 SOC</div>
-      <div id="kSoc" style="font-size:24px;font-weight:700;color:var(--green)">—</div>
-      <div style="font-size:11px;color:#94a3b8">%</div>
+    <div class="panel kpi-card">
+      <div style="display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;color:var(--muted);margin-bottom:6px"><span style="font-size:14px">🔋</span>电池 SOC</div>
+      <div style="display:flex;align-items:baseline;justify-content:center;gap:4px">
+        <span id="kSoc" style="font-size:23px;font-weight:800;color:var(--green);font-variant-numeric:tabular-nums">—</span>
+        <span style="font-size:11px;color:#64748b">%</span>
+      </div>
     </div>
-    <div class="panel" style="padding:12px 18px;min-width:110px;text-align:center">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">🏠 负载</div>
-      <div id="kLoad" style="font-size:24px;font-weight:700;color:var(--orange)">—</div>
-      <div style="font-size:11px;color:#94a3b8">W</div>
+    <div class="panel kpi-card">
+      <div style="display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;color:var(--muted);margin-bottom:6px"><span style="font-size:14px">🏠</span>负载</div>
+      <div style="display:flex;align-items:baseline;justify-content:center;gap:4px">
+        <span id="kLoad" style="font-size:23px;font-weight:800;color:var(--orange);font-variant-numeric:tabular-nums">—</span>
+        <span style="font-size:11px;color:#64748b">W</span>
+      </div>
     </div>
   </div>
 
@@ -940,7 +958,8 @@ function updateUI(d) {
   $('wxTxt').textContent = isD ? (wxTxtMap[code] || '晴') : '晴夜';
   $('wxTemp').textContent = (d.tempC != null ? d.tempC : '—') + '°C';
   $('wxIrr').textContent = Math.round(irr) + ' W/m²';
-  $('wxDay').textContent = isD ? '☀️ 日间' : '🌙 夜间';
+  $('wxDay').textContent = isD ? '日间' : '夜间';
+  $('wxDayIcon').textContent = isD ? '☀️' : '🌙';
   $('sUpdated').textContent = '更新: ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + (CITY ? ' · ' + CITY.name : '');
 
   updateEnvironment(d);
@@ -974,7 +993,7 @@ async function poll() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// 可选 GLB 模型（放 web/models/villa.glb 即可自动替换程序化别墅）
+// 可选 GLB 模型（放 web/models/villa.glb 即可自动替换程序化场景）
 function tryLoadModel() {
   if (!window.__gltfReady || typeof THREE.GLTFLoader === 'undefined') return;
   var loader = new THREE.GLTFLoader();
@@ -995,7 +1014,7 @@ function tryLoadModel() {
     pvMeshes = [];
     villaGroup.add(m);
     villaGroup.traverse(function (o) { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  }, undefined, function () { /* 无本地模型则保留程序化别墅 */ });
+  }, undefined, function () { /* 无本地模型则保留程序化场景 */ });
 }
 
 // ════════════════════════════════════════════════════════════════════════════

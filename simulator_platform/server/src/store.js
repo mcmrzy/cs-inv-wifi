@@ -34,9 +34,54 @@ function load() {
     if (raw.devices) Object.assign(state.devices, raw.devices);
     if (raw.cities) Object.assign(state.cities, raw.cities);
     if (raw.telemetry) Object.assign(state.telemetry, raw.telemetry);
+
+    // 迁移：二维码内容统一为 "SN:<sn> PIN:<pin>"（App parseQRCode 免弹窗绑定格式），
+    // 旧版可能是纯 "SN:<sn>" 或 JSON 对象字符串
+    let migrated = false;
+    for (const dev of Object.values(state.devices)) {
+      if (dev && dev.qrcode !== `SN:${dev.sn} PIN:${dev.pin}`) {
+        dev.qrcode = `SN:${dev.sn} PIN:${dev.pin}`;
+        migrated = true;
+      }
+    }
+    if (migrated) persist();
+
+    // 国家码迁移：NC → CN（App 白名单），需在 qrcode 迁移后执行
+    migrateCountryNC();
   } catch (e) {
     console.error('[store] load failed:', e.message);
   }
+}
+
+// 国家码迁移：旧版默认国家码 NC（内测自造码，不在手机 App ISO 3166 白名单，
+// 扫码会报 "SN 号格式不正确"）→ CN。H1NC 前缀的老 SN 原地替换国家码并重算校验位，
+// 保持设备/城市绑定/遥测不变。
+function migrateCountryNC() {
+  const factory = require('./device-factory');
+  let changed = false;
+  for (const dev of Object.values(state.devices)) {
+    if (dev && dev.sn && /^H1NC/.test(dev.sn) && dev.sn.length === 16) {
+      const newSn = 'H1CN' + dev.sn.slice(4, 15) + factory.computeCheckDigit('H1CN' + dev.sn.slice(4, 15));
+      if (newSn !== dev.sn) {
+        // 先迁移 city 绑定（sn 引用）
+        for (const city of Object.values(state.cities)) {
+          if (city.sn === dev.sn) city.sn = newSn;
+        }
+        if (state.telemetry[dev.sn]) {
+          state.telemetry[newSn] = state.telemetry[dev.sn];
+          delete state.telemetry[dev.sn];
+        }
+        delete state.devices[dev.sn];
+        dev.sn = newSn;
+        dev.qrcode = `SN:${newSn} PIN:${dev.pin}`;
+        if (dev.country === 'NC') dev.country = 'CN';
+        state.devices[newSn] = dev;
+        changed = true;
+        console.log(`[store] migrate SN ${dev.sn} → ${newSn}`);
+      }
+    }
+  }
+  if (changed) persist();
 }
 
 function persist() {

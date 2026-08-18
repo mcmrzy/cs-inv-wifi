@@ -40,7 +40,8 @@ const App = (() => {
   function showDevice(dev) {
     document.getElementById('m-city').textContent = dev.city_name + '（已认领）';
     document.getElementById('m-prov').textContent = dev.province + ' · CS-L10-6K2 ' + dev.rated_kw + 'kW';
-    const qrPayload = dev.qrcode || JSON.stringify({ sn: dev.sn, pin: dev.pin });
+    // 二维码内容为 "SN:<sn> PIN:<pin>"（App parseQRCode 免弹窗绑定格式）
+    const qrPayload = `SN:${dev.sn} PIN:${dev.pin}`;
     showModal(`
       <div class="qr-block">
         <div class="qr-label">设备二维码</div>
