@@ -1,0 +1,24 @@
+# Node
+node_modules/
+npm-debug.log*
+package-lock.json.tmp
+
+# 运行数据（不要提交）
+server/data/
+
+# 环境变量（含凭据）
+.env
+*.local
+
+# 构建/缓存
+dist/
+build/
+*.log
+npm-cache/
+
+# 临时/调试
+tmp/
+*.bak
+*.orig
+.DS_Store
+Thumbs.db

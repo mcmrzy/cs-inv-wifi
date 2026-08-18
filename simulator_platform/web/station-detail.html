@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>电站详情</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --dark-900:#060a12; --dark-800:#0d1220; --dark-700:#111827;
+      --dark-600:#1a2235; --dark-500:#243050;
+      --neon-blue:#38bdf8; --neon-green:#34d399; --neon-amber:#fbbf24;
+      --neon-red:#f87171; --neon-purple:#a78bfa; --neon-orange:#fb923c;
+    }
+    body { background:var(--dark-900); color:#e2e8f0; font-family:system-ui,sans-serif; font-variant-numeric:tabular-nums; min-height:100vh; }
+
+    /* Layout */
+    .app { max-width:1400px; margin:0 auto; padding:12px; display:flex; flex-direction:column; gap:12px; }
+
+    /* Glass card */
+    .glass { background:rgba(13,18,32,0.88); backdrop-filter:blur(14px); border:1px solid rgba(255,255,255,0.07); border-radius:16px; }
+
+    /* Header */
+    .hdr { display:flex; align-items:center; gap:14px; padding:12px 18px; flex-wrap:wrap; }
+    .hdr-logo { width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,var(--neon-blue),var(--neon-green));display:flex;align-items:center;justify-content:center;flex-shrink:0; }
+    .hdr-logo svg { width:26px;height:26px;color:#ffffff; }
+    .hdr-title-main { font-size:16px;font-weight:700;color:#f1f5f9; }
+    .hdr-sn { font-size:12px;color:#64748b;font-family:monospace;margin-top:2px; }
+    .hdr-tags { display:flex;gap:6px;margin-top:4px; }
+    .tag { font-size:11px;padding:2px 8px;border-radius:6px;background:var(--dark-600);color:#64748b; }
+    .online-dot { width:8px;height:8px;border-radius:50%;background:var(--dark-500); }
+    .online-dot.on { background:var(--neon-green);box-shadow:0 0 6px var(--neon-green); }
+    .online-txt { font-size:13px;color:#64748b;margin-left:4px; }
+    .mode-tag { font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px; }
+    .mode-fault { background:rgba(248,113,113,0.2);color:#f87171;border:1px solid rgba(248,113,113,0.3); }
+    .mode-discharge { background:rgba(251,146,60,0.2);color:#fb923c;border:1px solid rgba(251,146,60,0.3); }
+    .mode-pvcharge { background:rgba(52,211,153,0.2);color:#34d399;border:1px solid rgba(52,211,153,0.3); }
+    .mode-accharge { background:rgba(52,211,153,0.2);color:#34d399;border:1px solid rgba(52,211,153,0.3); }
+    .mode-bypass { background:rgba(167,139,250,0.2);color:#a78bfa;border:1px solid rgba(167,139,250,0.3); }
+    .mode-standby { background:rgba(100,116,139,0.2);color:#94a3b8;border:1px solid rgba(100,116,139,0.3); }
+    .hdr-right { display:flex;align-items:center;gap:10px;margin-left:auto; }
+    .refresh-info { font-size:12px;color:#64748b;display:flex;align-items:center;gap:6px; }
+    .refresh-num { font-weight:700;color:#cbd5e1; }
+    .refresh-bar-wrap { width:90px;height:6px;background:var(--dark-600);border-radius:3px;overflow:hidden; }
+    .refresh-bar { height:100%;background:linear-gradient(90deg,var(--neon-blue),var(--neon-green));border-radius:3px;width:100%; }
+
+    /* KPI row */
+    .kpi-row { display:grid; grid-template-columns:repeat(8,1fr); gap:8px; }
+    .kpi-card { background:rgba(13,18,32,0.88);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:12px 8px;text-align:center; }
+    .kpi-label { font-size:11px;color:#64748b;margin-bottom:4px; }
+    .kpi-val { font-size:20px;font-weight:700; }
+    .kpi-unit { font-size:11px;color:#475569; }
+    .c-amber { color:var(--neon-amber); }
+    .c-blue   { color:var(--neon-blue); }
+    .c-green  { color:var(--neon-green); }
+    .c-orange { color:var(--neon-orange); }
+    .c-purple { color:var(--neon-purple); }
+    .c-slate  { color:#94a3b8; }
+
+    /* Main grid */
+    .main-grid { display:grid; grid-template-columns:1fr 360px; gap:12px; }
+
+    /* SVG scene panel */
+    .scene-panel { overflow:hidden; }
+    .scene-hdr { display:flex;align-items:center;justify-content:space-between;padding:10px 18px;border-bottom:1px solid rgba(255,255,255,0.04); }
+    .scene-title { font-size:14px;font-weight:700;color:#cbd5e1; }
+    .scene-legend { display:flex;gap:14px;font-size:12px;color:#64748b; }
+    .leg-item { display:flex;align-items:center;gap:5px; }
+    .leg-line { width:14px;height:2px;border-radius:1px; }
+    .scene-wrap { position:relative;height:340px;background:linear-gradient(to bottom,var(--dark-800),var(--dark-900)); }
+
+    /* Right panel */
+    .right-col { display:flex;flex-direction:column;gap:10px; }
+
+    /* Control panel */
+    .ctrl-hdr { padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.04); }
+    .ctrl-title { font-size:14px;font-weight:700;color:#cbd5e1; }
+    .ctrl-body { padding:14px;display:flex;flex-direction:column;gap:10px; }
+    .ctrl-row3 { display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px; }
+    .btn { padding:8px;border-radius:8px;font-size:13px;font-weight:700;border:none;cursor:pointer;text-align:center;transition:filter 0.15s; }
+    .btn:hover { filter:brightness(1.15); }
+    .btn-on  { background:rgba(16,185,129,0.2);border:1px solid rgba(16,185,129,0.4);color:#34d399; }
+    .btn-off { background:rgba(220,38,38,0.2);border:1px solid rgba(220,38,38,0.4);color:#f87171; }
+    .btn-qry { background:var(--dark-600);border:1px solid var(--dark-500);color:#94a3b8; }
+    .ctrl-row { display:flex;align-items:center;gap:6px; }
+    .ctrl-lbl { font-size:12px;color:#64748b;width:68px;flex-shrink:0; }
+    .ctrl-input { flex:1;background:var(--dark-700);border:1px solid var(--dark-500);border-radius:8px;padding:6px 8px;font-size:12px;color:#e2e8f0;outline:none; }
+    .ctrl-input:focus { border-color:var(--neon-blue); }
+    .ctrl-unit { font-size:12px;color:#64748b; }
+    .btn-set { padding:6px 10px;border-radius:8px;background:rgba(56,189,248,0.2);border:1px solid rgba(56,189,248,0.4);color:var(--neon-blue);font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:filter 0.15s; }
+    .btn-set:hover { filter:brightness(1.15); }
+
+    /* Tabs panel */
+    .tabs-panel { flex:1;display:flex;flex-direction:column;overflow:hidden; }
+    .tabs-row { display:flex;border-bottom:1px solid rgba(255,255,255,0.04); }
+    .tab-btn { flex:1;padding:10px 4px;font-size:13px;font-weight:700;color:#64748b;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s; }
+    .tab-btn:hover { color:#94a3b8; }
+    .tab-btn.active { color:var(--neon-blue);border-bottom-color:var(--neon-blue); }
+    .tab-content { flex:1;overflow-y:auto;padding:12px;max-height:360px; }
+    .tab-content::-webkit-scrollbar { width:4px; }
+    .tab-content::-webkit-scrollbar-track { background:transparent; }
+    .tab-content::-webkit-scrollbar-thumb { background:var(--dark-600);border-radius:2px; }
+
+    /* Lamp indicators */
+    .lamp { width:10px;height:10px;border-radius:50%;display:inline-block; }
+    .lamp-on  { background:var(--neon-green);box-shadow:0 0 5px var(--neon-green); }
+    .lamp-off { background:var(--dark-600); }
+    .lamp-fault { background:var(--neon-red);box-shadow:0 0 5px var(--neon-red);animation:blink 0.8s infinite; }
+    @keyframes blink { 0%,100%{opacity:1}50%{opacity:0.2} }
+
+    /* Params grid */
+    .params-grid { display:grid;grid-template-columns:1fr 1fr;gap:4px; }
+    .param-row { display:flex;justify-content:space-between;align-items:center;background:var(--dark-700);border-radius:8px;padding:7px 10px; }
+    .param-k { font-size:12px;color:#64748b; }
+    .param-v { font-size:12px;font-weight:600;color:#e2e8f0; }
+    .param-v.blue { color:var(--neon-blue); }
+
+    /* Status bits */
+    .bits-wrap { display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:var(--dark-700);border-radius:8px;margin-bottom:10px; }
+    .bit-item { display:flex;align-items:center;gap:4px;font-size:11px; }
+    .bit-on { color:#e2e8f0; }
+    .bit-off { color:#475569; }
+
+    /* Alarm list */
+    .alarm-item { display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--dark-700);font-size:12px; }
+    .alarm-err { color:var(--neon-red); }
+    .alarm-warn { color:var(--neon-amber); }
+    .alarm-msg { flex:1;color:#e2e8f0; }
+    .alarm-time { color:#475569;font-family:monospace; }
+
+    /* Cmd log */
+    .cmd-item { display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--dark-700);font-size:12px; }
+    .cmd-time { color:#475569;font-family:monospace;flex-shrink:0; }
+    .cmd-name { color:var(--neon-blue);font-weight:700;flex-shrink:0; }
+    .cmd-ok { color:var(--neon-green);font-weight:700; }
+    .cmd-err { color:var(--neon-red);font-weight:700; }
+
+    /* Toast */
+    .toast { position:fixed;bottom:24px;right:24px;padding:10px 18px;border-radius:12px;font-size:13px;font-weight:600;opacity:0;transition:opacity 0.3s;z-index:999;pointer-events:none;box-shadow:0 4px 20px rgba(0,0,0,0.5); }
+    .toast-ok  { background:var(--neon-green);color:#060a12; }
+    .toast-err { background:var(--neon-red);color:white; }
+
+    /* Back btn */
+    .btn-back { display:flex;align-items:center;gap:5px;padding:7px 14px;border-radius:8px;background:var(--dark-600);border:1px solid var(--dark-500);color:#94a3b8;font-size:13px;font-weight:700;cursor:pointer;text-decoration:none;transition:all 0.15s;flex-shrink:0; }
+    .btn-back:hover { background:var(--dark-500);color:#e2e8f0; }
+
+    /* SVG diagram styles */
+    .flow-line { stroke-linecap:round; stroke-dashoffset:30; animation:dash 1.4s linear infinite; }
+    @keyframes dash { to{stroke-dashoffset:0} }
+    .pv-glow { animation:pvShimmer 3s ease-in-out infinite alternate; }
+    @keyframes pvShimmer { from{filter:brightness(1)}to{filter:brightness(1.3)} }
+    .soc-display { text-shadow:0 0 18px rgba(52,211,153,0.5); }
+    input[type=number]::-webkit-inner-spin-button { opacity:0.3; }
+    input[type=number] { font-variant-numeric:tabular-nums; }
+  </style>
+
+<style>
+/* ── 排版修复（保留，主题为深色科技风） ── */
+/* SVG 内深色底块保持深色科技风 */
+/* 排版修复：窄屏自适应 */
+@media (max-width:1100px){ .main-grid{grid-template-columns:1fr} .kpi-row{grid-template-columns:repeat(4,1fr)} }
+@media (max-width:640px){ .kpi-row{grid-template-columns:repeat(2,1fr)} .hdr{flex-direction:column;align-items:flex-start} }
+
+/* ── 科技感增强：body 渐变背景 + 卡片发光 ── */
+body {
+  background:
+    radial-gradient(1000px 500px at 85% -10%, rgba(37,99,235,.18), transparent 60%),
+    radial-gradient(800px 500px at -10% 110%, rgba(0,212,255,.08), transparent 60%),
+    var(--dark-900);
+  background-attachment: fixed;
+}
+.glass { box-shadow: 0 0 24px rgba(0,180,255,.06), 0 6px 24px rgba(0,0,0,.35); }
+.hdr { background:linear-gradient(120deg, rgba(13,18,32,.92), rgba(16,24,44,.88)); }
+.kpi-card { position:relative; overflow:hidden; }
+.kpi-card::after {
+  content:''; position:absolute; top:0; left:0; right:0; height:1px;
+  background:linear-gradient(90deg, transparent, rgba(56,189,248,.5), transparent);
+}
+.c-amber, .c-blue, .c-green, .c-orange, .c-purple { text-shadow:0 0 14px currentColor; }
+.scene-wrap::before {
+  content:''; position:absolute; inset:0; pointer-events:none;
+  background-image:
+    linear-gradient(rgba(56,189,248,.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56,189,248,.05) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+.scene-title, .ctrl-title { letter-spacing:.5px; }
+.btn-on, .btn-off, .btn-set { box-shadow:0 0 12px currentColor; }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- Header -->
+  <header class="glass hdr">
+    <a href="/" class="btn-back">← 地图</a>
+    <div class="hdr-logo">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+    </div>
+    <div>
+      <div class="hdr-title-main" id="titleEl">电站详情</div>
+      <div class="hdr-sn" id="snEl">—</div>
+      <div class="hdr-tags">
+        <span class="tag" id="countryTag">NC · A</span>
+        <span class="tag" id="mfgTag">CS-L10-6K2</span>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px">
+      <span class="online-dot" id="onlineDot"></span>
+      <span class="online-txt" id="statusTxt">离线</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px">
+      <span style="font-size:13px;color:#64748b">运行模式</span>
+      <span class="mode-tag mode-standby" id="modeTag">—</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;font-size:13px">
+      <span id="wxIcon">—</span>
+      <span style="color:#64748b" id="wxTxt">—</span>
+      <span style="color:#64748b">|</span>
+      <span id="wxTemp" style="color:#94a3b8">—°C</span>
+      <span style="color:#64748b">|</span>
+      <span id="wxIrr" style="color:var(--neon-amber);font-weight:700">— W/m²</span>
+    </div>
+    <div class="hdr-right">
+      <div class="refresh-info">
+        <span>刷新</span>
+        <span class="refresh-num" id="countdown">2.5</span><span>s</span>
+      </div>
+      <div class="refresh-bar-wrap">
+        <div class="refresh-bar" id="refreshBar"></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- KPI row -->
+  <div class="kpi-row">
+    <div class="kpi-card"><div class="kpi-label">☀ 光伏功率</div><div class="kpi-val c-amber" id="kpv">—</div><div class="kpi-unit">W</div></div>
+    <div class="kpi-card"><div class="kpi-label">⚡ 逆变输出</div><div class="kpi-val c-blue" id="kout">—</div><div class="kpi-unit">W</div></div>
+    <div class="kpi-card"><div class="kpi-label">🔋 电池 SOC</div><div class="kpi-val c-green soc-display" id="ksoc">—</div><div class="kpi-unit">%</div></div>
+    <div class="kpi-card"><div class="kpi-label">⚡ 电池功率</div><div class="kpi-val c-purple" id="kbatw">—</div><div class="kpi-unit">W</div></div>
+    <div class="kpi-card"><div class="kpi-label">🏠 负载</div><div class="kpi-val c-orange" id="kload">—</div><div class="kpi-unit">W</div></div>
+    <div class="kpi-card"><div class="kpi-label">🏭 电网电压</div><div class="kpi-val c-purple" id="kgrid">—</div><div class="kpi-unit">V</div></div>
+    <div class="kpi-card"><div class="kpi-label">🌡 Boost温度</div><div class="kpi-val c-slate" id="kboost">—</div><div class="kpi-unit">°C</div></div>
+    <div class="kpi-card"><div class="kpi-label">⚡ Inv温度</div><div class="kpi-val c-slate" id="kinvt">—</div><div class="kpi-unit">°C</div></div>
+  </div>
+
+  <!-- 发电统计栏（今日/累计） -->
+  <div class="kpi-row" style="grid-template-columns:repeat(4,1fr)">
+    <div class="kpi-card"><div class="kpi-label">📈 今日发电</div><div class="kpi-val c-green" id="kEGenT">—</div><div class="kpi-unit">kWh</div></div>
+    <div class="kpi-card"><div class="kpi-label">🗂 累计发电</div><div class="kpi-val c-blue" id="kEGenTot">—</div><div class="kpi-unit">kWh</div></div>
+    <div class="kpi-card"><div class="kpi-label">🔋 今日充电</div><div class="kpi-val c-purple" id="kEBatChgT">—</div><div class="kpi-unit">kWh</div></div>
+    <div class="kpi-card"><div class="kpi-label">⚡ 今日放电</div><div class="kpi-val c-orange" id="kEBatDisT">—</div><div class="kpi-unit">kWh</div></div>
+  </div>
+
+  <!-- Main content -->
+  <div class="main-grid">
+
+    <!-- Left: SVG system diagram -->
+    <div class="glass scene-panel">
+      <div class="scene-hdr">
+        <span class="scene-title">⚡ 电站系统示意图</span>
+        <div class="scene-legend">
+          <span class="leg-item"><span class="leg-line" style="background:var(--neon-amber)"></span>光伏</span>
+          <span class="leg-item"><span class="leg-line" style="background:var(--neon-blue)"></span>AC</span>
+          <span class="leg-item"><span class="leg-line" style="background:var(--neon-green)"></span>DC</span>
+          <span class="leg-item"><span class="leg-line" style="background:var(--neon-orange)"></span>负载</span>
+        </div>
+      </div>
+      <div class="scene-wrap">
+        <svg id="sysSvg" viewBox="0 0 700 340" style="position:absolute;inset:0;width:100%;height:100%" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="mY" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><polygon points="0,0 7,3.5 0,7" fill="#fbbf24"/></marker>
+            <marker id="mB" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><polygon points="0,0 7,3.5 0,7" fill="#38bdf8"/></marker>
+            <marker id="mG" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><polygon points="0,0 7,3.5 0,7" fill="#34d399"/></marker>
+            <marker id="mO" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><polygon points="0,0 7,3.5 0,7" fill="#fb923c"/></marker>
+            <marker id="mR" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto"><polygon points="0,0 7,3.5 0,7" fill="#f87171"/></marker>
+            <linearGradient id="gGreen" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#16a34a"/>
+              <stop offset="100%" stop-color="#4ade80"/>
+            </linearGradient>
+          </defs>
+
+          <!-- AC bus -->
+          <rect x="110" y="190" width="480" height="16" rx="8" fill="#0d1e30" stroke="#1e3a5a" stroke-width="1"/>
+          <text x="350" y="201" text-anchor="middle" fill="#38bdf8" font-size="8" font-weight="bold" font-family="monospace" letter-spacing="1">~ AC 汇流母线</text>
+
+          <!-- DC bus -->
+          <rect x="170" y="258" width="300" height="12" rx="6" fill="#0a1e14" stroke="#1a4a2e" stroke-width="1"/>
+          <text x="320" y="266" text-anchor="middle" fill="#34d399" font-size="7.5" font-weight="bold" font-family="monospace">= DC 直流母线</text>
+
+          <!-- Flow lines -->
+          <line id="lPvInv"   x1="350" y1="62" x2="350" y2="95" stroke="#fbbf24" stroke-width="2.5" stroke-dasharray="8,6" class="flow-line" marker-end="url(#mY)" opacity="0"/>
+          <line id="lInvBus"  x1="350" y1="145" x2="350" y2="190" stroke="#38bdf8" stroke-width="2.5" stroke-dasharray="8,6" class="flow-line" marker-end="url(#mB)" opacity="0"/>
+          <line id="lBatDcL"   x1="612" y1="140" x2="470" y2="258" stroke="#34d399" stroke-width="2" stroke-dasharray="6,5" class="flow-line" marker-end="url(#mG)" opacity="0"/>
+          <line id="lBusGrid" x1="110" y1="195" x2="80" y2="195" stroke="#a78bfa" stroke-width="2" stroke-dasharray="6,5" class="flow-line" marker-end="url(#mB)" opacity="0"/>
+          <line id="lBusLoad" x1="590" y1="195" x2="620" y2="238" stroke="#fb923c" stroke-width="2" stroke-dasharray="6,5" class="flow-line" marker-end="url(#mO)" opacity="0"/>
+
+          <!-- PV Array -->
+          <g id="gPv">
+            <text x="350" y="18" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="bold" font-family="monospace">☀ 光伏阵列</text>
+            <rect id="pvP1" x="282" y="24" width="42" height="28" rx="3" fill="#1e3a6e" stroke="#2563eb" stroke-width="1" opacity="0.9"/>
+            <rect id="pvP2" x="329" y="24" width="42" height="28" rx="3" fill="#1e3a6e" stroke="#2563eb" stroke-width="1" opacity="0.9"/>
+            <rect id="pvP3" x="376" y="24" width="42" height="28" rx="3" fill="#1e3a6e" stroke="#2563eb" stroke-width="1" opacity="0.9"/>
+            <text id="pvW1" x="303" y="41" text-anchor="middle" fill="#fbbf24" font-size="8" font-weight="bold" font-family="monospace" opacity="0"></text>
+            <text id="pvW2" x="350" y="41" text-anchor="middle" fill="#fbbf24" font-size="8" font-weight="bold" font-family="monospace" opacity="0"></text>
+            <text id="pvW3" x="397" y="41" text-anchor="middle" fill="#fbbf24" font-size="8" font-weight="bold" font-family="monospace" opacity="0"></text>
+            <text id="pvTot" x="350" y="64" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="bold" font-family="monospace">— W</text>
+            <text id="pvVolt" x="350" y="74" text-anchor="middle" fill="#64748b" font-size="7.5" font-family="monospace">Vpv1:—V  Vpv2:—V</text>
+          </g>
+
+          <!-- Inverter -->
+          <g id="gInv" style="cursor:pointer" onclick="switchTab('params')">
+            <rect x="292" y="97" width="116" height="48" rx="8" fill="#0d1628" stroke="#2563eb" stroke-width="1.5"/>
+            <rect x="292" y="97" width="116" height="48" rx="8" fill="none" stroke="#38bdf8" stroke-width="0.5" opacity="0.3"/>
+            <text x="350" y="109" text-anchor="middle" fill="#38bdf8" font-size="9" font-weight="bold" font-family="monospace">⚡ 逆变器</text>
+            <text x="350" y="119" text-anchor="middle" fill="#64748b" font-size="7" font-family="monospace">CS-L10-6K2 · 6.2kW</text>
+            <text id="iAcV" x="316" y="134" text-anchor="middle" fill="#38bdf8" font-size="12" font-weight="bold" font-family="monospace">—</text>
+            <text x="316" y="142" text-anchor="middle" fill="#64748b" font-size="7" font-family="monospace">V</text>
+            <text id="iHz" x="350" y="134" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="bold" font-family="monospace">—</text>
+            <text x="350" y="142" text-anchor="middle" fill="#64748b" font-size="7" font-family="monospace">Hz</text>
+            <text id="iW" x="384" y="134" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="bold" font-family="monospace">—</text>
+            <text x="384" y="142" text-anchor="middle" fill="#64748b" font-size="7" font-family="monospace">W</text>
+            <text id="iTemp" x="350" y="151" text-anchor="middle" fill="#64748b" font-size="7" font-family="monospace">Boost —°C · Inv —°C</text>
+          </g>
+
+          <!-- Battery -->
+          <g id="gBat">
+            <rect x="612" y="102" width="68" height="78" rx="8" fill="#0a1e14" stroke="#16a34a" stroke-width="1.5"/>
+            <rect x="612" y="102" width="68" height="78" rx="8" fill="none" stroke="#34d399" stroke-width="0.5" opacity="0.25"/>
+            <text x="646" y="116" text-anchor="middle" fill="#34d399" font-size="8" font-weight="bold" font-family="monospace">🔋 电池</text>
+            <text id="bSoc" x="646" y="144" text-anchor="middle" fill="#34d399" font-size="22" font-weight="bold" font-family="monospace">—</text>
+            <text x="646" y="153" text-anchor="middle" fill="#64748b" font-size="7" font-family="monospace">% SOC</text>
+            <rect x="620" y="157" width="52" height="7" rx="3.5" fill="#0d2a1a"/>
+            <rect id="bFill" x="620" y="157" width="0" height="7" rx="3.5" fill="url(#gGreen)" opacity="0"/>
+            <text id="bWatt" x="646" y="172" text-anchor="middle" fill="#34d399" font-size="9" font-weight="bold" font-family="monospace">— W</text>
+            <text id="bV" x="646" y="181" text-anchor="middle" fill="#64748b" font-size="7.5" font-family="monospace">BatV:—V</text>
+          </g>
+
+          <!-- Grid -->
+          <g id="gGrid">
+            <rect x="16" y="174" width="64" height="42" rx="7" fill="#0d0a1e" stroke="#6d28d9" stroke-width="1.5"/>
+            <text x="48" y="187" text-anchor="middle" fill="#a78bfa" font-size="8" font-weight="bold" font-family="monospace">🏭 电网</text>
+            <text id="gV" x="48" y="200" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="bold" font-family="monospace">—</text>
+            <text id="gHz" x="48" y="211" text-anchor="middle" fill="#64748b" font-size="7" font-family="monospace">— Hz</text>
+          </g>
+
+          <!-- Load -->
+          <g id="gLoad">
+            <rect x="616" y="218" width="68" height="42" rx="7" fill="#1e1208" stroke="#c2410c" stroke-width="1.5"/>
+            <text x="650" y="231" text-anchor="middle" fill="#fb923c" font-size="8" font-weight="bold" font-family="monospace">🏠 负载</text>
+            <text id="lWatt" x="650" y="245" text-anchor="middle" fill="#fb923c" font-size="12" font-weight="bold" font-family="monospace">—</text>
+            <text id="lPct" x="650" y="256" text-anchor="middle" fill="#64748b" font-size="7" font-family="monospace">—%</text>
+          </g>
+
+          <!-- Direction labels -->
+          <text id="tPv"   x="360" y="82"  fill="#fbbf24" font-size="8" font-weight="bold" font-family="monospace" opacity="0">↓ PV</text>
+          <text id="tAc"   x="360" y="170" fill="#38bdf8" font-size="8" font-weight="bold" font-family="monospace" opacity="0">↓ AC</text>
+          <text id="tBat"  x="530" y="200" fill="#34d399" font-size="8" font-weight="bold" font-family="monospace" opacity="0">↔ DC</text>
+          <text id="tGrid" x="88"  y="193" fill="#a78bfa" font-size="8" font-weight="bold" font-family="monospace" opacity="0">↔ 电网</text>
+          <text id="tLoad" x="600" y="218" fill="#fb923c" font-size="8" font-weight="bold" font-family="monospace" opacity="0">→ 负载</text>
+
+          <!-- Status bar -->
+          <rect x="0" y="310" width="700" height="30" fill="#060a12" opacity="0.9"/>
+          <line x1="0" y1="310" x2="700" y2="310" stroke="#1e293b" stroke-width="0.5"/>
+          <circle id="statusLed" cx="14" cy="325" r="5" fill="#1e293b"/>
+          <text x="24" y="329" fill="#64748b" font-size="9" font-family="monospace">SysStatus:</text>
+          <text id="sysTxt" x="90" y="329" fill="#94a3b8" font-size="9" font-family="monospace" font-weight="bold">0x0000</text>
+          <line x1="248" y1="314" x2="248" y2="334" stroke="#1e293b" stroke-width="0.5"/>
+          <text x="254" y="322" fill="#475569" font-size="8" font-family="monospace">Ctrl Rev:</text>
+          <text id="ctrlRev" x="298" y="322" fill="#94a3b8" font-size="8" font-family="monospace" font-weight="bold">0</text>
+          <text x="254" y="332" fill="#475569" font-size="8" font-family="monospace">告警:</text>
+          <text id="alarmCnt" x="278" y="332" fill="#94a3b8" font-size="8" font-family="monospace" font-weight="bold">0</text>
+          <text x="278" y="322" fill="#475569" font-size="8" font-family="monospace">条</text>
+          <text id="sysTime" x="660" y="325" text-anchor="end" fill="#475569" font-size="8" font-family="monospace">—</text>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Right: Control + Details -->
+    <div class="right-col">
+
+      <!-- Control -->
+      <div class="glass">
+        <div class="ctrl-hdr"><div class="ctrl-title">🎛 控制命令</div></div>
+        <div class="ctrl-body">
+          <div class="ctrl-row3">
+            <button class="btn btn-on" onclick="sendCmd('power_on',{})">▶ 开机</button>
+            <button class="btn btn-off" onclick="sendCmd('power_off',{})">■ 关机</button>
+            <button class="btn btn-qry" onclick="sendCmd('query_telemetry',{})">🔍 查询</button>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div class="ctrl-row">
+              <span class="ctrl-lbl">充电限流</span>
+              <input id="ciCharge" class="ctrl-input" type="number" min="10" max="60" placeholder="10~60A">
+              <span class="ctrl-unit">A</span>
+              <button class="btn-set" onclick="sendCmd('set_charge_limit',{value:parseInt(document.getElementById('ciCharge').value)||0})">设</button>
+            </div>
+            <div class="ctrl-row">
+              <span class="ctrl-lbl">AC充电电流</span>
+              <input id="ciAc" class="ctrl-input" type="number" min="0" max="30" placeholder="0~30A">
+              <span class="ctrl-unit">A</span>
+              <button class="btn-set" onclick="sendCmd('set_ac_charge_current',{value:parseInt(document.getElementById('ciAc').value)||0})">设</button>
+            </div>
+            <div class="ctrl-row">
+              <span class="ctrl-lbl">输出电压</span>
+              <input id="ciVolt" class="ctrl-input" type="number" min="200" max="240" placeholder="200~240V">
+              <span class="ctrl-unit">V</span>
+              <button class="btn-set" onclick="sendCmd('set_output_voltage',{value:parseInt(document.getElementById('ciVolt').value)||220})">设</button>
+            </div>
+            <div class="ctrl-row">
+              <span class="ctrl-lbl">SOC 下限</span>
+              <input id="ciSoc" class="ctrl-input" type="number" min="5" max="100" placeholder="5~100%">
+              <span class="ctrl-unit">%</span>
+              <button class="btn-set" onclick="sendCmd('set_soc_cutoff',{value:parseInt(document.getElementById('ciSoc').value)||20})">设</button>
+            </div>
+            <div class="ctrl-row">
+              <span class="ctrl-lbl">蜂鸣器</span>
+              <button class="btn btn-qry" style="flex:1;text-align:left;padding-left:10px" onclick="sendCmd('buzzer_en',{value:buzzerToggle()})">🔔 查询当前状态</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="glass tabs-panel">
+        <div class="tabs-row">
+          <button class="tab-btn active" data-tab="params" onclick="switchTab('params')">运行参数</button>
+          <button class="tab-btn" data-tab="status" onclick="switchTab('status')">状态位</button>
+          <button class="tab-btn" data-tab="alarms" onclick="switchTab('alarms')">告警</button>
+          <button class="tab-btn" data-tab="cmdlog" onclick="switchTab('cmdlog')">命令日志</button>
+        </div>
+        <div class="tab-content" id="tabContent">
+          <div id="tab-params" class="tab-c"></div>
+          <div id="tab-status" class="tab-c" style="display:none"></div>
+          <div id="tab-alarms" class="tab-c" style="display:none"></div>
+          <div id="tab-cmdlog" class="tab-c" style="display:none"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<script>
+const SN = new URLSearchParams(location.search).get('sn') || 'TEST-SN-001';
+const POLL_MS = 2500;
+const $ = id => document.getElementById(id);
+
+const SYS_NAMES=['待机','故障','充电','放电','PV充电','AC充电','Gen充电','AC旁路','至负载','PV输入','AC输入','Gen输入'];
+const ALARM_NAMES=['PV过压','PV过流','BUS过压','BUS欠压','电池过充','电池过放',
+  'Inv过载','Inv短路','Inv过温','Inv故障','BMS通信','BMS过压',
+  'BMS欠压','BMS过温','电网过压','电网欠压','电网过频','电网欠频',
+  '继电器故障','温度过高','风机故障','传感器故障','EEPROM错','通信故障'];
+
+let buzzerState = null;
+function buzzerToggle() { buzzerState = buzzerState === null ? 1 : (buzzerState ? 0 : 1); return buzzerState; }
+const cmdLog = [];
+let lastData = null;
+let alarms = [];
+
+function showToast(msg, ok = true) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+  t.style.opacity = '1';
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.style.opacity = '0', 2800);
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === tab);
+  });
+  document.querySelectorAll('.tab-c').forEach(el => el.style.display = 'none');
+  const c = $('tab-' + tab);
+  if (c) c.style.display = '';
+  if (tab === 'status') renderStatus();
+  if (tab === 'alarms') renderAlarms();
+  if (tab === 'cmdlog') renderCmdLog();
+}
+
+async function sendCmd(action, args) {
+  showToast('→ ' + action + '…', true);
+  cmdLog.unshift({ ts: new Date().toLocaleTimeString('zh-CN',{hour12:false}), cmd: action, args: JSON.stringify(args), result: '…', applied: '—' });
+  if (cmdLog.length > 15) cmdLog.pop();
+  if ($('tab-cmdlog').style.display !== 'none') renderCmdLog();
+  try {
+    const r = await fetch(`/api/devices/${SN}/control`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action, args }) });
+    const j = await r.json();
+    const ok = j.result === 'OK';
+    showToast(action + ' → ' + (ok ? '✅' : '❌') + ' ' + j.result + ' applied=' + (j.applied_value ?? '—'), ok);
+    cmdLog[0].result = j.result || 'ERR';
+    cmdLog[0].applied = j.applied_value ?? '—';
+    renderCmdLog();
+  } catch(e) {
+    showToast('❌ 发送失败: ' + e.message, false);
+    cmdLog[0].result = 'ERR';
+    renderCmdLog();
+  }
+}
+
+function renderParams(d) {
+  const fmt = (v,dec=1) => v==null?'—':(v/Math.pow(10,dec)).toFixed(dec);
+  const items = [
+    ['Ppv (W)', d.Ppv!=null?(d.Ppv/10).toFixed(0):'—'],
+    ['Vpv1 (V)', fmt(d.Vpv1,1)], ['Vpv2 (V)', fmt(d.Vpv2,1)],
+    ['BusVolt (V)', fmt(d.BusVolt,2)],
+    ['BoostTemp (°C)', fmt(d.BoostTemp,1)], ['InvTemp (°C)', fmt(d.InvertTemp,1)],
+    ['TransTemp (°C)', fmt(d.TransformerTemp,1)],
+    ['BatVolt (V)', fmt(d.BatVolt,2)], ['BatterySOC (%)', d.BatterySOC??'—'],
+    ['BatChgCurr (A)', fmt(d.BatChgCurr,1)], ['BatDisCurr (A)', fmt(d.BatDischgCurr,1)],
+    ['BatChrW (W)', d.BatChrWatt!=null?(d.BatChrWatt/10).toFixed(0):'—'],
+    ['BatDisW (W)', d.BatDisChrWatt!=null?(d.BatDisChrWatt/10).toFixed(0):'—'],
+    ['ACOutVolt (V)', fmt(d.ACOutputVolt,1)], ['ACOutFreq (Hz)', fmt(d.ACOutputFreq,2)],
+    ['OutputW (W)', d.OutputWatt!=null?(d.OutputWatt/10).toFixed(0):'—'],
+    ['GridVolt (V)', fmt(d.GridVolt,1)], ['GridFreq (Hz)', fmt(d.GridFreq,2)],
+    ['LoadPct (%)', fmt(d.LoadPercent,1)],
+    ['MpptFan (%)', d.MpptFanSpeed??'—'], ['InvFan (%)', d.InvFanSpeed??'—'],
+    ['EGen_today (kWh)', fmt(d.EGen_today,1)], ['EGen_total (kWh)', fmt(d.EGen_total,1)],
+    ['Epv_today (kWh)', fmt(d.Epv_today,1)],
+  ];
+  const ctrl = [
+    ['充电限流 (A)', d.maxChargeCurrent??'—'],
+    ['AC充电电流 (A)', d.acChargeCurrent??'—'],
+    ['输出电压 (V)', d.outputVoltage??'—'],
+    ['输出频率 (Hz)', d.outputFrequency??'—'],
+    ['SOC下限 (%)', d.socCutoff??'—'],
+    ['蜂鸣器', d.buzzerEn!=null?(d.buzzerEn?'开':'关'):'—'],
+    ['开机状态', d.powerOn!=null?(d.powerOn?'开机':'关机'):'—'],
+  ];
+  $('tab-params').innerHTML =
+    '<div style="font-size:12px;color:#64748b;font-weight:700;margin-bottom:8px">运行参数</div>' +
+    '<div class="params-grid">' + items.map(([k,v])=>`<div class="param-row"><span class="param-k">${k}</span><span class="param-v">${v}</span></div>`).join('') + '</div>' +
+    '<div style="font-size:12px;color:#64748b;font-weight:700;margin:12px 0 8px">当前设置</div>' +
+    '<div class="params-grid">' + ctrl.map(([k,v])=>`<div class="param-row"><span class="param-k">${k}</span><span class="param-v blue">${v}</span></div>`).join('') + '</div>';
+}
+
+function renderStatus() {
+  const sys = lastData ? (lastData.SysStatus || 0) : 0;
+  $('tab-status').innerHTML =
+    '<div class="bits-wrap">' + SYS_NAMES.map((n,i)=>{
+      const on=(sys>>i)&1;
+      return `<div class="bit-item"><span class="lamp ${i===1&&on?'lamp-fault':on?'lamp-on':'lamp-off'}"></span><span class="${on?'bit-on':'bit-off'}">${n}</span></div>`;
+    }).join('') + '</div>' +
+    '<div class="params-grid"><div class="param-row"><span class="param-k">SysStatus</span><span class="param-v" style="color:var(--neon-amber)">0x'+(sys||0).toString(16).toUpperCase().padStart(4,'0')+'</span></div>' +
+    SYS_NAMES.map((n,i)=>`<div class="param-row"><span class="param-k">${n}</span><span class="param-v" style="color:${(sys>>i)&1?'var(--neon-green)':'var(--dark-500)'}">${(sys>>i)&1?'●':'○'}</span></div>`).join('') + '</div>';
+}
+
+function renderAlarms() {
+  $('tab-alarms').innerHTML = alarms.length
+    ? alarms.map(a=>`<div class="alarm-item ${a.level==='error'?'alarm-err':'alarm-warn'}"><span>${a.level==='error'?'🚨':'⚠'}</span><span class="alarm-msg">${a.name}</span><span class="alarm-time">${new Date(a.ts).toLocaleTimeString('zh-CN',{hour12:false})}</span></div>`).join('')
+    : '<div style="text-align:center;color:#64748b;font-size:13px;padding:32px 0">✅ 当前无告警</div>';
+}
+
+function renderCmdLog() {
+  $('tab-cmdlog').innerHTML = cmdLog.length
+    ? cmdLog.map(l=>`<div class="cmd-item"><span class="cmd-time">${l.ts}</span><span class="cmd-name">${l.cmd}</span><span class="${l.result==='OK'?'cmd-ok':'cmd-err'}">${l.result}</span>${l.applied!=='—'&&l.applied!=='…'?`<span style="color:#94a3b8;font-size:11px">=${l.applied}</span>`:''}</div>`).join('')
+    : '<div style="text-align:center;color:#64748b;font-size:13px;padding:32px 0">暂无命令记录</div>';
+}
+
+function updateFlow(d) {
+  const sys = d ? (d.SysStatus || 0) : 0;
+  const pvOn = (sys & 0x0200) || (d && d.Ppv > 50);
+  const acOn = d && d.OutputWatt > 10;
+  const batChg = (sys & 0x0004) && d && (d.BatChrWatt||0) > 10;
+  const batDchg = (sys & 0x0008) && d && (d.BatDisChrWatt||0) > 10;
+  const loadOn = d && d.OutputWatt > 10;
+  const gridOn = (sys & 0x0400) || (sys & 0x0080);
+
+  function setOp(id, on, color) {
+    const el = $(id); if (!el) return;
+    el.setAttribute('opacity', on ? '1' : '0');
+    if (color) el.setAttribute('stroke', color);
+  }
+
+  setOp('lPvInv', pvOn, '#fbbf24');
+  setOp('lInvBus', acOn, '#38bdf8');
+  if (batChg) {
+    setOp('lBatDcL', true, '#34d399');
+    $('lBatDcL').setAttribute('marker-end','url(#mG)');
+    $('tBat').textContent = '→ 充';
+    $('tBat').setAttribute('fill','#34d399');
+  } else if (batDchg) {
+    setOp('lBatDcL', true, '#f87171');
+    $('lBatDcL').setAttribute('marker-end','url(#mR)');
+    $('tBat').textContent = '← 放';
+    $('tBat').setAttribute('fill','#f87171');
+  } else {
+    setOp('lBatDcL', false, '#34d399');
+    $('tBat').textContent = '↔ DC';
+    $('tBat').setAttribute('fill','#64748b');
+  }
+  setOp('lBusGrid', gridOn, '#a78bfa');
+  setOp('lBusLoad', loadOn, '#fb923c');
+  $('tPv').setAttribute('opacity', pvOn ? '1' : '0');
+  $('tAc').setAttribute('opacity', acOn ? '1' : '0');
+  $('tGrid').setAttribute('opacity', gridOn ? '1' : '0');
+  $('tLoad').setAttribute('opacity', loadOn ? '1' : '0');
+  $('tBat').setAttribute('opacity', (batChg || batDchg) ? '1' : '0');
+}
+
+function updateUI(d) {
+  lastData = d;
+  if (!d) return;
+  const fmt = (v,dec=1) => v==null?'—':(v/Math.pow(10,dec)).toFixed(dec);
+  const sys = d.SysStatus || 0;
+
+  $('titleEl').textContent = '电站详情 — ' + (d.city || SN);
+  $('snEl').textContent = d.sn || SN;
+  $('onlineDot').classList.add('on');
+  $('statusTxt').textContent = '在线';
+
+  const modeMap = [
+    [0x0002,'故障','mode-fault'], [0x0008,'放电','mode-discharge'],
+    [0x0010,'PV充电','mode-pvcharge'], [0x0020,'AC充电','mode-accharge'],
+    [0x0080,'AC旁路','mode-bypass'], [0x0001,'待机','mode-standby']
+  ];
+  const [mBit, mTxt, mCls] = modeMap.find(([b])=>sys&b) || [0,'未知','mode-standby'];
+  $('modeTag').textContent = mTxt;
+  $('modeTag').className = 'mode-tag ' + mCls;
+
+  const wxMap = {0:'☀️',1:'☀️',2:'⛅',3:'🌥️'};
+  const wx = d.weatherCode || 0;
+  $('wxIcon').textContent = (!d.isDay) ? '🌙' : (wxMap[wx] || '☀️');
+  $('wxTxt').textContent = (!d.isDay) ? '晴夜' : ['','','','','','','','','晴','晴','多云','阴'][wx] || '晴';
+  $('wxTemp').textContent = (d.tempC != null ? d.tempC : '—') + '°C';
+  $('wxIrr').textContent = (d.irradiance != null ? d.irradiance : '—') + ' W/m²';
+
+  $('kpv').textContent   = d.Ppv!=null?(d.Ppv/10).toFixed(0):'—';
+  $('kout').textContent  = d.OutputWatt!=null?(d.OutputWatt/10).toFixed(0):'—';
+  $('ksoc').textContent  = d.BatterySOC ?? '—';
+  const batW = ((d.BatChrWatt||0)-(d.BatDisChrWatt||0))/10;
+  $('kbatw').textContent = batW>0?'+'+batW.toFixed(0):batW<0?batW.toFixed(0):'0';
+  $('kload').textContent = d.OutputWatt!=null?(d.OutputWatt/10).toFixed(0):'—';
+  $('kgrid').textContent = d.GridVolt!=null?(d.GridVolt/10).toFixed(1):'—';
+  $('kboost').textContent = fmt(d.BoostTemp,1);
+  $('kinvt').textContent = fmt(d.InvertTemp,1);
+
+  // 发电统计（_meta 中 E* 字段单位为 0.1 kWh）
+  function eVal(v){ return v==null||v===0 ? '0.0' : (v/10).toFixed(1); }
+  $('kEGenT').textContent   = eVal(d.EGen_today);
+  $('kEGenTot').textContent = d.EGen_total!=null ? (d.EGen_total/10).toFixed(1) : (d.EGen_today!=null?(d.EGen_today/10).toFixed(1):'—');
+  $('kEBatChgT').textContent = eVal(d.Ebat_chrToday);
+  $('kEBatDisT').textContent = eVal(d.Ebat_dischrToday);
+
+  const pvW = d.Ppv!=null?d.Ppv/10:0;
+  const pvs = [pvW*0.4, pvW*0.35, pvW*0.25];
+  ['pvP1','pvP2','pvP3'].forEach((id,i)=>{ const el=$(id); if(el) el.classList.toggle('pv-glow',pvW>20); $('pvW'+(i+1)).textContent=pvW>20?pvs[i].toFixed(0)+'W':''; $('pvW'+(i+1)).setAttribute('opacity',pvW>20?'1':'0'); });
+  $('pvTot').textContent = pvW>0?pvW.toFixed(0)+' W':'0 W';
+  $('pvVolt').textContent = 'Vpv1:'+fmt(d.Vpv1,1)+'V  Vpv2:'+fmt(d.Vpv2,1)+'V';
+
+  $('iAcV').textContent = fmt(d.ACOutputVolt,1);
+  $('iHz').textContent = fmt(d.ACOutputFreq,2);
+  $('iW').textContent = d.OutputWatt!=null?(d.OutputWatt/10).toFixed(0):'—';
+  $('iTemp').textContent = 'Boost '+fmt(d.BoostTemp,1)+'°C · Inv '+fmt(d.InvertTemp,1)+'°C';
+
+  const soc = d.BatterySOC ?? 0;
+  $('bSoc').textContent = soc;
+  const bFillEl = $('bFill');
+  if (bFillEl) { bFillEl.setAttribute('width', (soc/100*52)+''); bFillEl.setAttribute('opacity', soc>0?'0.85':'0'); }
+  $('bWatt').textContent = batW>0?'+'+batW.toFixed(0)+'W':batW<0?batW.toFixed(0)+'W':'0W';
+  $('bV').textContent = fmt(d.BatVolt,2);
+  $('lWatt').textContent = d.OutputWatt!=null?(d.OutputWatt/10).toFixed(0)+'W':'—';
+  $('lPct').textContent = fmt(d.LoadPercent,1)+'%';
+  $('gV').textContent = fmt(d.GridVolt,1);
+  $('gHz').textContent = fmt(d.GridFreq,2)+'Hz';
+
+  alarms = d._alarms || [];
+  const bits = SYS_NAMES.filter((_,i)=>(sys>>i)&1);
+  const ledColor = (sys&0x0002)?'#f87171':(sys&0x0001)?'#fbbf24':'#34d399';
+  $('statusLed').setAttribute('fill', ledColor);
+  $('sysTxt').textContent = '0x'+(sys||0).toString(16).toUpperCase().padStart(4,'0') + (bits.length?' · '+bits.join(' · '):'');
+  $('ctrlRev').textContent = d._ctrlRevision || 0;
+  $('alarmCnt').textContent = alarms.length;
+  $('sysTime').textContent = new Date().toLocaleTimeString('zh-CN',{hour12:false});
+
+  if ($('tab-params').style.display !== 'none') renderParams(d);
+  updateFlow(d);
+}
+
+async function poll() {
+  try {
+    const r = await fetch(`/api/devices/${SN}/status`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    updateUI(j.telemetry || j);
+  } catch {
+    updateUI({ sn:SN, SysStatus:0x0012, Ppv:28000, OutputWatt:24000, BatterySOC:72,
+      BatChrWatt:4000, BatDisChrWatt:0, GridVolt:2200, _alarms:[], weatherCode:2, isDay:true,
+      BoostTemp:420, InvertTemp:450, Vpv1:3520, Vpv2:3450, BusVolt:41000,
+      ACOutputVolt:2300, ACOutputFreq:5000, LoadPercent:320, MpptFanSpeed:55, InvFanSpeed:60,
+      BatVolt:4900, BatChgCurr:80, BatDischgCurr:0,
+      EGen_today:1240, EGen_total:482050, Epv_today:1020,
+      GridFreq:5000, TransformerTemp:420,
+      maxChargeCurrent:30, acChargeCurrent:0, outputVoltage:230, outputFrequency:50.0,
+      socCutoff:20, buzzerEn:1, powerOn:1, _ctrlRevision:0 });
+  }
+}
+
+let startMs;
+function animateBar() {
+  const elapsed = Date.now() - startMs;
+  const pct = Math.max(0, 100 - (elapsed / POLL_MS) * 100);
+  const bar = $('refreshBar');
+  if (bar) bar.style.width = pct+'%';
+  const cd = $('countdown');
+  if (cd) cd.textContent = ((POLL_MS - elapsed) / 1000).toFixed(1);
+  requestAnimationFrame(animateBar);
+}
+
+async function loadDeviceMeta() {
+  try {
+    const r = await fetch('/api/devices/' + SN);
+    if (!r.ok) return;
+    const dev = await r.json();
+    $('snEl').textContent = dev.sn || SN;
+    $('countryTag').textContent = (dev.country || 'NC') + ' · ' + (dev.grade || 'A');
+    $('mfgTag').textContent = dev.mfg_date ? 'MFG:' + dev.mfg_date : 'CS-L10-6K2';
+  } catch {}
+}
+
+$('titleEl').textContent = '电站详情 — ' + SN;
+$('snEl').textContent = SN;
+switchTab('params');
+loadDeviceMeta();
+startMs = Date.now();
+poll();
+animateBar();
+setInterval(() => { startMs = Date.now(); poll(); }, POLL_MS);
+</script>
+</body>
+</html>

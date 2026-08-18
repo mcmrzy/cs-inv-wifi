@@ -1,0 +1,22 @@
+{
+  "name": "cs-inv-simulator-platform",
+  "version": "1.0.0",
+  "description": "CS-L10-6K2 中国行政区划逆变器认领模拟平台 (Web + MQTT + 天气/太阳模拟)",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mqtt": "^5.7.0",
+    "qrcode-generator": "^2.0.4"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}

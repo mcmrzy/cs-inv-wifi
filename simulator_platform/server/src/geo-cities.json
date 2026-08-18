@@ -1,0 +1,3035 @@
+[
+  {
+    "code": "130100",
+    "name": "石家庄市",
+    "province": "河北省",
+    "lat": 38.04547,
+    "lng": 114.50246,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "130200",
+    "name": "唐山市",
+    "province": "河北省",
+    "lat": 39.63511,
+    "lng": 118.17539,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "130300",
+    "name": "秦皇岛市",
+    "province": "河北省",
+    "lat": 39.94253,
+    "lng": 119.58658,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "130400",
+    "name": "邯郸市",
+    "province": "河北省",
+    "lat": 36.61227,
+    "lng": 114.49069,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "130500",
+    "name": "邢台市",
+    "province": "河北省",
+    "lat": 37.0682,
+    "lng": 114.50885,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "130600",
+    "name": "保定市",
+    "province": "河北省",
+    "lat": 38.86766,
+    "lng": 115.48233,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "130700",
+    "name": "张家口市",
+    "province": "河北省",
+    "lat": 40.8119,
+    "lng": 114.88409,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "130800",
+    "name": "承德市",
+    "province": "河北省",
+    "lat": 40.9762,
+    "lng": 117.93915,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "130900",
+    "name": "沧州市",
+    "province": "河北省",
+    "lat": 38.31058,
+    "lng": 116.85746,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "131000",
+    "name": "廊坊市",
+    "province": "河北省",
+    "lat": 39.52393,
+    "lng": 116.70444,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "131100",
+    "name": "衡水市",
+    "province": "河北省",
+    "lat": 37.7351,
+    "lng": 115.66599,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140100",
+    "name": "太原市",
+    "province": "山西省",
+    "lat": 37.85701,
+    "lng": 112.54925,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140200",
+    "name": "大同市",
+    "province": "山西省",
+    "lat": 40.09031,
+    "lng": 113.29526,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140300",
+    "name": "阳泉市",
+    "province": "山西省",
+    "lat": 37.86119,
+    "lng": 113.58329,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140400",
+    "name": "长治市",
+    "province": "山西省",
+    "lat": 36.19111,
+    "lng": 113.11356,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140500",
+    "name": "晋城市",
+    "province": "山西省",
+    "lat": 35.49755,
+    "lng": 112.85127,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140600",
+    "name": "朔州市",
+    "province": "山西省",
+    "lat": 39.33126,
+    "lng": 112.43339,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140700",
+    "name": "晋中市",
+    "province": "山西省",
+    "lat": 37.69649,
+    "lng": 112.73646,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140800",
+    "name": "运城市",
+    "province": "山西省",
+    "lat": 35.02278,
+    "lng": 111.00396,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "140900",
+    "name": "忻州市",
+    "province": "山西省",
+    "lat": 38.41769,
+    "lng": 112.73354,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "141000",
+    "name": "临汾市",
+    "province": "山西省",
+    "lat": 36.08415,
+    "lng": 111.51797,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "141100",
+    "name": "吕梁市",
+    "province": "山西省",
+    "lat": 37.52437,
+    "lng": 111.13433,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "150100",
+    "name": "呼和浩特市",
+    "province": "内蒙古自治区",
+    "lat": 40.81831,
+    "lng": 111.6708,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "150200",
+    "name": "包头市",
+    "province": "内蒙古自治区",
+    "lat": 40.65817,
+    "lng": 109.84041,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "150300",
+    "name": "乌海市",
+    "province": "内蒙古自治区",
+    "lat": 39.67373,
+    "lng": 106.82556,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "150400",
+    "name": "赤峰市",
+    "province": "内蒙古自治区",
+    "lat": 42.27532,
+    "lng": 118.95681,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "150500",
+    "name": "通辽市",
+    "province": "内蒙古自治区",
+    "lat": 43.61743,
+    "lng": 122.26312,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "150600",
+    "name": "鄂尔多斯市",
+    "province": "内蒙古自治区",
+    "lat": 39.81718,
+    "lng": 109.99029,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "150700",
+    "name": "呼伦贝尔市",
+    "province": "内蒙古自治区",
+    "lat": 49.21533,
+    "lng": 119.75817,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "150800",
+    "name": "巴彦淖尔市",
+    "province": "内蒙古自治区",
+    "lat": 40.7574,
+    "lng": 107.41696,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "150900",
+    "name": "乌兰察布市",
+    "province": "内蒙古自治区",
+    "lat": 41.03413,
+    "lng": 113.11454,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "152200",
+    "name": "兴安盟",
+    "province": "内蒙古自治区",
+    "lat": 46.07627,
+    "lng": 122.07032,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "152500",
+    "name": "锡林郭勒盟",
+    "province": "内蒙古自治区",
+    "lat": 43.94402,
+    "lng": 116.091,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "152900",
+    "name": "阿拉善盟",
+    "province": "内蒙古自治区",
+    "lat": 38.84481,
+    "lng": 105.70642,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210100",
+    "name": "沈阳市",
+    "province": "辽宁省",
+    "lat": 41.79677,
+    "lng": 123.4291,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210200",
+    "name": "大连市",
+    "province": "辽宁省",
+    "lat": 38.91459,
+    "lng": 121.61862,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210300",
+    "name": "鞍山市",
+    "province": "辽宁省",
+    "lat": 41.11063,
+    "lng": 122.99563,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210400",
+    "name": "抚顺市",
+    "province": "辽宁省",
+    "lat": 41.87596,
+    "lng": 123.92111,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210500",
+    "name": "本溪市",
+    "province": "辽宁省",
+    "lat": 41.29791,
+    "lng": 123.77052,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210600",
+    "name": "丹东市",
+    "province": "辽宁省",
+    "lat": 40.1243,
+    "lng": 124.38304,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210700",
+    "name": "锦州市",
+    "province": "辽宁省",
+    "lat": 41.11927,
+    "lng": 121.13574,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210800",
+    "name": "营口市",
+    "province": "辽宁省",
+    "lat": 40.66743,
+    "lng": 122.23515,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "210900",
+    "name": "阜新市",
+    "province": "辽宁省",
+    "lat": 42.0118,
+    "lng": 121.64896,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "211000",
+    "name": "辽阳市",
+    "province": "辽宁省",
+    "lat": 41.2694,
+    "lng": 123.18152,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "211100",
+    "name": "盘锦市",
+    "province": "辽宁省",
+    "lat": 41.12448,
+    "lng": 122.06957,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "211200",
+    "name": "铁岭市",
+    "province": "辽宁省",
+    "lat": 42.29059,
+    "lng": 123.84428,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "211300",
+    "name": "朝阳市",
+    "province": "辽宁省",
+    "lat": 41.57676,
+    "lng": 120.45118,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "211400",
+    "name": "葫芦岛市",
+    "province": "辽宁省",
+    "lat": 40.75557,
+    "lng": 120.85639,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "220100",
+    "name": "长春市",
+    "province": "吉林省",
+    "lat": 43.88684,
+    "lng": 125.3245,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "220200",
+    "name": "吉林市",
+    "province": "吉林省",
+    "lat": 43.84358,
+    "lng": 126.55302,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "220300",
+    "name": "四平市",
+    "province": "吉林省",
+    "lat": 43.17034,
+    "lng": 124.37078,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "220400",
+    "name": "辽源市",
+    "province": "吉林省",
+    "lat": 42.90269,
+    "lng": 125.14535,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "220500",
+    "name": "通化市",
+    "province": "吉林省",
+    "lat": 41.72118,
+    "lng": 125.9365,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "220600",
+    "name": "白山市",
+    "province": "吉林省",
+    "lat": 41.9425,
+    "lng": 126.42784,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "220700",
+    "name": "松原市",
+    "province": "吉林省",
+    "lat": 45.11824,
+    "lng": 124.82361,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "220800",
+    "name": "白城市",
+    "province": "吉林省",
+    "lat": 45.61903,
+    "lng": 122.84111,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "222400",
+    "name": "延边朝鲜族自治州",
+    "province": "吉林省",
+    "lat": 42.90482,
+    "lng": 129.51323,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230100",
+    "name": "哈尔滨市",
+    "province": "黑龙江省",
+    "lat": 45.75697,
+    "lng": 126.64246,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230200",
+    "name": "齐齐哈尔市",
+    "province": "黑龙江省",
+    "lat": 47.34208,
+    "lng": 123.95792,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230300",
+    "name": "鸡西市",
+    "province": "黑龙江省",
+    "lat": 45.30005,
+    "lng": 130.97597,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230400",
+    "name": "鹤岗市",
+    "province": "黑龙江省",
+    "lat": 47.33208,
+    "lng": 130.27749,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230500",
+    "name": "双鸭山市",
+    "province": "黑龙江省",
+    "lat": 46.64344,
+    "lng": 131.1573,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230600",
+    "name": "大庆市",
+    "province": "黑龙江省",
+    "lat": 46.59073,
+    "lng": 125.11272,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230700",
+    "name": "伊春市",
+    "province": "黑龙江省",
+    "lat": 47.72478,
+    "lng": 128.8994,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230800",
+    "name": "佳木斯市",
+    "province": "黑龙江省",
+    "lat": 46.80961,
+    "lng": 130.36163,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "230900",
+    "name": "七台河市",
+    "province": "黑龙江省",
+    "lat": 45.77127,
+    "lng": 131.01558,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "231000",
+    "name": "牡丹江市",
+    "province": "黑龙江省",
+    "lat": 44.58296,
+    "lng": 129.6186,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "231100",
+    "name": "黑河市",
+    "province": "黑龙江省",
+    "lat": 50.24959,
+    "lng": 127.49902,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "231200",
+    "name": "绥化市",
+    "province": "黑龙江省",
+    "lat": 46.63739,
+    "lng": 126.99293,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "232700",
+    "name": "大兴安岭地区",
+    "province": "黑龙江省",
+    "lat": 52.33526,
+    "lng": 124.71153,
+    "tzOffset": 8,
+    "climate": "northeast"
+  },
+  {
+    "code": "320100",
+    "name": "南京市",
+    "province": "江苏省",
+    "lat": 32.04154,
+    "lng": 118.76741,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "320200",
+    "name": "无锡市",
+    "province": "江苏省",
+    "lat": 31.57473,
+    "lng": 120.30166,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "320300",
+    "name": "徐州市",
+    "province": "江苏省",
+    "lat": 34.26179,
+    "lng": 117.18481,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "320400",
+    "name": "常州市",
+    "province": "江苏省",
+    "lat": 31.77275,
+    "lng": 119.94697,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "320500",
+    "name": "苏州市",
+    "province": "江苏省",
+    "lat": 31.29938,
+    "lng": 120.61959,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "320600",
+    "name": "南通市",
+    "province": "江苏省",
+    "lat": 32.01621,
+    "lng": 120.86461,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "320700",
+    "name": "连云港市",
+    "province": "江苏省",
+    "lat": 34.60002,
+    "lng": 119.17882,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "320800",
+    "name": "淮安市",
+    "province": "江苏省",
+    "lat": 33.59751,
+    "lng": 119.02126,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "320900",
+    "name": "盐城市",
+    "province": "江苏省",
+    "lat": 33.37763,
+    "lng": 120.14,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "321000",
+    "name": "扬州市",
+    "province": "江苏省",
+    "lat": 32.39316,
+    "lng": 119.421,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "321100",
+    "name": "镇江市",
+    "province": "江苏省",
+    "lat": 32.2044,
+    "lng": 119.45275,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "321200",
+    "name": "泰州市",
+    "province": "江苏省",
+    "lat": 32.48488,
+    "lng": 119.91518,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "321300",
+    "name": "宿迁市",
+    "province": "江苏省",
+    "lat": 33.96301,
+    "lng": 118.27516,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330100",
+    "name": "杭州市",
+    "province": "浙江省",
+    "lat": 30.28746,
+    "lng": 120.15358,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330200",
+    "name": "宁波市",
+    "province": "浙江省",
+    "lat": 29.86839,
+    "lng": 121.54979,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330300",
+    "name": "温州市",
+    "province": "浙江省",
+    "lat": 28.00058,
+    "lng": 120.67211,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330400",
+    "name": "嘉兴市",
+    "province": "浙江省",
+    "lat": 30.76265,
+    "lng": 120.75087,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330500",
+    "name": "湖州市",
+    "province": "浙江省",
+    "lat": 30.8672,
+    "lng": 120.1024,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330600",
+    "name": "绍兴市",
+    "province": "浙江省",
+    "lat": 29.99712,
+    "lng": 120.58211,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330700",
+    "name": "金华市",
+    "province": "浙江省",
+    "lat": 29.08952,
+    "lng": 119.64951,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330800",
+    "name": "衢州市",
+    "province": "浙江省",
+    "lat": 28.94171,
+    "lng": 118.87263,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "330900",
+    "name": "舟山市",
+    "province": "浙江省",
+    "lat": 30.01603,
+    "lng": 122.10686,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "331000",
+    "name": "台州市",
+    "province": "浙江省",
+    "lat": 28.66138,
+    "lng": 121.4286,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "331100",
+    "name": "丽水市",
+    "province": "浙江省",
+    "lat": 28.45199,
+    "lng": 119.92179,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "340100",
+    "name": "合肥市",
+    "province": "安徽省",
+    "lat": 31.86119,
+    "lng": 117.28304,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "340200",
+    "name": "芜湖市",
+    "province": "安徽省",
+    "lat": 31.32632,
+    "lng": 118.37645,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "340300",
+    "name": "蚌埠市",
+    "province": "安徽省",
+    "lat": 32.93967,
+    "lng": 117.36323,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "340400",
+    "name": "淮南市",
+    "province": "安徽省",
+    "lat": 32.64757,
+    "lng": 117.01833,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "340500",
+    "name": "马鞍山市",
+    "province": "安徽省",
+    "lat": 31.68936,
+    "lng": 118.50791,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "340600",
+    "name": "淮北市",
+    "province": "安徽省",
+    "lat": 33.97171,
+    "lng": 116.79466,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "340700",
+    "name": "铜陵市",
+    "province": "安徽省",
+    "lat": 30.92994,
+    "lng": 117.81658,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "340800",
+    "name": "安庆市",
+    "province": "安徽省",
+    "lat": 30.50883,
+    "lng": 117.04355,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "341000",
+    "name": "黄山市",
+    "province": "安徽省",
+    "lat": 29.70924,
+    "lng": 118.31732,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "341100",
+    "name": "滁州市",
+    "province": "安徽省",
+    "lat": 32.30363,
+    "lng": 118.31626,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "341200",
+    "name": "阜阳市",
+    "province": "安徽省",
+    "lat": 32.89697,
+    "lng": 115.81973,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "341300",
+    "name": "宿州市",
+    "province": "安徽省",
+    "lat": 33.63389,
+    "lng": 116.98408,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "341500",
+    "name": "六安市",
+    "province": "安徽省",
+    "lat": 31.75289,
+    "lng": 116.50768,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "341600",
+    "name": "亳州市",
+    "province": "安徽省",
+    "lat": 33.86934,
+    "lng": 115.78294,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "341700",
+    "name": "池州市",
+    "province": "安徽省",
+    "lat": 30.65604,
+    "lng": 117.48916,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "341800",
+    "name": "宣城市",
+    "province": "安徽省",
+    "lat": 30.94567,
+    "lng": 118.75799,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "350100",
+    "name": "福州市",
+    "province": "福建省",
+    "lat": 26.0753,
+    "lng": 119.30624,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "350200",
+    "name": "厦门市",
+    "province": "福建省",
+    "lat": 24.49047,
+    "lng": 118.11022,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "350300",
+    "name": "莆田市",
+    "province": "福建省",
+    "lat": 25.43101,
+    "lng": 119.00756,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "350400",
+    "name": "三明市",
+    "province": "福建省",
+    "lat": 26.26544,
+    "lng": 117.635,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "350500",
+    "name": "泉州市",
+    "province": "福建省",
+    "lat": 24.90885,
+    "lng": 118.58942,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "350600",
+    "name": "漳州市",
+    "province": "福建省",
+    "lat": 24.5109,
+    "lng": 117.6618,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "350700",
+    "name": "南平市",
+    "province": "福建省",
+    "lat": 26.63563,
+    "lng": 118.17846,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "350800",
+    "name": "龙岩市",
+    "province": "福建省",
+    "lat": 25.0916,
+    "lng": 117.02978,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "350900",
+    "name": "宁德市",
+    "province": "福建省",
+    "lat": 26.65924,
+    "lng": 119.52708,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360100",
+    "name": "南昌市",
+    "province": "江西省",
+    "lat": 28.67649,
+    "lng": 115.89215,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360200",
+    "name": "景德镇市",
+    "province": "江西省",
+    "lat": 29.29256,
+    "lng": 117.21466,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360300",
+    "name": "萍乡市",
+    "province": "江西省",
+    "lat": 27.62295,
+    "lng": 113.85219,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360400",
+    "name": "九江市",
+    "province": "江西省",
+    "lat": 29.71203,
+    "lng": 115.99281,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360500",
+    "name": "新余市",
+    "province": "江西省",
+    "lat": 27.81083,
+    "lng": 114.93084,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360600",
+    "name": "鹰潭市",
+    "province": "江西省",
+    "lat": 28.23864,
+    "lng": 117.03384,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360700",
+    "name": "赣州市",
+    "province": "江西省",
+    "lat": 25.85097,
+    "lng": 114.94028,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360800",
+    "name": "吉安市",
+    "province": "江西省",
+    "lat": 27.1117,
+    "lng": 114.98637,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "360900",
+    "name": "宜春市",
+    "province": "江西省",
+    "lat": 27.8043,
+    "lng": 114.39114,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "361000",
+    "name": "抚州市",
+    "province": "江西省",
+    "lat": 27.98385,
+    "lng": 116.35835,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "361100",
+    "name": "上饶市",
+    "province": "江西省",
+    "lat": 28.44442,
+    "lng": 117.97119,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "370100",
+    "name": "济南市",
+    "province": "山东省",
+    "lat": 36.67581,
+    "lng": 117.00092,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "370200",
+    "name": "青岛市",
+    "province": "山东省",
+    "lat": 36.08298,
+    "lng": 120.35517,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "370300",
+    "name": "淄博市",
+    "province": "山东省",
+    "lat": 36.81494,
+    "lng": 118.04765,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "370400",
+    "name": "枣庄市",
+    "province": "山东省",
+    "lat": 34.85642,
+    "lng": 117.55796,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "370500",
+    "name": "东营市",
+    "province": "山东省",
+    "lat": 37.43456,
+    "lng": 118.66471,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "370600",
+    "name": "烟台市",
+    "province": "山东省",
+    "lat": 37.5393,
+    "lng": 121.39138,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "370700",
+    "name": "潍坊市",
+    "province": "山东省",
+    "lat": 36.70925,
+    "lng": 119.10708,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "370800",
+    "name": "济宁市",
+    "province": "山东省",
+    "lat": 35.41539,
+    "lng": 116.58724,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "370900",
+    "name": "泰安市",
+    "province": "山东省",
+    "lat": 36.19497,
+    "lng": 117.12906,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "371000",
+    "name": "威海市",
+    "province": "山东省",
+    "lat": 37.50969,
+    "lng": 122.11639,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "371100",
+    "name": "日照市",
+    "province": "山东省",
+    "lat": 35.42859,
+    "lng": 119.46121,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "371300",
+    "name": "临沂市",
+    "province": "山东省",
+    "lat": 35.06528,
+    "lng": 118.32644,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "371400",
+    "name": "德州市",
+    "province": "山东省",
+    "lat": 37.45397,
+    "lng": 116.30743,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "371500",
+    "name": "聊城市",
+    "province": "山东省",
+    "lat": 36.45601,
+    "lng": 115.98037,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "371600",
+    "name": "滨州市",
+    "province": "山东省",
+    "lat": 37.38354,
+    "lng": 118.01697,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "371700",
+    "name": "菏泽市",
+    "province": "山东省",
+    "lat": 35.24653,
+    "lng": 115.46938,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "410100",
+    "name": "郑州市",
+    "province": "河南省",
+    "lat": 34.75798,
+    "lng": 113.66541,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "410200",
+    "name": "开封市",
+    "province": "河南省",
+    "lat": 34.79705,
+    "lng": 114.34145,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "410300",
+    "name": "洛阳市",
+    "province": "河南省",
+    "lat": 34.66304,
+    "lng": 112.43447,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "410400",
+    "name": "平顶山市",
+    "province": "河南省",
+    "lat": 33.73524,
+    "lng": 113.30772,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "410500",
+    "name": "安阳市",
+    "province": "河南省",
+    "lat": 36.10344,
+    "lng": 114.35248,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "410600",
+    "name": "鹤壁市",
+    "province": "河南省",
+    "lat": 35.74824,
+    "lng": 114.29544,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "410700",
+    "name": "新乡市",
+    "province": "河南省",
+    "lat": 35.30262,
+    "lng": 113.88399,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "410800",
+    "name": "焦作市",
+    "province": "河南省",
+    "lat": 35.23904,
+    "lng": 113.23827,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "410900",
+    "name": "濮阳市",
+    "province": "河南省",
+    "lat": 35.76823,
+    "lng": 115.0413,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "411000",
+    "name": "许昌市",
+    "province": "河南省",
+    "lat": 34.02296,
+    "lng": 113.82606,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "411100",
+    "name": "漯河市",
+    "province": "河南省",
+    "lat": 33.57585,
+    "lng": 114.0264,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "411200",
+    "name": "三门峡市",
+    "province": "河南省",
+    "lat": 34.77734,
+    "lng": 111.1941,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "411300",
+    "name": "南阳市",
+    "province": "河南省",
+    "lat": 32.99908,
+    "lng": 112.54092,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "411400",
+    "name": "商丘市",
+    "province": "河南省",
+    "lat": 34.43705,
+    "lng": 115.6505,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "411500",
+    "name": "信阳市",
+    "province": "河南省",
+    "lat": 32.12327,
+    "lng": 114.07503,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "411600",
+    "name": "周口市",
+    "province": "河南省",
+    "lat": 33.62036,
+    "lng": 114.64965,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "411700",
+    "name": "驻马店市",
+    "province": "河南省",
+    "lat": 32.98017,
+    "lng": 114.02474,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "420100",
+    "name": "武汉市",
+    "province": "湖北省",
+    "lat": 30.58435,
+    "lng": 114.29857,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "420200",
+    "name": "黄石市",
+    "province": "湖北省",
+    "lat": 30.22007,
+    "lng": 115.07705,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "420300",
+    "name": "十堰市",
+    "province": "湖北省",
+    "lat": 32.64691,
+    "lng": 110.78792,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "420500",
+    "name": "宜昌市",
+    "province": "湖北省",
+    "lat": 30.70264,
+    "lng": 111.29084,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "420600",
+    "name": "襄阳市",
+    "province": "湖北省",
+    "lat": 32.04243,
+    "lng": 112.14415,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "420700",
+    "name": "鄂州市",
+    "province": "湖北省",
+    "lat": 30.39654,
+    "lng": 114.89059,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "420800",
+    "name": "荆门市",
+    "province": "湖北省",
+    "lat": 31.03542,
+    "lng": 112.20425,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "420900",
+    "name": "孝感市",
+    "province": "湖北省",
+    "lat": 30.92642,
+    "lng": 113.92665,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "421000",
+    "name": "荆州市",
+    "province": "湖北省",
+    "lat": 30.32686,
+    "lng": 112.23813,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "421100",
+    "name": "黄冈市",
+    "province": "湖北省",
+    "lat": 30.44771,
+    "lng": 114.87937,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "421200",
+    "name": "咸宁市",
+    "province": "湖北省",
+    "lat": 29.8328,
+    "lng": 114.32896,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "421300",
+    "name": "随州市",
+    "province": "湖北省",
+    "lat": 31.7175,
+    "lng": 113.37377,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "422800",
+    "name": "恩施土家族苗族自治州",
+    "province": "湖北省",
+    "lat": 30.28311,
+    "lng": 109.48699,
+    "tzOffset": 8,
+    "climate": "central"
+  },
+  {
+    "code": "430100",
+    "name": "长沙市",
+    "province": "湖南省",
+    "lat": 28.19409,
+    "lng": 112.98228,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "430200",
+    "name": "株洲市",
+    "province": "湖南省",
+    "lat": 27.83581,
+    "lng": 113.15174,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "430300",
+    "name": "湘潭市",
+    "province": "湖南省",
+    "lat": 27.82973,
+    "lng": 112.94405,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "430400",
+    "name": "衡阳市",
+    "province": "湖南省",
+    "lat": 26.90036,
+    "lng": 112.60769,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "430500",
+    "name": "邵阳市",
+    "province": "湖南省",
+    "lat": 27.23784,
+    "lng": 111.46923,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "430600",
+    "name": "岳阳市",
+    "province": "湖南省",
+    "lat": 29.37029,
+    "lng": 113.13286,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "430700",
+    "name": "常德市",
+    "province": "湖南省",
+    "lat": 29.04022,
+    "lng": 111.69135,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "430800",
+    "name": "张家界市",
+    "province": "湖南省",
+    "lat": 29.1274,
+    "lng": 110.47992,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "430900",
+    "name": "益阳市",
+    "province": "湖南省",
+    "lat": 28.57007,
+    "lng": 112.35504,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "431000",
+    "name": "郴州市",
+    "province": "湖南省",
+    "lat": 25.79359,
+    "lng": 113.03207,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "431100",
+    "name": "永州市",
+    "province": "湖南省",
+    "lat": 26.43452,
+    "lng": 111.60802,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "431200",
+    "name": "怀化市",
+    "province": "湖南省",
+    "lat": 27.55008,
+    "lng": 109.97824,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "431300",
+    "name": "娄底市",
+    "province": "湖南省",
+    "lat": 27.72814,
+    "lng": 112.0085,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "433100",
+    "name": "湘西土家族苗族自治州",
+    "province": "湖南省",
+    "lat": 28.3143,
+    "lng": 109.73973,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440100",
+    "name": "广州市",
+    "province": "广东省",
+    "lat": 23.12518,
+    "lng": 113.28064,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440200",
+    "name": "韶关市",
+    "province": "广东省",
+    "lat": 24.80132,
+    "lng": 113.59154,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440300",
+    "name": "深圳市",
+    "province": "广东省",
+    "lat": 22.547,
+    "lng": 114.08595,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440400",
+    "name": "珠海市",
+    "province": "广东省",
+    "lat": 22.22498,
+    "lng": 113.55399,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440500",
+    "name": "汕头市",
+    "province": "广东省",
+    "lat": 23.37102,
+    "lng": 116.70846,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440600",
+    "name": "佛山市",
+    "province": "广东省",
+    "lat": 23.02876,
+    "lng": 113.12272,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440700",
+    "name": "江门市",
+    "province": "广东省",
+    "lat": 22.59043,
+    "lng": 113.09494,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440800",
+    "name": "湛江市",
+    "province": "广东省",
+    "lat": 21.2749,
+    "lng": 110.36498,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "440900",
+    "name": "茂名市",
+    "province": "广东省",
+    "lat": 21.65975,
+    "lng": 110.91923,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "441200",
+    "name": "肇庆市",
+    "province": "广东省",
+    "lat": 23.05155,
+    "lng": 112.47253,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "441300",
+    "name": "惠州市",
+    "province": "广东省",
+    "lat": 23.0794,
+    "lng": 114.4126,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "441400",
+    "name": "梅州市",
+    "province": "广东省",
+    "lat": 24.29911,
+    "lng": 116.11758,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "441500",
+    "name": "汕尾市",
+    "province": "广东省",
+    "lat": 22.77448,
+    "lng": 115.36424,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "441600",
+    "name": "河源市",
+    "province": "广东省",
+    "lat": 23.74627,
+    "lng": 114.6978,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "441700",
+    "name": "阳江市",
+    "province": "广东省",
+    "lat": 21.85922,
+    "lng": 111.97511,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "441800",
+    "name": "清远市",
+    "province": "广东省",
+    "lat": 23.68502,
+    "lng": 113.05123,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "441900",
+    "name": "东莞市",
+    "province": "广东省",
+    "lat": 23.04624,
+    "lng": 113.74626,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "442000",
+    "name": "中山市",
+    "province": "广东省",
+    "lat": 22.52111,
+    "lng": 113.38239,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "445100",
+    "name": "潮州市",
+    "province": "广东省",
+    "lat": 23.6617,
+    "lng": 116.6323,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "445200",
+    "name": "揭阳市",
+    "province": "广东省",
+    "lat": 23.54378,
+    "lng": 116.35573,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "445300",
+    "name": "云浮市",
+    "province": "广东省",
+    "lat": 22.9298,
+    "lng": 112.04444,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450100",
+    "name": "南宁市",
+    "province": "广西壮族自治区",
+    "lat": 22.82402,
+    "lng": 108.32,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450200",
+    "name": "柳州市",
+    "province": "广西壮族自治区",
+    "lat": 24.31462,
+    "lng": 109.4117,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450300",
+    "name": "桂林市",
+    "province": "广西壮族自治区",
+    "lat": 25.27422,
+    "lng": 110.29912,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450400",
+    "name": "梧州市",
+    "province": "广西壮族自治区",
+    "lat": 23.4748,
+    "lng": 111.2976,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450500",
+    "name": "北海市",
+    "province": "广西壮族自治区",
+    "lat": 21.47334,
+    "lng": 109.11925,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450600",
+    "name": "防城港市",
+    "province": "广西壮族自治区",
+    "lat": 21.61463,
+    "lng": 108.34548,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450700",
+    "name": "钦州市",
+    "province": "广西壮族自治区",
+    "lat": 21.96713,
+    "lng": 108.62417,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450800",
+    "name": "贵港市",
+    "province": "广西壮族自治区",
+    "lat": 23.0936,
+    "lng": 109.60215,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "450900",
+    "name": "玉林市",
+    "province": "广西壮族自治区",
+    "lat": 22.63136,
+    "lng": 110.15439,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "451000",
+    "name": "百色市",
+    "province": "广西壮族自治区",
+    "lat": 23.89774,
+    "lng": 106.61629,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "451100",
+    "name": "贺州市",
+    "province": "广西壮族自治区",
+    "lat": 24.41414,
+    "lng": 111.55206,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "451200",
+    "name": "河池市",
+    "province": "广西壮族自治区",
+    "lat": 24.6959,
+    "lng": 108.06211,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "451300",
+    "name": "来宾市",
+    "province": "广西壮族自治区",
+    "lat": 23.73377,
+    "lng": 109.22977,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "451400",
+    "name": "崇左市",
+    "province": "广西壮族自治区",
+    "lat": 22.40411,
+    "lng": 107.35393,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "460100",
+    "name": "海口市",
+    "province": "海南省",
+    "lat": 20.03197,
+    "lng": 110.33119,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "460200",
+    "name": "三亚市",
+    "province": "海南省",
+    "lat": 18.24787,
+    "lng": 109.50827,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "460300",
+    "name": "三沙市",
+    "province": "海南省",
+    "lat": 16.83104,
+    "lng": 112.34882,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "460400",
+    "name": "儋州市",
+    "province": "海南省",
+    "lat": 19.51749,
+    "lng": 109.57678,
+    "tzOffset": 8,
+    "climate": "south"
+  },
+  {
+    "code": "510100",
+    "name": "成都市",
+    "province": "四川省",
+    "lat": 30.65946,
+    "lng": 104.06574,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "510300",
+    "name": "自贡市",
+    "province": "四川省",
+    "lat": 29.35277,
+    "lng": 104.77345,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "510400",
+    "name": "攀枝花市",
+    "province": "四川省",
+    "lat": 26.58045,
+    "lng": 101.71601,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "510500",
+    "name": "泸州市",
+    "province": "四川省",
+    "lat": 28.88914,
+    "lng": 105.44335,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "510600",
+    "name": "德阳市",
+    "province": "四川省",
+    "lat": 31.12799,
+    "lng": 104.39865,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "510700",
+    "name": "绵阳市",
+    "province": "四川省",
+    "lat": 31.46402,
+    "lng": 104.74172,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "510800",
+    "name": "广元市",
+    "province": "四川省",
+    "lat": 32.43367,
+    "lng": 105.82976,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "510900",
+    "name": "遂宁市",
+    "province": "四川省",
+    "lat": 30.51331,
+    "lng": 105.57133,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511000",
+    "name": "内江市",
+    "province": "四川省",
+    "lat": 29.58708,
+    "lng": 105.06614,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511100",
+    "name": "乐山市",
+    "province": "四川省",
+    "lat": 29.58202,
+    "lng": 103.76126,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511300",
+    "name": "南充市",
+    "province": "四川省",
+    "lat": 30.79528,
+    "lng": 106.08297,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511400",
+    "name": "眉山市",
+    "province": "四川省",
+    "lat": 30.04832,
+    "lng": 103.83179,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511500",
+    "name": "宜宾市",
+    "province": "四川省",
+    "lat": 28.76019,
+    "lng": 104.63083,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511600",
+    "name": "广安市",
+    "province": "四川省",
+    "lat": 30.4564,
+    "lng": 106.63337,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511700",
+    "name": "达州市",
+    "province": "四川省",
+    "lat": 31.20948,
+    "lng": 107.50226,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511800",
+    "name": "雅安市",
+    "province": "四川省",
+    "lat": 29.98772,
+    "lng": 103.00103,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "511900",
+    "name": "巴中市",
+    "province": "四川省",
+    "lat": 31.85881,
+    "lng": 106.75367,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "512000",
+    "name": "资阳市",
+    "province": "四川省",
+    "lat": 30.12221,
+    "lng": 104.64192,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "513200",
+    "name": "阿坝藏族羌族自治州",
+    "province": "四川省",
+    "lat": 31.89979,
+    "lng": 102.22137,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "513300",
+    "name": "甘孜藏族自治州",
+    "province": "四川省",
+    "lat": 30.05066,
+    "lng": 101.96381,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "513400",
+    "name": "凉山彝族自治州",
+    "province": "四川省",
+    "lat": 27.88676,
+    "lng": 102.25875,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "520100",
+    "name": "贵阳市",
+    "province": "贵州省",
+    "lat": 26.57834,
+    "lng": 106.71348,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "520200",
+    "name": "六盘水市",
+    "province": "贵州省",
+    "lat": 26.58464,
+    "lng": 104.84674,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "520300",
+    "name": "遵义市",
+    "province": "贵州省",
+    "lat": 27.70663,
+    "lng": 106.93726,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "520400",
+    "name": "安顺市",
+    "province": "贵州省",
+    "lat": 26.24554,
+    "lng": 105.93219,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "520500",
+    "name": "毕节市",
+    "province": "贵州省",
+    "lat": 27.30169,
+    "lng": 105.28501,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "520600",
+    "name": "铜仁市",
+    "province": "贵州省",
+    "lat": 27.71835,
+    "lng": 109.19155,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "522300",
+    "name": "黔西南布依族苗族自治州",
+    "province": "贵州省",
+    "lat": 25.08812,
+    "lng": 104.89797,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "522600",
+    "name": "黔东南苗族侗族自治州",
+    "province": "贵州省",
+    "lat": 26.58335,
+    "lng": 107.97749,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "522700",
+    "name": "黔南布依族苗族自治州",
+    "province": "贵州省",
+    "lat": 26.25822,
+    "lng": 107.51716,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "530100",
+    "name": "昆明市",
+    "province": "云南省",
+    "lat": 25.04061,
+    "lng": 102.71225,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "530300",
+    "name": "曲靖市",
+    "province": "云南省",
+    "lat": 25.50156,
+    "lng": 103.79785,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "530400",
+    "name": "玉溪市",
+    "province": "云南省",
+    "lat": 24.35046,
+    "lng": 102.54391,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "530500",
+    "name": "保山市",
+    "province": "云南省",
+    "lat": 25.1118,
+    "lng": 99.16713,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "530600",
+    "name": "昭通市",
+    "province": "云南省",
+    "lat": 27.337,
+    "lng": 103.71722,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "530700",
+    "name": "丽江市",
+    "province": "云南省",
+    "lat": 26.87211,
+    "lng": 100.23303,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "530800",
+    "name": "普洱市",
+    "province": "云南省",
+    "lat": 22.77732,
+    "lng": 100.97234,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "530900",
+    "name": "临沧市",
+    "province": "云南省",
+    "lat": 23.88657,
+    "lng": 100.08697,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "532300",
+    "name": "楚雄彝族自治州",
+    "province": "云南省",
+    "lat": 25.04199,
+    "lng": 101.54605,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "532500",
+    "name": "红河哈尼族彝族自治州",
+    "province": "云南省",
+    "lat": 23.36678,
+    "lng": 103.38418,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "532600",
+    "name": "文山壮族苗族自治州",
+    "province": "云南省",
+    "lat": 23.36951,
+    "lng": 104.24401,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "532800",
+    "name": "西双版纳傣族自治州",
+    "province": "云南省",
+    "lat": 22.00172,
+    "lng": 100.79794,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "532900",
+    "name": "大理白族自治州",
+    "province": "云南省",
+    "lat": 25.58945,
+    "lng": 100.22567,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "533100",
+    "name": "德宏傣族景颇族自治州",
+    "province": "云南省",
+    "lat": 24.43669,
+    "lng": 98.57836,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "533300",
+    "name": "怒江傈僳族自治州",
+    "province": "云南省",
+    "lat": 25.85095,
+    "lng": 98.8543,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "533400",
+    "name": "迪庆藏族自治州",
+    "province": "云南省",
+    "lat": 27.82685,
+    "lng": 99.70646,
+    "tzOffset": 8,
+    "climate": "southwest"
+  },
+  {
+    "code": "540100",
+    "name": "拉萨市",
+    "province": "西藏自治区",
+    "lat": 29.66036,
+    "lng": 91.13221,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "540200",
+    "name": "日喀则市",
+    "province": "西藏自治区",
+    "lat": 29.26752,
+    "lng": 88.88515,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "540300",
+    "name": "昌都市",
+    "province": "西藏自治区",
+    "lat": 31.13687,
+    "lng": 97.17845,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "540400",
+    "name": "林芝市",
+    "province": "西藏自治区",
+    "lat": 29.65469,
+    "lng": 94.36235,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "540500",
+    "name": "山南市",
+    "province": "西藏自治区",
+    "lat": 29.23602,
+    "lng": 91.76653,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "540600",
+    "name": "那曲市",
+    "province": "西藏自治区",
+    "lat": 31.476,
+    "lng": 92.06021,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "542500",
+    "name": "阿里地区",
+    "province": "西藏自治区",
+    "lat": 32.50319,
+    "lng": 80.1055,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "610100",
+    "name": "西安市",
+    "province": "陕西省",
+    "lat": 34.26316,
+    "lng": 108.94802,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "610200",
+    "name": "铜川市",
+    "province": "陕西省",
+    "lat": 34.91658,
+    "lng": 108.97961,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "610300",
+    "name": "宝鸡市",
+    "province": "陕西省",
+    "lat": 34.36932,
+    "lng": 107.14487,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "610400",
+    "name": "咸阳市",
+    "province": "陕西省",
+    "lat": 34.33344,
+    "lng": 108.70512,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "610500",
+    "name": "渭南市",
+    "province": "陕西省",
+    "lat": 34.49938,
+    "lng": 109.50288,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "610600",
+    "name": "延安市",
+    "province": "陕西省",
+    "lat": 36.59654,
+    "lng": 109.49081,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "610700",
+    "name": "汉中市",
+    "province": "陕西省",
+    "lat": 33.07767,
+    "lng": 107.02862,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "610800",
+    "name": "榆林市",
+    "province": "陕西省",
+    "lat": 38.29016,
+    "lng": 109.74119,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "610900",
+    "name": "安康市",
+    "province": "陕西省",
+    "lat": 32.6903,
+    "lng": 109.02927,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "611000",
+    "name": "商洛市",
+    "province": "陕西省",
+    "lat": 33.86832,
+    "lng": 109.93978,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620100",
+    "name": "兰州市",
+    "province": "甘肃省",
+    "lat": 36.05804,
+    "lng": 103.82356,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620200",
+    "name": "嘉峪关市",
+    "province": "甘肃省",
+    "lat": 39.78653,
+    "lng": 98.2773,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620300",
+    "name": "金昌市",
+    "province": "甘肃省",
+    "lat": 38.51424,
+    "lng": 102.18789,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620400",
+    "name": "白银市",
+    "province": "甘肃省",
+    "lat": 36.54568,
+    "lng": 104.17361,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620500",
+    "name": "天水市",
+    "province": "甘肃省",
+    "lat": 34.57853,
+    "lng": 105.725,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620600",
+    "name": "武威市",
+    "province": "甘肃省",
+    "lat": 37.93,
+    "lng": 102.6347,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620700",
+    "name": "张掖市",
+    "province": "甘肃省",
+    "lat": 38.9329,
+    "lng": 100.45547,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620800",
+    "name": "平凉市",
+    "province": "甘肃省",
+    "lat": 35.54279,
+    "lng": 106.68469,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "620900",
+    "name": "酒泉市",
+    "province": "甘肃省",
+    "lat": 39.74402,
+    "lng": 98.5108,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "621000",
+    "name": "庆阳市",
+    "province": "甘肃省",
+    "lat": 35.73422,
+    "lng": 107.63837,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "621100",
+    "name": "定西市",
+    "province": "甘肃省",
+    "lat": 35.57958,
+    "lng": 104.62629,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "621200",
+    "name": "陇南市",
+    "province": "甘肃省",
+    "lat": 33.3886,
+    "lng": 104.92938,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "622900",
+    "name": "临夏回族自治州",
+    "province": "甘肃省",
+    "lat": 35.59945,
+    "lng": 103.21201,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "623000",
+    "name": "甘南藏族自治州",
+    "province": "甘肃省",
+    "lat": 34.98635,
+    "lng": 102.91101,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "630100",
+    "name": "西宁市",
+    "province": "青海省",
+    "lat": 36.62318,
+    "lng": 101.77892,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "630200",
+    "name": "海东市",
+    "province": "青海省",
+    "lat": 36.50292,
+    "lng": 102.10327,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "632200",
+    "name": "海北藏族自治州",
+    "province": "青海省",
+    "lat": 36.95943,
+    "lng": 100.90106,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "632300",
+    "name": "黄南藏族自治州",
+    "province": "青海省",
+    "lat": 35.51774,
+    "lng": 102.01999,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "632500",
+    "name": "海南藏族自治州",
+    "province": "青海省",
+    "lat": 36.28035,
+    "lng": 100.61954,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "632600",
+    "name": "果洛藏族自治州",
+    "province": "青海省",
+    "lat": 34.4736,
+    "lng": 100.24214,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "632700",
+    "name": "玉树藏族自治州",
+    "province": "青海省",
+    "lat": 33.00405,
+    "lng": 97.00852,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "632800",
+    "name": "海西蒙古族藏族自治州",
+    "province": "青海省",
+    "lat": 37.37466,
+    "lng": 97.37078,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "640100",
+    "name": "银川市",
+    "province": "宁夏回族自治区",
+    "lat": 38.46637,
+    "lng": 106.27818,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "640200",
+    "name": "石嘴山市",
+    "province": "宁夏回族自治区",
+    "lat": 39.01333,
+    "lng": 106.37617,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "640300",
+    "name": "吴忠市",
+    "province": "宁夏回族自治区",
+    "lat": 37.98616,
+    "lng": 106.19941,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "640400",
+    "name": "固原市",
+    "province": "宁夏回族自治区",
+    "lat": 36.00456,
+    "lng": 106.28524,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "640500",
+    "name": "中卫市",
+    "province": "宁夏回族自治区",
+    "lat": 37.51495,
+    "lng": 105.18957,
+    "tzOffset": 8,
+    "climate": "north"
+  },
+  {
+    "code": "650100",
+    "name": "乌鲁木齐市",
+    "province": "新疆维吾尔自治区",
+    "lat": 43.79282,
+    "lng": 87.61773,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "650200",
+    "name": "克拉玛依市",
+    "province": "新疆维吾尔自治区",
+    "lat": 45.59589,
+    "lng": 84.87395,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "650400",
+    "name": "吐鲁番市",
+    "province": "新疆维吾尔自治区",
+    "lat": 42.94761,
+    "lng": 89.18408,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "650500",
+    "name": "哈密市",
+    "province": "新疆维吾尔自治区",
+    "lat": 42.83325,
+    "lng": 93.51316,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "652300",
+    "name": "昌吉回族自治州",
+    "province": "新疆维吾尔自治区",
+    "lat": 44.01458,
+    "lng": 87.30401,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "652700",
+    "name": "博尔塔拉蒙古自治州",
+    "province": "新疆维吾尔自治区",
+    "lat": 44.90326,
+    "lng": 82.07478,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "652800",
+    "name": "巴音郭楞蒙古自治州",
+    "province": "新疆维吾尔自治区",
+    "lat": 41.76855,
+    "lng": 86.15097,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "652900",
+    "name": "阿克苏地区",
+    "province": "新疆维吾尔自治区",
+    "lat": 41.17071,
+    "lng": 80.26507,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "653000",
+    "name": "克孜勒苏柯尔克孜自治州",
+    "province": "新疆维吾尔自治区",
+    "lat": 39.71343,
+    "lng": 76.17283,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "653100",
+    "name": "喀什地区",
+    "province": "新疆维吾尔自治区",
+    "lat": 39.46766,
+    "lng": 75.98914,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "653200",
+    "name": "和田地区",
+    "province": "新疆维吾尔自治区",
+    "lat": 37.11069,
+    "lng": 79.92533,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "654000",
+    "name": "伊犁哈萨克自治州",
+    "province": "新疆维吾尔自治区",
+    "lat": 43.92186,
+    "lng": 81.31795,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "654200",
+    "name": "塔城地区",
+    "province": "新疆维吾尔自治区",
+    "lat": 46.7463,
+    "lng": 82.98573,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "654300",
+    "name": "阿勒泰地区",
+    "province": "新疆维吾尔自治区",
+    "lat": 47.84839,
+    "lng": 88.13963,
+    "tzOffset": 8,
+    "climate": "northwest"
+  },
+  {
+    "code": "110100",
+    "name": "北京市",
+    "province": "北京市",
+    "lat": 39.904,
+    "lng": 116.407,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "120100",
+    "name": "天津市",
+    "province": "天津市",
+    "lat": 39.084,
+    "lng": 117.201,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "310100",
+    "name": "上海市",
+    "province": "上海市",
+    "lat": 31.23,
+    "lng": 121.473,
+    "tzOffset": 8,
+    "climate": "east"
+  },
+  {
+    "code": "500100",
+    "name": "重庆市",
+    "province": "重庆市",
+    "lat": 29.563,
+    "lng": 106.551,
+    "tzOffset": 8,
+    "climate": "east"
+  }
+]

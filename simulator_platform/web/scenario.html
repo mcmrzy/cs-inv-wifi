@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>电站场景 · CS-L10-6K2</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:#070d1b; --card:rgba(13,24,48,.9); --border:#1b2f55;
+      --text:#e2edff; --muted:#7d93b5; --accent:#00d4ff;
+      --amber:#ffb020; --blue:#38bdf8; --green:#00e0b8; --purple:#b39dff; --orange:#ff8a3d;
+    }
+    body { background:var(--bg); overflow:hidden; font-family:system-ui,-apple-system,sans-serif; color:var(--text); }
+    canvas { display:block; }
+
+    #hud { position:fixed; inset:0; pointer-events:none; opacity:0; transition:opacity .5s; z-index:10; }
+    #hud.show { opacity:1; }
+    .panel { background:var(--card); backdrop-filter:blur(14px); border:1px solid var(--border); border-radius:14px; box-shadow:0 6px 24px rgba(0,0,0,.4), 0 0 18px rgba(0,212,255,.06); }
+
+    #loading { position:fixed; inset:0; background:var(--bg); display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:999; gap:14px; }
+    .spin { width:44px; height:44px; border:3px solid rgba(0,212,255,.2); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .ld-txt { font-size:15px; font-weight:600; color:var(--muted); }
+    .ld-sub { font-size:12px; color:#4a6387; }
+    @media (max-width:900px){
+      .kpi-col { top:auto; bottom:120px; left:8px; flex-direction:row; flex-wrap:wrap; }
+      .kpi-col .panel { min-width:74px; padding:8px 10px; }
+      .kpi-col .panel div:nth-child(2) { font-size:16px !important; }
+      #topbar .wxgrid { display:none; }
+    }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spin"></div>
+  <div class="ld-txt">正在构建 3D 场景…</div>
+  <div class="ld-sub">真实太阳轨迹 · 天气驱动光照 · 程序化别墅（可放 models/villa.glb 自动替换）</div>
+</div>
+
+<div id="hud">
+  <!-- 顶栏 -->
+  <div id="topbar" style="position:absolute;top:12px;left:12px;right:12px;display:flex;gap:10px;align-items:flex-start">
+    <a href="/" class="panel" style="pointer-events:auto;padding:10px 16px;color:var(--muted);font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap">← 返回地图</a>
+    <div style="flex:1;pointer-events:auto" class="panel">
+      <div style="display:flex;align-items:center;gap:14px;padding:12px 18px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:17px;font-weight:700;color:var(--text)">🏠 别墅电站 3D</div>
+          <div style="font-size:12px;color:var(--muted);font-family:monospace;margin-top:2px" id="sSn">—</div>
+        </div>
+        <div class="wxgrid" style="display:flex;align-items:center;gap:10px">
+          <span id="wxIcon" style="font-size:32px">⛅</span>
+          <div style="display:grid;grid-template-columns:auto auto;gap:3px 12px;font-size:13px">
+            <span style="color:var(--muted)">天气</span><span id="wxTxt" style="color:var(--text);font-weight:600">—</span>
+            <span style="color:var(--muted)">温度</span><span id="wxTemp" style="color:var(--text);font-weight:600">—°C</span>
+            <span style="color:var(--muted)">辐照</span><span id="wxIrr" style="color:var(--amber);font-weight:700">—</span>
+            <span style="color:var(--muted)">日照</span><span id="wxDay" style="color:var(--amber);font-weight:600">—</span>
+          </div>
+        </div>
+        <div style="margin-left:auto;font-size:12px;color:var(--muted);white-space:nowrap" id="sUpdated"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 左侧 KPI -->
+  <div class="kpi-col" style="position:absolute;top:96px;left:12px;display:flex;flex-direction:column;gap:8px;pointer-events:auto">
+    <div class="panel" style="padding:12px 18px;min-width:110px;text-align:center">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">☀ 光伏功率</div>
+      <div id="kPv" style="font-size:24px;font-weight:700;color:var(--amber)">—</div>
+      <div style="font-size:11px;color:#94a3b8">W</div>
+    </div>
+    <div class="panel" style="padding:12px 18px;min-width:110px;text-align:center">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">⚡ 逆变输出</div>
+      <div id="kOut" style="font-size:24px;font-weight:700;color:var(--blue)">—</div>
+      <div style="font-size:11px;color:#94a3b8">W</div>
+    </div>
+    <div class="panel" style="padding:12px 18px;min-width:110px;text-align:center">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">🔋 电池 SOC</div>
+      <div id="kSoc" style="font-size:24px;font-weight:700;color:var(--green)">—</div>
+      <div style="font-size:11px;color:#94a3b8">%</div>
+    </div>
+    <div class="panel" style="padding:12px 18px;min-width:110px;text-align:center">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px">🏠 负载</div>
+      <div id="kLoad" style="font-size:24px;font-weight:700;color:var(--orange)">—</div>
+      <div style="font-size:11px;color:#94a3b8">W</div>
+    </div>
+  </div>
+
+  <!-- 右下图例 -->
+  <div class="panel" style="position:absolute;bottom:14px;right:14px;padding:12px 16px;font-size:12px;color:var(--muted);pointer-events:auto">
+    <div style="font-weight:700;color:var(--text);margin-bottom:8px;font-size:13px">🖱 拖拽旋转 · 滚轮缩放</div>
+    <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px"><span style="width:28px;height:3px;background:var(--amber);border-radius:2px;display:inline-block"></span> 光伏发电</div>
+    <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px"><span style="width:28px;height:3px;background:var(--blue);border-radius:2px;display:inline-block"></span> 逆变输出</div>
+    <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px"><span style="width:28px;height:3px;background:var(--green);border-radius:2px;display:inline-block"></span> 电池充放电</div>
+    <div style="display:flex;align-items:center;gap:7px"><span style="width:28px;height:3px;background:var(--purple);border-radius:2px;display:inline-block"></span> 电网</div>
+  </div>
+
+  <!-- 左下详情链接 -->
+  <a id="detailLink" href="#" class="panel" style="position:absolute;bottom:14px;left:14px;pointer-events:auto;padding:11px 20px;font-size:13px;font-weight:700;color:var(--accent);text-decoration:none">⚡ 电站详情 →</a>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.134.0/examples/js/loaders/GLTFLoader.js" async onload="window.__gltfReady=true"></script>
+<script>
+'use strict';
+// ════════════════════════════════════════════════════════════════════════════
+// 参数
+var SN = new URLSearchParams(location.search).get('sn') || 'TEST-SN-001';
+var POLL_MS = 2500;
+function $(id) { return document.getElementById(id); }
+$('sSn').textContent = SN;
+$('detailLink').href = '/station-detail.html?sn=' + encodeURIComponent(SN);
+
+var scene, camera, renderer, controls;
+var skyMesh, skyMat, sunSphere, moonSphere, sunLight, moonLight, hemiLight;
+var villaGroup;
+var invScreenMat, batScreenMat;
+var pvMeshes = [];
+var flowLines = {};
+var clouds = [];
+var rainPts = null, snowPts = null;
+var wx = { code: 2, cloud: 35, irr: 580, isDay: true };
+var CITY = null; // {lat,lng,name} 来自 telemetry
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function fmtW(w) {
+  w = Math.max(0, Math.round(w || 0));
+  return w >= 1000 ? (w / 1000).toFixed(2) + ' kW' : w + ' W';
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 真实太阳位置（NOAA 简化算法：高度角 + 方位角）
+function solarPosition(lat, lng, d) {
+  var DEG = Math.PI / 180;
+  var rad = function(x) { return x * DEG; };
+  var jd = d.getTime() / 86400000 + 2440587.5;
+  var n = jd - 2451545.0;
+  var L = ((280.460 + 0.9856474 * n) % 360 + 360) % 360;
+  var g = ((357.528 + 0.9856003 * n) % 360 + 360) % 360;
+  var gR = rad(g);
+  var lambda = rad(L + 1.915 * Math.sin(gR) + 0.020 * Math.sin(2 * gR));
+  var epsilon = 23.439 - 0.0000004 * n;
+  var decl = Math.asin(Math.sin(rad(epsilon)) * Math.sin(lambda));
+  // 方程时间（分钟）
+  var eot = 9.87 * Math.sin(2 * gR) - 7.53 * Math.cos(gR) - 1.5 * Math.sin(gR);
+  var utcH = d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600;
+  var hAngle = rad(((utcH + lng / 15 + eot / 60 - 12) * 15));
+  var cosZen = Math.sin(rad(lat)) * Math.sin(decl) +
+               Math.cos(rad(lat)) * Math.cos(decl) * Math.cos(hAngle);
+  cosZen = clamp(cosZen, -1, 1);
+  var alt = Math.PI / 2 - Math.acos(cosZen);
+  var az = Math.atan2(Math.sin(hAngle),
+         Math.cos(hAngle) * Math.sin(rad(lat)) - Math.tan(decl) * Math.cos(rad(lat)));
+  return { alt: alt, az: az }; // az: 北=0 顺时针（东=π/2 南=π 西=3π/2）
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Canvas 程序化贴图（不依赖外部资源）
+function makeTexture(size, fn) {
+  var cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  var ctx = cv.getContext('2d');
+  fn(ctx, size);
+  var tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+function grassTexture() {
+  return makeTexture(256, function(ctx, s) {
+    ctx.fillStyle = '#79b84f'; ctx.fillRect(0, 0, s, s);
+    for (var i = 0; i < 2600; i++) {
+      var c = Math.random();
+      ctx.fillStyle = c < 0.4 ? '#6aa844' : c < 0.7 ? '#84c457' : '#5e9c3c';
+      var x = Math.random() * s, y = Math.random() * s;
+      ctx.fillRect(x, y, 1.4, 2.6 + Math.random() * 2);
+    }
+  });
+}
+function wallTexture() {
+  return makeTexture(256, function(ctx, s) {
+    ctx.fillStyle = '#f3ece1'; ctx.fillRect(0, 0, s, s);
+    var rows = 6, cols = 8, bw = s / cols, bh = s / rows;
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var shade = 0.94 + Math.random() * 0.12;
+        ctx.fillStyle = 'rgb(' + Math.round(243*shade) + ',' + Math.round(236*shade) + ',' + Math.round(225*shade) + ')';
+        ctx.fillRect(c * bw + 1, r * bh + 1, bw - 2, bh - 2);
+        ctx.strokeStyle = 'rgba(180,160,130,0.6)'; ctx.lineWidth = 1;
+        ctx.strokeRect(c * bw + 0.5, r * bh + 0.5, bw - 1, bh - 1);
+      }
+    }
+  });
+}
+function roofTexture() {
+  return makeTexture(256, function(ctx, s) {
+    ctx.fillStyle = '#8a3b2e'; ctx.fillRect(0, 0, s, s);
+    var n = 14;
+    for (var r = 0; r < n; r++) {
+      for (var c = 0; c < n * 2; c++) {
+        var shade = 0.85 + Math.random() * 0.3;
+        ctx.fillStyle = 'rgb(' + Math.round(138*shade) + ',' + Math.round(59*shade) + ',' + Math.round(46*shade) + ')';
+        var x = c * (s / (n * 2)), y = r * (s / n);
+        ctx.beginPath();
+        ctx.moveTo(x, y + (s/n));
+        ctx.lineTo(x + s/(n*2), y);
+        ctx.lineTo(x + s/(n*2)*2, y + (s/n));
+        ctx.lineTo(x + s/(n*2), y + (s/n));
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+  });
+}
+function pvTexture() {
+  return makeTexture(256, function(ctx, s) {
+    ctx.fillStyle = '#122c53'; ctx.fillRect(0, 0, s, s);
+    // 电池片网格
+    var cells = 6;
+    for (var i = 0; i < cells; i++) {
+      for (var j = 0; j < cells; j++) {
+        var v = 0.75 + Math.random() * 0.35;
+        ctx.fillStyle = 'rgb(' + Math.round(18*v) + ',' + Math.round(48*v) + ',' + Math.round(95*v) + ')';
+        ctx.fillRect(j * (s/cells) + 1, i * (s/cells) + 1, s/cells - 2, s/cells - 2);
+      }
+    }
+    ctx.strokeStyle = '#2b4f8a'; ctx.lineWidth = 3;
+    for (var k = 0; k <= cells; k++) {
+      ctx.beginPath(); ctx.moveTo(k * s/cells, 0); ctx.lineTo(k * s/cells, s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, k * s/cells); ctx.lineTo(s, k * s/cells); ctx.stroke();
+    }
+  });
+}
+function roadTexture() {
+  return makeTexture(128, function(ctx, s) {
+    ctx.fillStyle = '#9aa4b0'; ctx.fillRect(0, 0, s, s);
+    for (var i = 0; i < 2000; i++) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (Math.random() * 0.06) + ')';
+      ctx.fillRect(Math.random() * s, Math.random() * s, 2, 0.6);
+      ctx.fillStyle = 'rgba(0,0,0,' + (Math.random() * 0.08) + ')';
+      ctx.fillRect(Math.random() * s, Math.random() * s, 2.4, 0.8);
+    }
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+function initScene() {
+  if (typeof THREE === 'undefined') {
+    $('loading').querySelector('.ld-txt').textContent = 'Three.js 加载失败，请检查网络';
+    return;
+  }
+
+  scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0xcfe0f0, 0.0045);
+
+  camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 500);
+  camera.position.set(20, 13, 26);
+  camera.lookAt(0, 3, 0);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  document.body.appendChild(renderer.domElement);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 3, 0);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 10;
+  controls.maxDistance = 90;
+  controls.maxPolarAngle = Math.PI / 2.02;
+  controls.update();
+
+  // 灯光（强度由 updateEnvironment 动态控制）
+  hemiLight = new THREE.HemisphereLight(0xbfd9ff, 0x6f8f5f, 0.5);
+  scene.add(hemiLight);
+
+  sunLight = new THREE.DirectionalLight(0xfff2d0, 2.0);
+  sunLight.castShadow = true;
+  sunLight.shadow.mapSize.set(2048, 2048);
+  sunLight.shadow.camera.near = 1;
+  sunLight.shadow.camera.far = 160;
+  sunLight.shadow.camera.left = -40;
+  sunLight.shadow.camera.right = 40;
+  sunLight.shadow.camera.top = 40;
+  sunLight.shadow.camera.bottom = -40;
+  sunLight.shadow.bias = -0.0004;
+  scene.add(sunLight);
+  scene.add(sunLight.target); // r134 需要 target 加入场景才能正确朝向
+
+  moonLight = new THREE.PointLight(0x8fa8cc, 0.3, 180);
+  moonLight.visible = false;
+  scene.add(moonLight);
+
+  // 天空穹顶 shader
+  var vs = `
+    varying vec3 vWP;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWP = wp.xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`;
+  var fs = `
+    uniform vec3 topColor;
+    uniform vec3 bottomColor;
+    uniform float exponent;
+    varying vec3 vWP;
+    void main() {
+      float h = normalize(vWP).y;
+      float t = max(pow(max(h, 0.0), exponent), 0.0);
+      gl_FragColor = vec4(mix(bottomColor, topColor, t), 1.0);
+    }`;
+  skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    uniforms: {
+      topColor: { value: new THREE.Color(0x2f7fe0) },
+      bottomColor: { value: new THREE.Color(0xcfe6ff) },
+      exponent: { value: 0.6 }
+    },
+    vertexShader: vs,
+    fragmentShader: fs
+  });
+  skyMesh = new THREE.Mesh(new THREE.SphereGeometry(220, 32, 20), skyMat);
+  scene.add(skyMesh);
+
+  // ── 地块地面（大草地）────
+  var gTex = grassTexture();
+  gTex.repeat.set(20, 20);
+  var gMat = new THREE.MeshStandardMaterial({ map: gTex, roughness: 1 });
+  var ground = new THREE.Mesh(new THREE.PlaneGeometry(120, 120), gMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // 车道（从门口向南）
+  var rTex = roadTexture();
+  rTex.repeat.set(1, 6);
+  var rMat = new THREE.MeshStandardMaterial({ map: rTex, roughness: .95 });
+  var drive = new THREE.Mesh(new THREE.PlaneGeometry(3.6, 26), rMat);
+  drive.rotation.x = -Math.PI / 2;
+  drive.position.set(0, 0.02, -14);
+  drive.receiveShadow = true;
+  scene.add(drive);
+
+  buildVilla();
+  buildEquipShed();
+  buildFence();
+  buildTrees();
+  buildClouds();
+  buildPrecip();
+  buildSunMoon();
+  buildFlowLines();
+  buildStars();
+
+  window.addEventListener('resize', function () {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  $('loading').style.display = 'none';
+  $('hud').classList.add('show');
+  setTimeout(tryLoadModel, 3000);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 别墅（主楼 16m×11m 两层，人字坡屋顶，南坡光伏）
+function buildVilla() {
+  villaGroup = new THREE.Group();
+  scene.add(villaGroup);
+
+  var wallMat = new THREE.MeshStandardMaterial({ map: wallTexture(), roughness: .9 });
+  var winMat = new THREE.MeshStandardMaterial({ color: 0xa8d8f0, roughness: .15, metalness: .2, emissive: 0x224466, emissiveIntensity: 0 });
+
+  var W = 16, D = 11;          // 主楼宽/深
+  var f1h = 3.1, f2h = 2.9;    // 两层高
+  var eaveY = f1h + f2h;       // 檐口高度 6.0
+  var ridgeH = 2.1;            // 屋顶脊高
+  var ridgeY = eaveY + ridgeH; // 8.1
+
+  // 地基
+  var found = new THREE.Mesh(new THREE.BoxGeometry(W + 0.9, 0.4, D + 0.9),
+    new THREE.MeshStandardMaterial({ color: 0xb8b0a4, roughness: .95 }));
+  found.position.set(0, 0.2, 0);
+  found.castShadow = true; found.receiveShadow = true;
+  villaGroup.add(found);
+
+  // 一层 / 二层
+  var f1 = new THREE.Mesh(new THREE.BoxGeometry(W, f1h, D), wallMat);
+  f1.position.set(0, f1h / 2, 0);
+  f1.castShadow = true; f1.receiveShadow = true;
+  villaGroup.add(f1);
+  var f2 = new THREE.Mesh(new THREE.BoxGeometry(W - 0.4, f2h, D - 0.4), wallMat);
+  f2.position.set(0, f1h + f2h / 2, 0);
+  f2.castShadow = true; f2.receiveShadow = true;
+  villaGroup.add(f2);
+
+  // ── 人字坡屋顶（显式顶点构建两个坡面，朝向确定）────
+  // 本场景约定：-Z 为南（太阳高处来自 -Z），+Z 为北（前门）
+  var hw = W / 2, hd = D / 2;
+  var roofGeo = function (sign) {
+    // sign=+1 南坡(z负侧)，sign=-1 北坡
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+      -hw, eaveY, sign * -hd,   hw, eaveY, sign * -hd,
+      hw, ridgeY, 0,            -hw, ridgeY, 0
+    ]), 3));
+    g.setIndex([0, 1, 2, 0, 2, 3]);
+    g.computeVertexNormals();
+    return g;
+  };
+  var roofMatDS = new THREE.MeshStandardMaterial({ map: roofTexture(), roughness: .8, side: THREE.DoubleSide });
+  var roofF = new THREE.Mesh(roofGeo(1), roofMatDS);
+  roofF.castShadow = true; roofF.receiveShadow = true;
+  villaGroup.add(roofF);
+  var roofB = new THREE.Mesh(roofGeo(-1), roofMatDS);
+  roofB.castShadow = true; roofB.receiveShadow = true;
+  villaGroup.add(roofB);
+
+  // 山墙（左右）
+  var gableH = [-hw, hw].map(function (x) {
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+      x, eaveY, -hd, x, ridgeY, 0, x, eaveY, hd
+    ]), 3));
+    geo.computeVertexNormals();
+    var m = new THREE.Mesh(geo, wallMat);
+    m.castShadow = true; m.receiveShadow = true;
+    return m;
+  });
+  gableH.forEach(function (m) { villaGroup.add(m); });
+  // 屋脊梁
+  var ridge = new THREE.Mesh(new THREE.BoxGeometry(W, 0.14, 0.16),
+    new THREE.MeshStandardMaterial({ color: 0x6b4028, roughness: .9 }));
+  ridge.position.set(0, ridgeY, 0);
+  ridge.castShadow = true;
+  villaGroup.add(ridge);
+
+  // ── 光伏板：南坡 3 行 × 5 列（贴坡面法线朝外）────
+  var pvMat = new THREE.MeshStandardMaterial({
+    map: pvTexture(), roughness: .25, metalness: .4,
+    emissive: 0xfbbf24, emissiveIntensity: 0
+  });
+  var pvW = 1.5, pvD = 0.95, pvT = 0.06;
+  var slopeAngle = Math.atan2(ridgeH, hd); // 屋顶坡度角
+  // 南坡法线（朝 -Z 上外）
+  var fn = new THREE.Vector3(0, Math.sin(slopeAngle), -Math.cos(slopeAngle)).normalize();
+  var up = new THREE.Vector3(0, 1, 0);
+  var q = new THREE.Quaternion().setFromUnitVectors(up, fn);
+  for (var r = 0; r < 3; r++) {
+    var t0 = 0.10 + r * 0.30; // 檐口→脊 归一化位置
+    for (var c = 0; c < 5; c++) {
+      var x = -hw + 1.6 + c * 2.95;
+      var t = t0 + 0.10; // 面板中心沿坡位置
+      var z = -hd + hd * t;      // 南坡 z ∈ [-hd, 0]
+      var y = eaveY + ridgeH * t;
+      var panel = new THREE.Mesh(new THREE.BoxGeometry(pvW, pvT, pvD), pvMat);
+      panel.position.set(x, y + 0.06, z);
+      panel.quaternion.copy(q);
+      panel.castShadow = true;
+      villaGroup.add(panel);
+      pvMeshes.push(panel);
+    }
+  }
+
+  // ── 窗户（前门侧 +Z 与南侧 -Z 各 3 扇，二层同）────
+  function addWin(x, y, z, rotY) {
+    var w = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.4, 0.1), winMat.clone());
+    w.position.set(x, y, z);
+    w.rotation.y = rotY;
+    w.userData.isWindow = true;
+    villaGroup.add(w);
+    var f = new THREE.Mesh(new THREE.BoxGeometry(1.34, 1.54, 0.07),
+      new THREE.MeshStandardMaterial({ color: 0xfdfdfd, roughness: .6 }));
+    f.position.set(x, y, z + (rotY === 0 ? -0.06 : 0.06));
+    villaGroup.add(f);
+  }
+  // 正门（+Z 北侧，传统朝向）
+  [[-4.5, 1.75, D / 2 + 0.05, 0], [4.5, 1.75, D / 2 + 0.05, 0],
+   [-4.5, 4.6, D / 2 + 0.05, 0], [4.5, 4.6, D / 2 + 0.05, 0]].forEach(function (p) {
+    addWin(p[0], p[1], p[2], p[3]);
+  });
+  // 南坡（-Z）侧窗
+  [[-4.5, 1.75, -D / 2 - 0.05, Math.PI], [4.5, 1.75, -D / 2 - 0.05, Math.PI],
+   [-4.5, 4.6, -D / 2 - 0.05, Math.PI], [4.5, 4.6, -D / 2 - 0.05, Math.PI]].forEach(function (p) {
+    addWin(p[0], p[1], p[2], p[3]);
+  });
+
+  // 入户门（北侧 +Z）
+  var door = new THREE.Mesh(new THREE.BoxGeometry(1.3, 2.3, 0.12),
+    new THREE.MeshStandardMaterial({ color: 0x5b3a24, roughness: .85 }));
+  door.position.set(0, 1.45, D / 2 + 0.06);
+  door.castShadow = true;
+  villaGroup.add(door);
+  var df = new THREE.Mesh(new THREE.BoxGeometry(1.55, 2.55, 0.09),
+    new THREE.MeshStandardMaterial({ color: 0xfdfdfd, roughness: .6 }));
+  df.position.set(0, 1.55, D / 2 + 0.02);
+  villaGroup.add(df);
+
+  // 门廊（北侧入口）
+  var porch = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.16, 2.0),
+    new THREE.MeshStandardMaterial({ color: 0xcfd6de, roughness: .9 }));
+  porch.position.set(0, 0.5, D / 2 + 1.2);
+  porch.castShadow = true;
+  villaGroup.add(porch);
+  var ppMat = new THREE.MeshStandardMaterial({ color: 0xe8e2d6, roughness: .8 });
+  [[-1.3, 1.7, D / 2 + 1.2], [1.3, 1.7, D / 2 + 1.2]].forEach(function (p) {
+    var post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 3.0, 8), ppMat);
+    post.position.set(p[0], p[1], p[2]);
+    post.castShadow = true;
+    villaGroup.add(post);
+  });
+  var proof = new THREE.Mesh(new THREE.BoxGeometry(3.8, 0.14, 2.1),
+    new THREE.MeshStandardMaterial({ map: roofTexture(), roughness: .85 }));
+  proof.position.set(0, 3.35, D / 2 + 1.25);
+  proof.castShadow = true;
+  villaGroup.add(proof);
+
+  // 烟囱（右侧屋顶）
+  var chi = new THREE.Mesh(new THREE.BoxGeometry(0.7, 2.0, 0.7),
+    new THREE.MeshStandardMaterial({ color: 0x9c6b4d, roughness: .9 }));
+  chi.position.set(W / 2 - 2.2, ridgeY + 0.7, -2.5);
+  chi.castShadow = true;
+  villaGroup.add(chi);
+
+  villaGroup.traverse(function (o) { if (o !== villaGroup) o.userData.procedural = true; });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 设备棚（逆变器 + 电池）—— 放在主楼右侧固定位置，互不重叠
+function buildEquipShed() {
+  // 水泥底座
+  var pad = new THREE.Mesh(new THREE.BoxGeometry(5.2, 0.16, 2.2),
+    new THREE.MeshStandardMaterial({ color: 0xc8d0d8, roughness: .95 }));
+  pad.position.set(13, 0.08, 2.5);
+  pad.castShadow = true; pad.receiveShadow = true;
+  scene.add(pad);
+
+  // 逆变器（左）
+  var invMat = new THREE.MeshStandardMaterial({ color: 0x2f3f57, roughness: .45, metalness: .4 });
+  var inv = new THREE.Mesh(new THREE.BoxGeometry(1.15, 1.55, 0.65), invMat);
+  inv.position.set(12.05, 0.95, 2.5);
+  inv.castShadow = true; inv.receiveShadow = true;
+  scene.add(inv);
+  invScreenMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x38bdf8, emissiveIntensity: .6 });
+  var scr = new THREE.Mesh(new THREE.PlaneGeometry(0.75, 0.5), invScreenMat);
+  scr.position.set(12.05, 1.15, 2.84);
+  scene.add(scr);
+  for (var i = 0; i < 3; i++) {
+    var led = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.07, 0.04),
+      new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x38bdf8, emissiveIntensity: 1 }));
+    led.position.set(12.05, 0.62 + i * 0.3, 2.84);
+    scene.add(led);
+  }
+  scene.add(makeLabel('逆变器', '#2563eb', 12.05, 2.5, 2.5));
+
+  // 电池柜（右）
+  var batMat = new THREE.MeshStandardMaterial({ color: 0x1f4d38, roughness: .45, metalness: .4 });
+  var bat = new THREE.Mesh(new THREE.BoxGeometry(1.15, 1.55, 0.65), batMat);
+  bat.position.set(13.95, 0.95, 2.5);
+  bat.castShadow = true; bat.receiveShadow = true;
+  scene.add(bat);
+  batScreenMat = new THREE.MeshStandardMaterial({ color: 0x34d399, emissive: 0x34d399, emissiveIntensity: .6 });
+  var bs = new THREE.Mesh(new THREE.PlaneGeometry(0.75, 0.5), batScreenMat);
+  bs.position.set(13.95, 1.15, 2.84);
+  scene.add(bs);
+  for (var j = 0; j < 3; j++) {
+    var l2 = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.07, 0.04),
+      new THREE.MeshStandardMaterial({ color: 0x34d399, emissive: 0x34d399, emissiveIntensity: 1 }));
+    l2.position.set(13.95, 0.62 + j * 0.3, 2.84);
+    scene.add(l2);
+  }
+  scene.add(makeLabel('电池', '#16a34a', 13.95, 2.5, 2.5));
+
+  // 配电箱（右侧小箱）
+  var db = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.35),
+    new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: .5, metalness: .3 }));
+  db.position.set(15.3, 0.65, 2.5);
+  db.castShadow = true;
+  scene.add(db);
+
+  // 电网杆 + 引线（远处）
+  var pole = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.16, 6.2, 8),
+    new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: .8 }));
+  pole.position.set(11.5, 3.1, -3.5);
+  pole.castShadow = true;
+  scene.add(pole);
+  var lineGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(11.5, 6.2, -3.5), new THREE.Vector3(12.2, 3.4, 2.3)
+  ]);
+  scene.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x4b5563 })));
+}
+
+function makeLabel(text, color, x, y, z) {
+  var cv = document.createElement('canvas');
+  cv.width = 512; cv.height = 160;
+  var ctx = cv.getContext('2d');
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.fillRect(8, 8, 496, 144);
+  ctx.strokeStyle = '#dbe4ef'; ctx.lineWidth = 6; ctx.strokeRect(8, 8, 496, 144);
+  ctx.fillStyle = color; ctx.font = 'bold 68px system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, 256, 84);
+  var tex = new THREE.CanvasTexture(cv);
+  var sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  sp.position.set(x, y, z);
+  sp.scale.set(3.2, 1.0, 1);
+  return sp;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 栅栏 / 树木（沿地块边界整齐排列）
+function buildFence() {
+  var postMat = new THREE.MeshStandardMaterial({ color: 0xd8d0c0, roughness: .85 });
+  var railMat = new THREE.MeshStandardMaterial({ color: 0xc9c0ae, roughness: .85 });
+  var B = 26; // 地块半宽
+  function post(x, z) {
+    var p = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.4, 0.14), postMat);
+    p.position.set(x, 0.7, z);
+    p.castShadow = true;
+    scene.add(p);
+  }
+  for (var x = -B; x <= B; x += 2.9) { post(x, -B); post(x, B); }
+  for (var z = -B; z <= B; z += 2.9) { post(-B, z); post(B, z); }
+  [0.55, 1.05].forEach(function (h) {
+    var b = new THREE.Mesh(new THREE.BoxGeometry(B * 2 + 0.1, 0.08, 0.08), railMat);
+    b.position.set(0, h, -B); scene.add(b);
+    var b2 = b.clone(); b2.position.set(0, h, B); scene.add(b2);
+    var s1 = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, B * 2 + 0.1), railMat);
+    s1.position.set(-B, h, 0); scene.add(s1);
+    var s2 = s1.clone(); s2.position.set(B, h, 0); scene.add(s2);
+  });
+}
+
+function buildTrees() {
+  function tree(x, z, h, r) {
+    var g = new THREE.Group();
+    var trunk = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.14, r * 0.2, h * 0.42, 8),
+      new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: .9 }));
+    trunk.position.y = h * 0.21;
+    trunk.castShadow = true;
+    g.add(trunk);
+    var greens = [0x2e7d32, 0x388e3c, 0x43a047];
+    var layers = [[h * 0.5, r * 1.15, 0], [h * 0.7, r * 0.9, h * 0.18], [h * 0.85, r * 0.62, h * 0.32]];
+    for (var i = 0; i < layers.length; i++) {
+      var leaves = new THREE.Mesh(new THREE.ConeGeometry(layers[i][1], layers[i][0], 9),
+        new THREE.MeshStandardMaterial({ color: greens[i], roughness: .85 }));
+      leaves.position.y = h * 0.26 + layers[i][2];
+      leaves.castShadow = true;
+      g.add(leaves);
+    }
+    g.position.set(x, 0, z);
+    scene.add(g);
+  }
+  // 沿栅栏内一圈 + 车道两旁（整齐不散乱）
+  var B = 24;
+  var k = 0;
+  for (var x = -B; x <= B; x += 8, k++) {
+    var h1 = 3.2 + (k % 3) * 0.5;
+    tree(x, -B + 1.5, h1, 1.4);
+    tree(x + 4, B - 1.5, 3.6, 1.4);
+  }
+  k = 0;
+  for (var z = -B + 8; z <= B - 8; z += 8, k++) {
+    tree(-B + 1.5, z, 3.0 + (k % 3) * 0.5, 1.3);
+    tree(B - 1.5, z + 4, 3.2 + (k % 2) * 0.4, 1.35);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 云 / 雨 / 雪 / 星星
+function buildClouds() {
+  function makeCloud(x, y, z) {
+    var mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, transparent: true, opacity: .55 });
+    var g = new THREE.Group();
+    var puffs = [[0, 0, 0, 2.0], [1.9, 0.45, 0, 1.5], [-1.8, 0.35, 0, 1.4], [0.7, 0.95, 0, 1.15], [-1.0, 0.75, 0.4, 1.0]];
+    for (var i = 0; i < puffs.length; i++) {
+      var m = new THREE.Mesh(new THREE.SphereGeometry(puffs[i][3], 10, 8), mat);
+      m.position.set(puffs[i][0], puffs[i][1], puffs[i][2]);
+      m.scale.y = 0.65;
+      g.add(m);
+    }
+    g.position.set(x, y, z);
+    g.userData.baseX = x;
+    scene.add(g);
+    clouds.push(g);
+  }
+  makeCloud(-20, 27, -24); makeCloud(12, 29, -30); makeCloud(26, 25, -20);
+  makeCloud(-8, 31, -38); makeCloud(34, 23, -26); makeCloud(-30, 24, -12); makeCloud(20, 27, 16);
+  makeCloud(-14, 33, 10);
+}
+
+function buildPrecip() {
+  var n = 800;
+  var pos = new Float32Array(n * 3);
+  for (var i = 0; i < n; i++) {
+    pos[i * 3] = (Math.random() - 0.5) * 70;
+    pos[i * 3 + 1] = Math.random() * 18;
+    pos[i * 3 + 2] = (Math.random() - 0.5) * 60;
+  }
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  rainPts = new THREE.Points(g, new THREE.PointsMaterial({ color: 0x6fa8dc, size: 0.1, transparent: true, opacity: .85 }));
+  rainPts.visible = false;
+  scene.add(rainPts);
+
+  var n2 = 500;
+  var pos2 = new Float32Array(n2 * 3);
+  for (var j = 0; j < n2; j++) {
+    pos2[j * 3] = (Math.random() - 0.5) * 70;
+    pos2[j * 3 + 1] = Math.random() * 18;
+    pos2[j * 3 + 2] = (Math.random() - 0.5) * 60;
+  }
+  var g2 = new THREE.BufferGeometry();
+  g2.setAttribute('position', new THREE.BufferAttribute(pos2, 3));
+  snowPts = new THREE.Points(g2, new THREE.PointsMaterial({ color: 0xffffff, size: 0.24, transparent: true, opacity: .9 }));
+  snowPts.visible = false;
+  scene.add(snowPts);
+}
+
+function buildStars() {
+  var n = 700;
+  var pos = new Float32Array(n * 3);
+  for (var i = 0; i < n; i++) {
+    var th = Math.random() * Math.PI * 2;
+    var ph = Math.acos(Math.random() * 2 - 1);
+    var r = 200;
+    pos[i * 3] = r * Math.sin(ph) * Math.cos(th);
+    pos[i * 3 + 1] = Math.abs(r * Math.cos(ph)) * 0.9 + 10;
+    pos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
+  }
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  var pts = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 0.35, transparent: true, opacity: 0 }));
+  pts.userData.stars = true;
+  scene.add(pts);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 太阳 / 月亮 天体网格
+function buildSunMoon() {
+  sunSphere = new THREE.Mesh(new THREE.SphereGeometry(3.0, 24, 18),
+    new THREE.MeshBasicMaterial({ color: 0xffe066 }));
+  sunSphere.position.set(40, 45, -30);
+  scene.add(sunSphere);
+  var glow = new THREE.Mesh(new THREE.SphereGeometry(5.6, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0xfff2b0, transparent: true, opacity: 0.16, depthWrite: false }));
+  sunSphere.add(glow);
+
+  moonSphere = new THREE.Mesh(new THREE.SphereGeometry(2.0, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0xe2e8f0 }));
+  moonSphere.visible = false;
+  scene.add(moonSphere);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 能量流线
+function buildFlowLines() {
+  function makeLine(id, pts, color) {
+    var curve = new THREE.CatmullRomCurve3(pts.map(function (p) { return new THREE.Vector3(p[0], p[1], p[2]); }));
+    var geo = new THREE.TubeGeometry(curve, 24, 0.07, 8, false);
+    var mat = new THREE.MeshStandardMaterial({ color: color, emissive: color, emissiveIntensity: 0, transparent: true, opacity: 0 });
+    var mesh = new THREE.Mesh(geo, mat);
+    mesh.visible = false;
+    scene.add(mesh);
+    flowLines[id] = mesh;
+  }
+  // 光伏 → 屋顶汇流 → 设备棚逆变器
+  makeLine('pv', [[0, 7.6, -2.2], [3, 5.2, 0.4], [8, 3.6, 2.0], [12.05, 2.1, 2.5]], 0xf59e0b);
+  // 逆变器 → 入户（交流）
+  makeLine('ac', [[12.05, 1.0, 2.5], [7, 1.0, 3.4], [2, 1.2, 5.2], [0, 1.1, 5.6]], 0x38bdf8);
+  // 电池 ↔ 逆变器
+  makeLine('bat', [[12.05, 1.0, 2.5], [13.95, 1.0, 2.5]], 0x34d399);
+  // 电网
+  makeLine('grid', [[11.5, 4.6, -3.2], [12.0, 2.2, 2.0]], 0x8b5cf6);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 环境模拟：真实太阳位置 + 天气驱动
+var sunAlt = 0.5, sunAz = 0;
+
+function updateEnvironment(d) {
+  var isD = d.isDay !== false && d.isDay !== 0;
+  var cloud = d.cloudCover != null ? d.cloudCover : wx.cloud;
+  var irr = d.irradiance != null ? d.irradiance : wx.irr;
+  var code = d.weatherCode != null ? d.weatherCode : wx.code;
+  wx = { code: code, cloud: cloud, irr: irr, isDay: isD };
+
+  // ── 真实太阳位置（若城市未知则回退演示曲线）────
+  var now = new Date();
+  if (CITY && CITY.lat != null && CITY.lng != null) {
+    var sp = solarPosition(CITY.lat, CITY.lng, now);
+    sunAlt = sp.alt;
+    sunAz = sp.az;
+  } else {
+    // 演示：正午最高、早晚地平线（cos 曲线）
+    var h = (now.getHours() + now.getMinutes() / 60) - 12;
+    sunAlt = clamp(Math.cos((h / 12) * Math.PI) * 1.15, -0.35, 1.2) * (isD ? 1 : 0.5);
+    sunAz = Math.PI / 2 + (h / 24) * Math.PI * (isD ? 1.4 : 0.6);
+  }
+  // 阴天辐照低时压低太阳
+  if (isD) sunAlt = Math.max(0.03, sunAlt * (0.55 + 0.45 * clamp(irr / 900, 0, 1)));
+
+  var R = 70;
+  var sx = R * Math.cos(sunAlt) * Math.sin(sunAz);
+  var sy = R * Math.sin(sunAlt);
+  var sz = R * Math.cos(sunAlt) * Math.cos(sunAz);
+
+  sunLight.position.set(sx, sy, sz);
+  sunLight.target.position.set(0, 0, 0);
+  sunSphere.position.set(sx, sy, sz);
+
+  // 光照强度随辐照/昼夜
+  var solar = clamp(irr / 1000, 0, 1);
+  sunLight.intensity = isD ? (0.25 + 2.3 * solar) : 0;
+  sunLight.color.setHSL(0.09, 0.65, 0.5 + clamp(sunAlt, 0, 1) * 0.25);
+  hemiLight.intensity = isD ? (0.35 + 0.5 * solar) : 0.12;
+  moonLight.visible = !isD;
+  sunSphere.visible = isD && sunAlt > -0.06;
+  moonSphere.visible = !isD;
+  renderer.toneMappingExposure = isD ? (0.65 + 0.55 * solar) : 0.55;
+
+  // 月亮位置（与太阳相对）
+  moonSphere.position.set(-sx * 0.8, 30, -sz * 0.8 + 20);
+  moonLight.position.copy(moonSphere.position);
+
+  // ── 天空颜色：随太阳高度变化 ──
+  var dayT = new THREE.Color(0x2f7fe0), dayB = new THREE.Color(0xdcecff);
+  var duskT = new THREE.Color(0x2b3a6e), duskB = new THREE.Color(0xffb36b);
+  var nightT = new THREE.Color(0x030814), nightB = new THREE.Color(0x0d1830);
+  var k = clamp((sunAlt + 0.10) / 0.55, 0, 1); // 0=夜 1=白天
+  var top = new THREE.Color().lerpColors(nightT, duskT, clamp(k * 1.7, 0, 1));
+  top.lerp(dayT, clamp((k - 0.35) * 2.4, 0, 1));
+  var bot = new THREE.Color().lerpColors(nightB, duskB, clamp(k * 1.7, 0, 1));
+  bot.lerp(dayB, clamp((k - 0.35) * 2.4, 0, 1));
+  // 阴天压暗天空
+  var dim = 1 - 0.35 * clamp(cloud / 100, 0, 1);
+  top.multiplyScalar(dim);
+  bot.multiplyScalar(dim);
+  skyMat.uniforms.topColor.value.copy(top);
+  skyMat.uniforms.bottomColor.value.copy(bot);
+
+  // ── 云量 → 云透明度 ──
+  var targetOp = clamp(0.18 + cloud / 130, 0.2, 0.92);
+  for (var ci = 0; ci < clouds.length; ci++) {
+    clouds[ci].traverse(function (o) {
+      if (o.isMesh) o.material.opacity = targetOp;
+    });
+  }
+
+  // 雾
+  scene.fog.color.copy(bot);
+  scene.fog.density = isD ? (0.0025 + cloud * 0.00012) : 0.008;
+
+  // 降水
+  var rainCodes = [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99];
+  var snowCodes = [71, 73, 75, 77];
+  if (rainPts) rainPts.visible = rainCodes.indexOf(code) >= 0;
+  if (snowPts) snowPts.visible = snowCodes.indexOf(code) >= 0;
+
+  // 星星
+  scene.traverse(function (o) {
+    if (o.userData && o.userData.stars) o.material.opacity = isD ? 0 : 0.85;
+  });
+
+  // 窗户灯（夜间亮起）
+  villaGroup.traverse(function (o) {
+    if (o.userData.isWindow) {
+      o.material.emissive.set(isD ? 0x224466 : 0xffcc66);
+      o.material.emissiveIntensity = isD ? 0.12 : 0.85;
+    }
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 数据渲染
+function updatePvGlow(pvW) {
+  var intensity = clamp((pvW - 100) / 2000, 0, 0.9);
+  for (var i = 0; i < pvMeshes.length; i++) {
+    pvMeshes[i].material.emissiveIntensity = intensity;
+  }
+}
+
+var flowT = 0;
+function updateFlowLines(pvOn, acOn, batOn, gridOn) {
+  var pulse = 0.55 + 0.45 * Math.sin(flowT * 0.08);
+  function set(id, on, color) {
+    var m = flowLines[id];
+    if (!m) return;
+    m.visible = on;
+    if (on) {
+      m.material.color.set(color);
+      m.material.emissive.set(color);
+      m.material.emissiveIntensity = 0.6 + pulse;
+      m.material.opacity = 0.7 + pulse * 0.3;
+    }
+  }
+  set('pv', pvOn, 0xf59e0b);
+  set('ac', acOn, 0x38bdf8);
+  set('bat', batOn, 0x34d399);
+  set('grid', gridOn, 0x8b5cf6);
+  flowT++;
+}
+
+function updateUI(d) {
+  if (!d) return;
+  var isD = d.isDay !== false && d.isDay !== 0;
+  var pvW = (d.Ppv != null ? d.Ppv : 0) / 10;
+  var outW = (d.OutputWatt != null ? d.OutputWatt : 0) / 10;
+  var soc = d.BatterySOC != null ? d.BatterySOC : 0;
+  var cloud = d.cloudCover != null ? d.cloudCover : 0;
+  var irr = d.irradiance != null ? d.irradiance : 0;
+  var code = d.weatherCode != null ? d.weatherCode : 0;
+
+  // 城市（驱动真实太阳）——来自 telemetry.city 或 sn
+  if (d.city && (!CITY || CITY.name !== d.city)) {
+    // 城市坐标由 /api/cities 补充
+    fetch('/api/cities').then(function (r) { return r.json(); }).then(function (cs) {
+      var hit = cs.find(function (c) { return c.name === d.city; });
+      if (hit) CITY = { lat: hit.lat, lng: hit.lng, name: hit.name };
+    }).catch(function () {});
+  }
+
+  $('kPv').textContent = fmtW(pvW);
+  $('kOut').textContent = fmtW(outW);
+  $('kSoc').textContent = soc;
+  $('kLoad').textContent = fmtW(outW);
+
+  var wxIconMap = { 0: '☀️', 1: '☀️', 2: '⛅', 3: '🌥️', 4: '☁️', 45: '🌫️', 48: '🌫️', 51: '🌦️', 53: '🌦️', 55: '🌧️', 61: '🌧️', 63: '🌧️', 65: '🌧️', 71: '🌨️', 73: '🌨️', 75: '🌨️', 80: '🌧️', 81: '🌧️', 82: '🌧️', 95: '⛈️', 96: '⛈️', 99: '⛈️' };
+  var wxTxtMap = { 0: '晴', 1: '晴', 2: '多云', 3: '阴', 4: '阴', 45: '雾', 48: '雾', 51: '毛毛雨', 53: '毛毛雨', 55: '毛毛雨', 61: '小雨', 63: '中雨', 65: '大雨', 71: '小雪', 73: '中雪', 75: '大雪', 80: '阵雨', 81: '中阵雨', 82: '大阵雨', 95: '雷暴', 96: '雷暴', 99: '强雷暴' };
+  $('wxIcon').textContent = isD ? (wxIconMap[code] || '☀️') : '🌙';
+  $('wxTxt').textContent = isD ? (wxTxtMap[code] || '晴') : '晴夜';
+  $('wxTemp').textContent = (d.tempC != null ? d.tempC : '—') + '°C';
+  $('wxIrr').textContent = Math.round(irr) + ' W/m²';
+  $('wxDay').textContent = isD ? '☀️ 日间' : '🌙 夜间';
+  $('sUpdated').textContent = '更新: ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + (CITY ? ' · ' + CITY.name : '');
+
+  updateEnvironment(d);
+  updatePvGlow(pvW);
+
+  var sys = d.SysStatus || 0;
+  updateFlowLines(pvW > 30, outW > 10, (sys & 0x0004) || (sys & 0x0008), (sys & 0x0400) || (sys & 0x0080));
+
+  // 电池 LED 随 SOC 变色（绿 → 红）
+  if (batScreenMat) {
+    var ratio = clamp(soc / 100, 0, 1);
+    var r = Math.round(52 + (248 - 52) * (1 - ratio));
+    var g = Math.round(211 - (211 - 113) * ratio);
+    var col = (r << 16) | (g << 8) | 153;
+    batScreenMat.color.setHex(col);
+    batScreenMat.emissive.setHex(col);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 轮询
+async function poll() {
+  try {
+    var r = await fetch('/api/devices/' + SN + '/status');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var j = await r.json();
+    updateUI(j.telemetry || j);
+  } catch (e) {
+    $('sUpdated').textContent = '离线（演示数据）';
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 可选 GLB 模型（放 web/models/villa.glb 即可自动替换程序化别墅）
+function tryLoadModel() {
+  if (!window.__gltfReady || typeof THREE.GLTFLoader === 'undefined') return;
+  var loader = new THREE.GLTFLoader();
+  loader.load('models/villa.glb', function (gltf) {
+    var m = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+    if (!m) return;
+    var box = new THREE.Box3().setFromObject(m);
+    var size = box.getSize(new THREE.Vector3());
+    var center = box.getCenter(new THREE.Vector3());
+    m.position.x -= center.x;
+    m.position.z -= center.z;
+    m.position.y -= box.min.y;
+    var scale = 16 / Math.max(size.x, size.z, 1e-4);
+    m.scale.setScalar(scale);
+    var toRemove = [];
+    villaGroup.children.forEach(function (c) { toRemove.push(c); });
+    toRemove.forEach(function (c) { villaGroup.remove(c); });
+    pvMeshes = [];
+    villaGroup.add(m);
+    villaGroup.traverse(function (o) { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  }, undefined, function () { /* 无本地模型则保留程序化别墅 */ });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 动画循环
+var t = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  t += 0.002;
+
+  // 云漂移
+  for (var i = 0; i < clouds.length; i++) {
+    clouds[i].position.x = clouds[i].userData.baseX + Math.sin(t * 0.15 + i * 1.3) * 3;
+    clouds[i].position.y += Math.sin(t * 0.3 + i) * 0.002;
+  }
+  // 太阳缓慢移动（真实位置每分钟由轮询更新，这里只加微抖动）
+  sunSphere.position.y += Math.sin(t * 0.05) * 0.01;
+
+  // 雨 / 雪下落
+  if (rainPts && rainPts.visible) {
+    var arr = rainPts.geometry.attributes.position.array;
+    for (var ri = 0; ri < arr.length; ri += 3) {
+      arr[ri + 1] -= 0.4;
+      if (arr[ri + 1] < 0) { arr[ri + 1] = 14 + Math.random() * 4; arr[ri] = (Math.random() - 0.5) * 70; arr[ri + 2] = (Math.random() - 0.5) * 60; }
+    }
+    rainPts.geometry.attributes.position.needsUpdate = true;
+  }
+  if (snowPts && snowPts.visible) {
+    var arr2 = snowPts.geometry.attributes.position.array;
+    for (var si = 0; si < arr2.length; si += 3) {
+      arr2[si + 1] -= 0.09;
+      arr2[si] += Math.sin(t + si) * 0.01;
+      if (arr2[si + 1] < 0) { arr2[si + 1] = 14 + Math.random() * 4; }
+    }
+    snowPts.geometry.attributes.position.needsUpdate = true;
+  }
+
+  if (controls) controls.update();
+  if (renderer) renderer.render(scene, camera);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 启动（先演示数据，随后被真实数据覆盖）
+initScene();
+animate();
+
+updateUI({
+  sn: SN, city: '南京市', isDay: true, weatherCode: 2, tempC: 24, cloudCover: 35,
+  irradiance: 580, Ppv: 32000, OutputWatt: 24000, BatterySOC: 72,
+  BatChrWatt: 0, BatDisChrWatt: 4200, SysStatus: 0x0010
+});
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

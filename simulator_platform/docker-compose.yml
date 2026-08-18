@@ -1,0 +1,32 @@
+# CS-L10-6K2 认领模拟平台 — Docker 编排
+name: cs-inv-simulator
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cs-inv-simulator:latest
+    container_name: cs-inv-simulator
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      # MQTT（对齐 ESP32 固件，见 esp32c3_l10_idf sdkconfig）
+      - MQTT_HOST=${MQTT_HOST:-mqtt.jiuxiaoyw.online}
+      - MQTT_PORT=${MQTT_PORT:-8883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-CSKJ-INV-DEVICE-6K2}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-CSKJINVDEVICE6K2}
+      - MQTT_TLS=${MQTT_TLS:-1}
+      - PORT=8080
+      - DATA_DIR=/app/data
+      # 天气：默认真实（Open-Meteo，免费无 key）；=1 关闭走内置气候
+      - WEATHER_DISABLE=${WEATHER_DISABLE:-0}
+      - WEATHER_API_KEY=${WEATHER_API_KEY:-}
+    volumes:
+      - sim_data:/app/data
+    networks:
+      - default
+
+volumes:
+  sim_data:

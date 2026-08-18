@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CS-L10-6K2 逆变器光伏电站模拟系统</title>
+  <link rel="stylesheet" href="css/styles.css" />
+  <script src="vendor/qrcode-generator.js"></script>
+  <script src="js/qrcode.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>CS-L10-6K2 逆变器光伏电站模拟系统 <span class="sub">真实天气 · 算法模拟 · 设备认领</span></h1>
+  <div class="legend">
+    <span><span class="dot dot-blue"></span>未认领</span>
+    <span><span class="dot dot-green"></span>已认领</span>
+    <span>已认领 <b class="stat-num" id="claimedCount">0</b> · 待认领 <b class="stat-num" id="unclaimedCount">0</b></span>
+  </div>
+</header>
+
+<main>
+  <div id="mapwrap">
+    <svg id="china" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div class="zoomctl">
+      <button id="z-in" title="放大">＋</button>
+      <button id="z-out" title="缩小">－</button>
+      <button id="z-reset" title="复位">⌂</button>
+    </div>
+    <div class="zoomhint">滚轮缩放 · 拖拽平移 · 双击放大</div>
+  </div>
+</main>
+
+<div id="modal" class="modal-mask">
+  <div class="modal">
+    <div class="modal-hd">
+      <div>
+        <h2 id="m-city">—</h2>
+        <p class="modal-prov" id="m-prov">—</p>
+      </div>
+      <button class="modal-close" id="m-close">×</button>
+    </div>
+    <div id="m-body"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="js/map.js?v=20260818a"></script>
+<script src="js/app.js?v=20260818a"></script>
+</body>
+</html>
