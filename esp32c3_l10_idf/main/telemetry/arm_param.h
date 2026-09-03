@@ -3,7 +3,7 @@
  *
  * 布局说明:
  *  - RunParamDef     176 字节 (0x03E8 起, 88 个 u16), 以 ARM 源码为准
- *  - OnlyReadDataDef 44 字节  (0x0190 起, 22 个 u16)
+ *  - OnlyReadDataDef 52 字节  (0x0190 起, 26 个 u16; Inverter_SN1..4 = 4×u32, 16B ASCII 自然序)
  *  - ReadWiteDataDef 4 字节   (0x00C8 起)
  *  - 控制参数        0x0000-0x0053 (84 字节, 42 个 u16)
  */
@@ -98,7 +98,14 @@
 #define INDEX_SOC_MAX_UTL_CHG         0x0052
 #define INDEX_VMAX_UTL_CHG            0x0053
 
-#define CONFIG_PARAM_MAX_INDEX (INDEX_VMAX_UTL_CHG + 1)   /* 84 字节 / 42 个 u16 */
+#define CONFIG_PARAM_MAX_INDEX (INDEX_VMAX_UTL_CHG + 1)   /* 84 个 u16 索引 */
+
+/* ==================== 控制参数读取区 (READ_CTRLPARAM 0x01) ==================== */
+/* ARM 端 ReadUserCtrlParam 校验 param1+param2 <= ConfigParamMaxIndex(84),
+   故 0x01 最大读取 84 字节 = 42 个 u16 (索引 0x0000-0x0029), 即 V2.1 协议 9.2 表 42 键 */
+#define CTRL_PARAM_START_INDEX 0x0000
+#define CTRL_PARAM_SIZE        84      /* 可读取的最大字节数 */
+#define CTRL_PARAM_COUNT       42      /* 42 个 u16 */
 
 /* ==================== 运行参数 (RunParamDef, 176 字节) ==================== */
 #define RUN_PARAM_START_INDEX 0x03E8
@@ -186,33 +193,37 @@ typedef struct {
 } ReadWiteDataDef;           /* 4 字节 */
 #pragma pack(pop)
 
-/* ==================== 只读数据 (OnlyReadData_Def, 44 字节) ==================== */
+/* ==================== 只读数据 (OnlyReadData_Def, 52 字节) ==================== */
+/* ARM 侧 pack(1): 5×u16(0..9) + Inverter_SN1..4 (4×u32, 偏移 10..25, 小端 ASCII
+   自然序) + 13×u16 (偏移 26..51, 相对旧 44B 布局整体后移 8B)。
+   全量读取 0x0190 起 52B (0x0190-0x01A9, 26 个 u16)。 */
 #define ONLYREAD_START_INDEX 0x0190
-#define ONLYREAD_END_INDEX   0x01A5
+#define ONLYREAD_END_INDEX   0x01A9
 #define INDEX_ARM_FW_VER     0x0190
 #define INDEX_DSP_FW_VER     0x0191
 #define INDEX_INV_MODULE_L   0x0192
 #define INDEX_INV_MODULE_H   0x0193
 #define INDEX_HW_VER         0x0194
+/* 4×u32 各占 2 个 u16 字: SN1@0x195, SN2@0x197, SN3@0x199, SN4@0x19B (起始字) */
 #define INDEX_INV_SN1        0x0195
-#define INDEX_INV_SN2        0x0196
-#define INDEX_INV_SN3        0x0197
-#define INDEX_INV_SN4        0x0198
-#define INDEX_DEV_TYPE_CODE_L 0x0199
-#define INDEX_DEV_TYPE_CODE_H 0x019A
-#define INDEX_RATE_WATT      0x019B
-#define INDEX_RATE_VA        0x019C
-#define INDEX_NOM_GRID_VOLT  0x019D
-#define INDEX_NOM_GRID_FREQ  0x019E
-#define INDEX_NOM_BAT_VOLT   0x019F
-#define INDEX_NOM_PV_CURR    0x01A0
-#define INDEX_NOM_AC_CHG_CURR 0x01A1
-#define INDEX_NOM_OP_VOLT    0x01A2
-#define INDEX_NOM_OP_FREQ    0x01A3
-#define INDEX_NOM_OP_POW     0x01A4
-#define INDEX_BL_VERSION     0x01A5
+#define INDEX_INV_SN2        0x0197
+#define INDEX_INV_SN3        0x0199
+#define INDEX_INV_SN4        0x019B
+#define INDEX_DEV_TYPE_CODE_L 0x019D
+#define INDEX_DEV_TYPE_CODE_H 0x019E
+#define INDEX_RATE_WATT      0x019F
+#define INDEX_RATE_VA        0x01A0
+#define INDEX_NOM_GRID_VOLT  0x01A1
+#define INDEX_NOM_GRID_FREQ  0x01A2
+#define INDEX_NOM_BAT_VOLT   0x01A3
+#define INDEX_NOM_PV_CURR    0x01A4
+#define INDEX_NOM_AC_CHG_CURR 0x01A5
+#define INDEX_NOM_OP_VOLT    0x01A6
+#define INDEX_NOM_OP_FREQ    0x01A7
+#define INDEX_NOM_OP_POW     0x01A8
+#define INDEX_BL_VERSION     0x01A9
 
-#define ONLYREAD_DATA_SIZE   44      /* 22 个 u16 */
+#define ONLYREAD_DATA_SIZE   52      /* 26 个 u16 */
 
 #pragma pack(push, 1)
 typedef struct {
@@ -221,10 +232,10 @@ typedef struct {
     uint16_t InverterModuleL;
     uint16_t InverterModuleH;
     uint16_t HardwareVersion;
-    uint16_t Inverter_SN1;
-    uint16_t Inverter_SN2;
-    uint16_t Inverter_SN3;
-    uint16_t Inverter_SN4;
+    uint32_t Inverter_SN1;   /* 4 个 ASCII 字符, 小端: ch0 | ch1<<8 | ch2<<16 | ch3<<24 */
+    uint32_t Inverter_SN2;
+    uint32_t Inverter_SN3;
+    uint32_t Inverter_SN4;
     uint16_t DeviceTypeCodeL;
     uint16_t DeviceTypeCodeH;
     uint16_t RateWatt;
@@ -238,7 +249,9 @@ typedef struct {
     uint16_t NomOpFreq;
     uint16_t NomOpPow;
     uint16_t BLVersion;
-} OnlyReadDataDef;           /* 44 字节 */
+} OnlyReadDataDef;           /* 52 字节 */
 #pragma pack(pop)
+
+_Static_assert(sizeof(OnlyReadDataDef) == 52, "OnlyReadDataDef must be 52B");
 
 #endif /* ARM_PARAM_H */
