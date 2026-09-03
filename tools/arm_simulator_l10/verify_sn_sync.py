@@ -141,6 +141,8 @@ check("零写入", s.nvs_writes == 0)
 check("不重启", main_loop_decide(s.s_sn_changed, False) is False)
 check("全 0x00 → None", sn_bytes_to_str(b'\x00' * 16) is None)
 check("长度非 16 → None", sn_bytes_to_str(b'abc') is None)
+check("短 SN 右补零 → 自然序保留", sn_bytes_to_str(b"ABC" + b'\x00' * 13) == "ABC")
+check("中段 0x00 → 跳过且保序", sn_bytes_to_str(b"A\x00B" + b'\x00' * 13) == "AB")
 
 print("== 场景 E: 多轮轮询不重复写 ==")
 s = SimSync(nvs_sn="H1CNA0013500001O")
