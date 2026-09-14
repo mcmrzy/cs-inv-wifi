@@ -69,4 +69,20 @@ uint16_t ble_prov_get_ota_status_handle(void);
  */
 void ble_prov_set_ota_access_cb(void *cb);
 
+/**
+ * @brief GAP 事件转发回调（由 ble_ct 注册）
+ */
+struct ble_gap_event;
+typedef int (*BleGapEventForwardCb)(struct ble_gap_event *event, void *arg);
+void ble_prov_set_gap_event_forward(BleGapEventForwardCb cb);
+
+/**
+ * @brief host 启动前回调（用于注册额外 GATT 服务）
+ *
+ * 在 nimble_port_freertos_init() 之前调用，此时 NimBLE 已初始化
+ * 但 host 尚未启动，可以安全注册 GATT 服务。
+ */
+typedef void (*BlePreHostStartCb)(void);
+void ble_prov_set_pre_host_start_cb(BlePreHostStartCb cb);
+
 #endif // BLE_PROV_H

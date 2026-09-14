@@ -1,12 +1,12 @@
 menu "CS_INV L10 Module"
 
     config CS_INV_UART_TX_PIN
-        int "UART TX GPIO"
-        default 0
+        int "UART TX GPIO (U0TXD)"
+        default 1
 
     config CS_INV_UART_RX_PIN
-        int "UART RX GPIO"
-        default 1
+        int "UART RX GPIO (U0RXD)"
+        default 0
 
     config CS_INV_UART_BAUD
         int "UART baudrate"
@@ -22,7 +22,7 @@ menu "CS_INV L10 Module"
 
     config CS_INV_MQTT_HOST
         string "MQTT broker host"
-        default "jiuxiaoyw.online"
+        default "mqtt.jiuxiaoyw.online"
 
     config CS_INV_MQTT_PORT
         int "MQTT broker port"

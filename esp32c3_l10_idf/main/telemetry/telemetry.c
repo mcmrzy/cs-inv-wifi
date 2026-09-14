@@ -3,7 +3,7 @@
  *
  * V2.1 协议 (CS-L10-6K2_MQTT_上报协议设计_V2.1.md):
  *  - heartbeat: 57 值 {sys[11], pv[5], ac[11], chr[3], bat[5], eng[14], fan[2], diag[3], sock[3]}
- *    180s + 启动立即 + query_telemetry 补报; 实时快照未连接时直接丢弃
+ *    30s + 启动立即 + query_telemetry 补报; 实时快照未连接时直接丢弃
  *  - info: 设备能力与固件信息 (连接时/信息变化/query_info)
  *  - config: v2 语义键值对 (连接时/写入生效后/query_config, 42 键工程单位 + rev)
  *  - alarm: {source, code, level, state} 事件闭环 (QoS1)
@@ -36,7 +36,7 @@ static const char *TAG = "TELE";
 #define TOPIC_CONFIG     PROTO_TOPIC_CONFIG
 
 static uint32_t s_now_ms;
-static uint32_t s_last_hb_ms;        /* V2 heartbeat 上次发布时刻 (180s) */
+static uint32_t s_last_hb_ms;        /* V2 heartbeat 上次发布时刻 (30s) */
 static uint32_t s_last_online_ms;    /* 在线状态上次发布时刻 (90s) */
 static uint32_t s_last_info_ms;      /* 上次 info 发布时刻 (arm 时间戳) */
 static uint32_t s_last_config_ms;    /* 上次 config 发布时刻 (arm 时间戳) */
@@ -46,7 +46,7 @@ static bool     s_alarm_armed;       /* 首次收到运行参数后开始检测 
 static uint64_t s_last_warning;
 static uint32_t s_last_fault;
 static uint16_t s_last_bms;
-static uint32_t s_arm_fail_count;    /* ARM 连续无应答计数 (180s 周期) */
+static uint32_t s_arm_fail_count;    /* ARM 连续无应答计数 (30s 周期) */
 static bool     s_fault_reported;    /* 故障已上报, 恢复前不重复触发 */
 
 static uint32_t now_ms(void)
@@ -220,14 +220,13 @@ static void publish_info(const OnlyReadDataDef *o)
         snprintf(sn_json, sizeof(sn_json), "\"sn\":\"%s\",", sn_str);
     }
 
-    /* 额定参数: NomOpVolt 0.1V / NomOpFreq 0.01Hz / NomBatVolt 0.01V */
+    /* 额定参数: ARM 只读区按自然单位填充 (Collector.c: NomOpVolt=240 → 240V,
+     * NomOpFreq=60 → 60Hz, NomBatVolt=60 → 60V); 协议文档的 0.1V/0.01Hz/0.01V
+     * 标度与 ARM 实际实现不符 (同类问题见后端 7e2d1fc50 的双格式兼容), 直接透传 */
     char rated_v[16], rated_f[16], bat_nom[16];
-    snprintf(rated_v, sizeof(rated_v), "%u.%u",
-             (unsigned)(o->NomOpVolt / 10), (unsigned)(o->NomOpVolt % 10));
-    snprintf(rated_f, sizeof(rated_f), "%u.%u",
-             (unsigned)(o->NomOpFreq / 100), (unsigned)(o->NomOpFreq % 100));
-    snprintf(bat_nom, sizeof(bat_nom), "%u.%02u",
-             (unsigned)(o->NomBatVolt / 100), (unsigned)(o->NomBatVolt % 100));
+    snprintf(rated_v, sizeof(rated_v), "%u", (unsigned)o->NomOpVolt);
+    snprintf(rated_f, sizeof(rated_f), "%u", (unsigned)o->NomOpFreq);
+    snprintf(bat_nom, sizeof(bat_nom), "%u", (unsigned)o->NomBatVolt);
 
     /* 模块号: InverterModuleH/L 合并 u32 (BCD 存储, 按数字字符串上报) */
     char module[16];
@@ -578,7 +577,7 @@ void telemetry_tick(void)
     /* 有 RUNPARAM 数据 + ARM 可达 → 可上报 heartbeat */
     bool arm_ok = have_run && arm_reachable;
 
-    /* 180s V2 heartbeat (需ARM应答); query_telemetry 也可触发 */
+    /* 30s V2 heartbeat (需ARM应答); query_telemetry 也可触发 */
     if (s_hb_requested || (s_now_ms - s_last_hb_ms) >= TELEMETRY_PERIOD_MS) {
         s_hb_requested = false;
         s_last_hb_ms = s_now_ms;

@@ -28,6 +28,12 @@ static uint16_t s_status_val_handle = 0;
 static uint8_t s_own_addr_type;
 static char s_status_cache[16] = "waiting";
 
+/* GAP 事件转发回调 */
+static BleGapEventForwardCb s_gap_forward_cb = NULL;
+
+/* host 启动前回调 */
+static BlePreHostStartCb s_pre_host_start_cb = NULL;
+
 /* 服务 UUID: 43534956-5052-1000-8000-00805f9b34fb */
 static const ble_uuid128_t s_svc_uuid = BLE_UUID128_INIT(
     0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
@@ -97,6 +103,7 @@ static uint16_t s_ota_data_handle;
 static uint16_t s_ota_status_handle;
 
 static const struct ble_gatt_svc_def s_gatt_svcs[] = {
+    /* CSIV-PR 配网服务 */
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &s_svc_uuid.u,
@@ -168,11 +175,23 @@ void ble_prov_notify_status(const char *status)
         ESP_LOGI(TAG, "Status cached: %s (no BLE client)", status);
         return;
     }
+    if (!ble_hs_synced()) {
+        ESP_LOGI(TAG, "Status cached: %s (host not synced)", status);
+        return;
+    }
     struct os_mbuf *om = ble_hs_mbuf_from_flat(status, strlen(status));
     if (om) {
-        ble_gattc_notify_custom(s_conn_handle, s_status_val_handle, om);
+        /* 失败时 NimBLE 内部已释放 om, 此处只记日志 */
+        int rc = ble_gattc_notify_custom(s_conn_handle, s_status_val_handle, om);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "notify '%s' failed rc=%d (client may not subscribe)",
+                     status, rc);
+        } else {
+            ESP_LOGI(TAG, "Status: %s", status);
+        }
+    } else {
+        ESP_LOGE(TAG, "notify mbuf alloc failed: %s", status);
     }
-    ESP_LOGI(TAG, "Status: %s", status);
 }
 
 static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -248,18 +267,41 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+void ble_prov_set_gap_event_forward(BleGapEventForwardCb cb) {
+    s_gap_forward_cb = cb;
+}
+
 static int gap_event_cb(struct ble_gap_event *event, void *arg)
 {
+    /* 转发给 ble_ct */
+    if (s_gap_forward_cb) {
+        s_gap_forward_cb(event, arg);
+    }
+
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
             if (s_conn_cb) s_conn_cb(s_conn_handle);
             ESP_LOGI(TAG, "BLE connected");
+        } else {
+            ESP_LOGW(TAG, "Connect failed status=%d", event->connect.status);
         }
         break;
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        /* 配对/加密结果: 0 成功, 其他为 SMP 错误码 */
+        ESP_LOGW(TAG, "ENC_CHANGE status=%d", event->enc_change.status);
+        break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        ESP_LOGW(TAG, "REPEAT_PAIRING from peer");
+        /* ble_ct 回调已删除旧绑定; 这里必须返回 RETRY,
+         * 否则返回值覆盖 ble_ct 的 RETRY 为 IGNORE,
+         * NimBLE 会静默忽略配对请求导致配对卡死 */
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "BLE disconnected");
+        /* reason 0x13=对端主动断开, 0x08/0x3e=连接超时, 0x16=本端断开,
+         * 0x22=LL响应超时(controller/host 未及时响应) */
+        ESP_LOGW(TAG, "BLE disconnected reason=0x%02x", event->disconnect.reason);
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         if (s_conn_cb) s_conn_cb(BLE_HS_CONN_HANDLE_NONE);
         s_ssid_written = false;
@@ -277,26 +319,40 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
 static void start_advertising(void)
 {
+   
+
+    /* 主广播包: Flags + 设备名 */
     struct ble_hs_adv_fields adv_fields = {0};
-    adv_fields.uuids128 = &s_svc_uuid;
-    adv_fields.num_uuids128 = 1;
-    adv_fields.uuids128_is_complete = 1;
+
+    /* Flags: LE General Discoverable + BR/EDR Not Supported */
+    adv_fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+
+    /* 设备名 */
+    adv_fields.name = (uint8_t *)s_service_name;
+    adv_fields.name_len = strlen(s_service_name);
+    adv_fields.name_is_complete = 1;
+
     int rc = ble_gap_adv_set_fields(&adv_fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "adv fields failed: %d", rc);
         return;
     }
 
+    /* Scan Response: 128-bit 服务 UUID。
+     * 普通 BLE 外设（网关/采集器），不声明 HID 等特殊服务，
+     * 避免 Android 系统蓝牙走 HID 配对流程导致配对失败。 */
     struct ble_hs_adv_fields rsp_fields = {0};
-    rsp_fields.name = (uint8_t *)s_service_name;
-    rsp_fields.name_len = strlen(s_service_name);
-    rsp_fields.name_is_complete = 1;
+    rsp_fields.uuids128 = &s_svc_uuid;
+    rsp_fields.num_uuids128 = 1;
+    rsp_fields.uuids128_is_complete = 1;
+
     rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "scan response failed: %d", rc);
         return;
     }
 
+    /* 广播参数 */
     struct ble_gap_adv_params adv_params = {0};
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
@@ -365,9 +421,24 @@ bool ble_prov_start(const char *device_sn, const char *fw_version)
     }
     ble_hs_cfg.reset_cb = nimble_host_reset;
     ble_hs_cfg.sync_cb = nimble_host_sync;
+
+    /* 安全配置（参考 Arduino NimBLE 默认行为）：
+     * - 不强制 MITM：sm_io_cap=NO_IO 只能用 Just Works，不支持 MITM
+     * - 允许绑定：手机端发起配对时保存密钥（需 NVS_PERSIST 持久化）
+     * - 不主动发起安全请求：由手机端在需要时触发
+     */
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    int rc = ble_svc_gap_device_name_set(s_service_name);
+    int rc;
+
+    rc = ble_svc_gap_device_name_set(s_service_name);
     if (rc != 0) {
         ESP_LOGE(TAG, "device name failed: %d", rc);
         s_state = BLE_PROV_ERROR;
@@ -385,6 +456,11 @@ bool ble_prov_start(const char *device_sn, const char *fw_version)
         ESP_LOGE(TAG, "gatts_add failed: %d", rc);
         s_state = BLE_PROV_ERROR;
         return false;
+    }
+
+    /* host 启动前回调：注册额外 GATT 服务（如 ble_ct） */
+    if (s_pre_host_start_cb) {
+        s_pre_host_start_cb();
     }
 
     nimble_port_freertos_init(nimble_host_task);
@@ -422,3 +498,7 @@ uint16_t ble_prov_get_ota_data_handle(void) { return s_ota_data_handle; }
 uint16_t ble_prov_get_ota_status_handle(void) { return s_ota_status_handle; }
 
 void ble_prov_set_ota_access_cb(void *cb) { s_ota_access_cb = (BleGattAccessCb)cb; }
+
+void ble_prov_set_pre_host_start_cb(BlePreHostStartCb cb) {
+    s_pre_host_start_cb = cb;
+}

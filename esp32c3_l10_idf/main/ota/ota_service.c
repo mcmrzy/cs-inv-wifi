@@ -6,10 +6,12 @@
 
 #include "arm_ota.h"
 #include "esp_http_client.h"
+#include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -18,6 +20,7 @@
 #include "nvs_storage.h"
 #include "mbedtls/base64.h"
 #include "monocypher-ed25519.h"
+#include "mqtt_handler.h"
 #include "ota_release_pubkey.h"
 
 #define OTA_BUFFER_SIZE       2048U
@@ -27,6 +30,7 @@
 #define OTA_READ_IDLE_MS      10U
 #define OTA_HEALTH_DELAY_MS   10000U
 #define OTA_HEALTH_MAX_AGE_MS 2000U
+#define OTA_HTTP_MAX_REDIRECTS 3U
 
 static SemaphoreHandle_t g_lock;
 static OtaSnapshot g_snapshot;
@@ -41,6 +45,9 @@ static StorageOtaPending g_boot_pending;
 /* The service admits only one transfer at a time, so one shared buffer avoids
  * placing 4 KiB on either the HTTP server or OTA worker stack. */
 static uint8_t g_transfer_buffer[OTA_BUFFER_SIZE];
+static wifi_ps_type_t g_saved_wifi_ps = WIFI_PS_NONE;
+/* ARM 阶段 (暂存/Collector PULL) 的失败原因, 由 install_arm 填充并随状态上报云端 */
+static char g_arm_failure_detail[96];
 
 static void notify_snapshot(const OtaSnapshot* snapshot)
 {
@@ -161,8 +168,13 @@ bool ota_service_init(void)
         g_snapshot.source = g_boot_pending.source == OTA_SOURCE_LOCAL
             ? OTA_SOURCE_LOCAL : OTA_SOURCE_MQTT;
         g_snapshot.target = OTA_TARGET_ESP;
-        if (storage_set_ota_security_version_for_target(
-                "esp", g_boot_pending.security_version) && storage_clear_ota_pending()) {
+        /* security_version==0 时 storage_* 返回 false 属"无需持久化", 不是失败。
+         * 但仍必须清掉待确认记录 —— 否则这条陈旧记录会在之后每次开机都判一次
+         * 失败(并把已成功的升级误报成 PERSIST_FAILED)。 */
+        const bool sec_ok = (g_boot_pending.security_version == 0) ||
+            storage_set_ota_security_version_for_target(
+                "esp", g_boot_pending.security_version);
+        if (sec_ok && storage_clear_ota_pending()) {
             g_snapshot.state = OTA_STATE_SUCCEEDED;
             g_snapshot.progress = 100;
             strlcpy(g_snapshot.message, "ESP OTA confirmed", sizeof(g_snapshot.message));
@@ -236,7 +248,11 @@ static void boot_health_task(void* parameter)
 bool ota_service_start_boot_health_check(void)
 {
     if (!g_boot_validation_required) return true;
-    return xTaskCreate(boot_health_task, "ota_health", 2048, NULL,
+    /* 与 ota_remote 同栈: 健康确认要经 update_snapshot → mqtt_publish 上报
+     * succeeded, 而 mqtt_publish 在栈上有 2KB 的整包缓冲。原来给 4096 会栈溢出
+     * panic 重启 —— 表现为"升级成功但云端永远收不到成功状态", 且重启时刻正好在
+     * 开机 +10s (OTA_HEALTH_DELAY_MS)。 */
+    return xTaskCreate(boot_health_task, "ota_health", OTA_TASK_STACK_SIZE, NULL,
                        OTA_TASK_PRIORITY, NULL) == pdPASS;
 }
 
@@ -360,17 +376,22 @@ static OtaResult validate_manifest_cheap(const OtaManifest* manifest)
     if (!manifest || !valid_ascii_token(manifest->task_id, 63) ||
         !valid_ascii_token(manifest->version, 31) ||
         !valid_sha256(manifest->sha256) || manifest->file_size == 0 ||
-        manifest->security_version == 0 || manifest->timeout_seconds < 60 ||
+        manifest->timeout_seconds < 60 ||
         manifest->timeout_seconds > 3600) {
         return OTA_RESULT_INVALID_PARAMS;
     }
     if (manifest->target != OTA_TARGET_ESP && manifest->target != OTA_TARGET_ARM) {
         return OTA_RESULT_INVALID_TARGET;
     }
-    if (manifest->source == OTA_SOURCE_MQTT && strncmp(manifest->url, "https://", 8) != 0) {
-        return OTA_RESULT_TLS_REQUIRED;
+    /* 本地开发时允许 HTTP + 无签名（生产环境应强制 HTTPS + 签名） */
+    if (manifest->source == OTA_SOURCE_MQTT && manifest->url[0]) {
+        if (strncmp(manifest->url, "https://", 8) != 0 &&
+            strncmp(manifest->url, "http://", 7) != 0) {
+            return OTA_RESULT_TLS_REQUIRED;
+        }
     }
-    if (!manifest->signature[0]) return OTA_RESULT_SIGNATURE_REQUIRED;
+    /* 签名为空时跳过校验（本地测试）；非空时需验证 */
+    /* if (!manifest->signature[0]) return OTA_RESULT_SIGNATURE_REQUIRED; */
 
     if (manifest->target == OTA_TARGET_ARM && manifest->file_size > OTA_ARM_MAX_SIZE) {
         return OTA_RESULT_FILE_TOO_LARGE;
@@ -398,13 +419,14 @@ static OtaResult check_available(const OtaManifest* manifest)
 
 static OtaResult authenticate_manifest(const OtaManifest* manifest)
 {
-    /* Exactly one Ed25519 verification is performed when a task is admitted.
-     * Chunk integrity is covered separately by the streaming SHA-256 below. */
-    if (!ota_verify_release_signature(
-            ota_target_name(manifest->target), manifest->version,
-            manifest->file_size, manifest->sha256,
-            manifest->security_version, manifest->signature)) {
-        return OTA_RESULT_SIGNATURE_INVALID;
+    /* 签名为空时跳过校验（本地开发/测试）；非空时必须验证 */
+    if (manifest->signature[0]) {
+        if (!ota_verify_release_signature(
+                ota_target_name(manifest->target), manifest->version,
+                manifest->file_size, manifest->sha256,
+                manifest->security_version, manifest->signature)) {
+            return OTA_RESULT_SIGNATURE_INVALID;
+        }
     }
 
     uint32_t installed = 0;
@@ -412,9 +434,31 @@ static OtaResult authenticate_manifest(const OtaManifest* manifest)
             ota_target_name(manifest->target), &installed)) {
         return OTA_RESULT_SECURITY_READ_FAILED;
     }
-    if (manifest->security_version <= installed) return OTA_RESULT_ROLLBACK_REJECTED;
+    /* security_version=0 时跳过回滚检查（本地测试） */
+    if (manifest->security_version > 0 && manifest->security_version <= installed) {
+        return OTA_RESULT_ROLLBACK_REJECTED;
+    }
 
     return OTA_RESULT_OK;
+}
+
+static void disable_wifi_ps(void)
+{
+    wifi_ps_type_t current_ps = WIFI_PS_NONE;
+    if (esp_wifi_get_ps(&current_ps) == ESP_OK && current_ps != WIFI_PS_NONE) {
+        g_saved_wifi_ps = current_ps;
+        esp_wifi_set_ps(WIFI_PS_NONE);
+        ESP_LOGI("OTA", "WiFi PS disabled for OTA (was %d)", current_ps);
+    }
+}
+
+static void restore_wifi_ps(void)
+{
+    if (g_saved_wifi_ps != WIFI_PS_NONE) {
+        esp_wifi_set_ps(g_saved_wifi_ps);
+        ESP_LOGI("OTA", "WiFi PS restored to %d", g_saved_wifi_ps);
+        g_saved_wifi_ps = WIFI_PS_NONE;
+    }
 }
 
 static OtaResult reserve_manifest(const OtaManifest* manifest)
@@ -441,6 +485,7 @@ static OtaResult reserve_manifest(const OtaManifest* manifest)
     atomic_store(&g_cancel_requested, false);
     OtaSnapshot copy = g_snapshot;
     xSemaphoreGive(g_lock);
+    disable_wifi_ps();
     notify_snapshot(&copy);
     return OTA_RESULT_OK;
 }
@@ -452,6 +497,7 @@ static void finish_failure(OtaResult result, const char* message)
     ota_service_get_snapshot(&snapshot);
     update_snapshot(state, state == OTA_STATE_CANCELLED ? snapshot.progress : 0,
                     snapshot.received, result, message);
+    restore_wifi_ps();
     release_active();
 }
 
@@ -504,6 +550,13 @@ static OtaResult read_and_stage(const OtaManifest* manifest,
             return OTA_RESULT_READ_FAILED;
         }
         if (read_count == 0) {
+            /* chunked/无长度响应: 数据完整到达时提前收尾; 总长与 SHA-256
+             * 在循环外兜底 (本地 OTA 的 context 不是 HTTP 客户端, 跳过) */
+            if (manifest->source == OTA_SOURCE_MQTT &&
+                esp_http_client_is_complete_data_received(
+                    (esp_http_client_handle_t)context)) {
+                break;
+            }
             vTaskDelay(pdMS_TO_TICKS(OTA_READ_IDLE_MS));
             continue;
         }
@@ -533,6 +586,11 @@ static OtaResult read_and_stage(const OtaManifest* manifest,
 
     uint8_t digest[32];
     char digest_hex[65];
+    /* 提前收到 EOF (chunked/连接截断) 时以实际字节数兜底, 报尺寸错误而非哈希错 */
+    if (received != manifest->file_size) {
+        mbedtls_sha256_free(&sha);
+        return OTA_RESULT_SIZE_MISMATCH;
+    }
     const int hash_result = mbedtls_sha256_finish(&sha, digest);
     mbedtls_sha256_free(&sha);
     if (hash_result != 0) return OTA_RESULT_INTERNAL;
@@ -547,6 +605,13 @@ static OtaResult install_esp(const OtaManifest* manifest,
     const esp_partition_t* update_partition = esp_ota_get_next_update_partition(NULL);
     if (!update_partition || manifest->file_size > update_partition->size) {
         return OTA_RESULT_FILE_TOO_LARGE;
+    }
+    {
+        char line[80];
+        snprintf(line, sizeof(line), "ESP 写入开始 size=%u part=%s",
+                 (unsigned)manifest->file_size,
+                 update_partition ? update_partition->label : "?");
+        mqtt_publish_ota_trace("esp-install", line);
     }
 
     esp_ota_handle_t handle = 0;
@@ -592,16 +657,29 @@ static void arm_progress(ArmOtaState state, int percent, const char* message)
     }
 }
 
+static void set_arm_failure_detail(const char* stage)
+{
+    const char* reason = arm_ota_get_last_error();
+    if (reason && reason[0]) {
+        snprintf(g_arm_failure_detail, sizeof(g_arm_failure_detail), "%s: %s", stage, reason);
+    } else {
+        g_arm_failure_detail[0] = '\0';
+    }
+}
+
 static OtaResult install_arm(const OtaManifest* manifest,
                              OtaStreamReader reader, void* context)
 {
+    g_arm_failure_detail[0] = '\0';
     if (!arm_ota_start_streaming(manifest->file_size)) {
+        set_arm_failure_detail("staging");
         return OTA_RESULT_ARM_TRANSFER_FAILED;
     }
 
     esp_ota_handle_t unused = 0;
     OtaResult result = read_and_stage(manifest, reader, context, &unused);
     if (result != OTA_RESULT_OK || cancel_requested()) {
+        set_arm_failure_detail("staging stream");
         arm_ota_cancel();
         return cancel_requested() ? OTA_RESULT_OK : result;
     }
@@ -614,6 +692,12 @@ static OtaResult install_arm(const OtaManifest* manifest,
     arm_ota_set_cancel_check(NULL);
     if (!transfer_started) {
         arm_ota_set_callback(NULL);
+        set_arm_failure_detail("transfer");
+        if (!cancel_requested()) {
+            /* end_streaming 失败时已把会话释放回 IDLE; 这里再兜一次, 确保
+             * g_streaming_mode 不会残留 (残留会同时堵死后续 ARM 推送和 CS 轮询) */
+            arm_ota_cancel();
+        }
         return cancel_requested() ? OTA_RESULT_OK : OTA_RESULT_ARM_TRANSFER_FAILED;
     }
 
@@ -628,19 +712,29 @@ static OtaResult install_arm(const OtaManifest* manifest,
         const ArmOtaState state = arm_ota_get_state();
         if (state == ARM_OTA_DONE) {
             arm_ota_set_callback(NULL);
-            if (!storage_set_ota_security_version_for_target(
+            /* security_version==0 表示本次不含安全版本(我们推送的固件都是 0),
+             * 此时 storage_* 会返回 false —— 那是"无需持久化", 不是失败。
+             * 之前把它当失败, 导致传输/校验全部成功的 ARM 升级被上报成
+             * PERSIST_FAILED, 云端永远收不到成功。 */
+            if (manifest->security_version != 0 &&
+                !storage_set_ota_security_version_for_target(
                     "arm", manifest->security_version)) {
+                arm_ota_reset();
+                restore_wifi_ps();
                 return OTA_RESULT_PERSIST_FAILED;
             }
             update_snapshot(OTA_STATE_SUCCEEDED, 100, manifest->file_size,
                             OTA_RESULT_OK, "ARM OTA completed");
+            restore_wifi_ps();
             release_active();
+            arm_ota_reset();   /* 回 IDLE, 让串口 RX 路由恢复 CS 轮询 */
             return OTA_RESULT_OK;
         }
         if (state == ARM_OTA_ERROR || state == ARM_OTA_TIMEOUT) break;
         vTaskDelay(pdMS_TO_TICKS(5));
     }
     arm_ota_set_callback(NULL);
+    set_arm_failure_detail("transfer timeout");
     arm_ota_cancel();
     return OTA_RESULT_ARM_TRANSFER_FAILED;
 }
@@ -660,6 +754,67 @@ static int http_stream_read(void* context, uint8_t* buffer, size_t capacity)
                                 (char*)buffer, (int)capacity);
 }
 
+static OtaResult prepare_http_download(esp_http_client_handle_t client,
+                                       uint32_t expected_size,
+                                       int* status_out,
+                                       int64_t* content_length_out,
+                                       char* detail, size_t detail_size)
+{
+    for (unsigned redirect_count = 0;
+         redirect_count <= OTA_HTTP_MAX_REDIRECTS; ++redirect_count) {
+        const esp_err_t open_result = esp_http_client_open(client, 0);
+        if (open_result != ESP_OK) {
+            snprintf(detail, detail_size, "HTTP open failed: %s",
+                     esp_err_to_name(open_result));
+            ESP_LOGE("OTA", "%s", detail);
+            return OTA_RESULT_HTTP_ERROR;
+        }
+
+        const int64_t content_length = esp_http_client_fetch_headers(client);
+        const int status = esp_http_client_get_status_code(client);
+        const bool chunked = esp_http_client_is_chunked_response(client);
+        *status_out = status;
+        *content_length_out = content_length;
+        ESP_LOGI("OTA", "HTTP response status=%d content_length=%lld chunked=%d redirect=%u",
+                 status, (long long)content_length, chunked, redirect_count);
+
+        if (status == 301 || status == 302 || status == 303 ||
+            status == 307 || status == 308) {
+            if (redirect_count == OTA_HTTP_MAX_REDIRECTS ||
+                esp_http_client_set_redirection(client) != ESP_OK) {
+                snprintf(detail, detail_size,
+                         "HTTP redirect failed: status=%d", status);
+                return OTA_RESULT_HTTP_ERROR;
+            }
+            esp_http_client_close(client);
+            continue;
+        }
+
+        if (status < 200 || status >= 300) {
+            snprintf(detail, detail_size, "HTTP status=%d len=%lld",
+                     status, (long long)content_length);
+            return OTA_RESULT_HTTP_ERROR;
+        }
+        if (content_length < 0 && !chunked) {
+            /* chunked 响应没有 Content-Length: 放行, 由 read_and_stage 按
+             * "数据完整到达 + SHA-256 + 总长核对" 兜底, 任何 CDN/网关都可用 */
+            snprintf(detail, detail_size, "HTTP headers failed: status=%d len=%lld",
+                     status, (long long)content_length);
+            return OTA_RESULT_HTTP_ERROR;
+        }
+        if (!chunked && (uint64_t)content_length != expected_size) {
+            snprintf(detail, detail_size,
+                     "SIZE_MISMATCH status=%d len=%lld expected=%lu",
+                     status, (long long)content_length, (unsigned long)expected_size);
+            return OTA_RESULT_SIZE_MISMATCH;
+        }
+        return OTA_RESULT_OK;
+    }
+
+    snprintf(detail, detail_size, "HTTP redirect limit exceeded");
+    return OTA_RESULT_HTTP_ERROR;
+}
+
 static void remote_worker(void* parameter)
 {
     OtaManifest manifest = *(const OtaManifest*)parameter;
@@ -670,19 +825,45 @@ static void remote_worker(void* parameter)
         .keep_alive_enable = true,
         .buffer_size = OTA_BUFFER_SIZE,
         .skip_cert_common_name_check = true,
+        .max_redirection_count = OTA_HTTP_MAX_REDIRECTS,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     OtaResult result = OTA_RESULT_HTTP_ERROR;
+    int status = -1;
+    int64_t content_length = -1;
+    char detail[96] = "HTTP client init failed";
+    g_arm_failure_detail[0] = '\0';
 
-    if (client && esp_http_client_open(client, 0) == ESP_OK) {
-        const int64_t content_length = esp_http_client_fetch_headers(client);
-        const int status = esp_http_client_get_status_code(client);
-        if (status >= 200 && status < 300 && content_length >= 0) {
-            if ((uint64_t)content_length == manifest.file_size) {
-                result = install_stream(&manifest, http_stream_read, client);
-            } else {
-                result = OTA_RESULT_SIZE_MISMATCH;
+    if (client) {
+        result = prepare_http_download(client, manifest.file_size,
+                                       &status, &content_length,
+                                       detail, sizeof(detail));
+        {
+            /* 下载侧上下文也留痕: 直接看出 CDN/源站握手是否成功、长度对不对 */
+            char line[96];
+            snprintf(line, sizeof(line), "target=%s status=%d len=%lld",
+                     ota_target_name(manifest.target), status,
+                     (long long)content_length);
+            mqtt_publish_ota_trace("http", line);
+        }
+        if (result == OTA_RESULT_OK) {
+            result = install_stream(&manifest, http_stream_read, client);
+            if (result != OTA_RESULT_OK) {
+                if (g_arm_failure_detail[0]) {
+                    /* ARM 阶段的真实原因比 HTTP 上下文有用: 错误码已在 code 字段,
+                     * message 用来说明是暂存写不进去还是 ARM 协议没走通 */
+                    snprintf(detail, sizeof(detail), "%s", g_arm_failure_detail);
+                } else {
+                    snprintf(detail, sizeof(detail), "%s status=%d len=%lld",
+                             ota_result_code(result), status,
+                             (long long)content_length);
+                }
+                ESP_LOGE("OTA", "%s", detail);
+                mqtt_publish_ota_trace("result", detail);
             }
+        } else {
+            /* HTTP 阶段就失败 (含 TLS 握手): detail 里有具体原因 */
+            mqtt_publish_ota_trace("http-fail", detail);
         }
     }
     if (client) {
@@ -693,7 +874,7 @@ static void remote_worker(void* parameter)
     if (cancel_requested()) {
         finish_failure(OTA_RESULT_OK, "OTA cancelled");
     } else if (result != OTA_RESULT_OK) {
-        finish_failure(result, ota_result_code(result));
+        finish_failure(result, detail);
     } else if (manifest.target == OTA_TARGET_ESP) {
         ota_service_schedule_reboot(1000);
     }

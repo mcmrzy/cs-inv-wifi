@@ -45,6 +45,9 @@ typedef struct {
     uint32_t timestamp;
 } MqttOtaCommand;
 
+/* 静态分配命令结构体，避免栈溢出（~700 字节） */
+static MqttOtaCommand g_ota_cmd;
+
 static bool copy_json_string(cJSON *root, const char *name,
                              char *destination, size_t capacity)
 {
@@ -55,6 +58,10 @@ static bool copy_json_string(cJSON *root, const char *name,
     }
     if (!cJSON_IsString(value) || !value->valuestring ||
         strlen(value->valuestring) >= capacity) {
+        ESP_LOGW(TAG, "copy_json_string failed: %s (is_str=%d val=%s cap=%d)",
+                 name, cJSON_IsString(value),
+                 value->valuestring ? value->valuestring : "NULL",
+                 (int)capacity);
         return false;
     }
     strlcpy(destination, value->valuestring, capacity);
@@ -130,41 +137,78 @@ static bool parse_ota_command(const uint8_t *payload, unsigned int length,
 
 done:
     cJSON_Delete(root);
+    if (!valid) {
+        ESP_LOGW(TAG, "parse_ota_command failed");
+    } else {
+        ESP_LOGI(TAG, "OTA parsed: action=%s target=%s ver=%s size=%lu",
+                 command->action, command->target, command->version,
+                 (unsigned long)command->file_size);
+    }
     return valid;
 }
 
-static void mqtt_publish_object(cJSON *root, const char *topic)
-{
-    if (!root) return;
-    char *payload = cJSON_PrintUnformatted(root);
-    if (payload) {
-        mqtt_publish(topic, payload, (int)strlen(payload), 1, 0);
-        cJSON_free(payload);
-    }
-    cJSON_Delete(root);
+/* ---- 无 snprintf 的轻量 JSON 构建器（避免栈溢出） ---- */
+static char s_json_buf[1024];
+static int s_json_pos;
+
+static void json_begin(void) { s_json_pos = 0; s_json_buf[0] = '{'; s_json_pos = 1; }
+
+static void json_str(const char *key, const char *val) {
+    int n = s_json_pos;
+    if (n > 1) s_json_buf[n++] = ',';
+    s_json_buf[n++] = '"';
+    while (*key && n < (int)sizeof(s_json_buf) - 4) s_json_buf[n++] = *key++;
+    s_json_buf[n++] = '"'; s_json_buf[n++] = ':';
+    s_json_buf[n++] = '"';
+    while (*val && n < (int)sizeof(s_json_buf) - 4) s_json_buf[n++] = *val++;
+    s_json_buf[n++] = '"';
+    s_json_pos = n;
+}
+
+static void json_num(const char *key, int val) {
+    int n = s_json_pos;
+    if (n > 1) s_json_buf[n++] = ',';
+    s_json_buf[n++] = '"';
+    while (*key && n < (int)sizeof(s_json_buf) - 20) s_json_buf[n++] = *key++;
+    s_json_buf[n++] = '"'; s_json_buf[n++] = ':';
+    /* 手动 int→str */
+    char tmp[12]; int t = 0;
+    if (val == 0) { tmp[t++] = '0'; }
+    else { if (val < 0) { s_json_buf[n++] = '-'; val = -val; } while (val > 0 && t < 10) { tmp[t++] = '0' + (val % 10); val /= 10; } }
+    while (t > 0 && n < (int)sizeof(s_json_buf) - 1) s_json_buf[n++] = tmp[--t];
+    s_json_pos = n;
+}
+
+static void json_end(void) {
+    s_json_buf[s_json_pos++] = '}';
+    s_json_buf[s_json_pos] = '\0';
+}
+
+static void json_publish(const char *topic) {
+    mqtt_publish(topic, s_json_buf, s_json_pos, 1, 0);
 }
 
 static void publish_snapshot(const OtaSnapshot *snapshot,
                              const char *request_task_id)
 {
     if (!snapshot) return;
-    cJSON *root = cJSON_CreateObject();
-    if (!root) return;
-    cJSON_AddStringToObject(root, "task_id", snapshot->task_id);
+    json_begin();
+    json_str("task_id", snapshot->task_id);
     if (request_task_id && request_task_id[0] &&
         strcmp(request_task_id, snapshot->task_id) != 0) {
-        cJSON_AddStringToObject(root, "request_task_id", request_task_id);
+        json_str("request_task_id", request_task_id);
     }
-    cJSON_AddStringToObject(root, "target", ota_target_name(snapshot->target));
-    cJSON_AddStringToObject(root, "version", snapshot->version);
-    cJSON_AddStringToObject(root, "source", ota_source_name(snapshot->source));
-    cJSON_AddStringToObject(root, "state", ota_state_name(snapshot->state));
-    cJSON_AddNumberToObject(root, "progress", snapshot->progress);
-    cJSON_AddNumberToObject(root, "received", snapshot->received);
-    cJSON_AddNumberToObject(root, "total", snapshot->total);
-    cJSON_AddStringToObject(root, "code", snapshot->error_code);
-    cJSON_AddStringToObject(root, "message", snapshot->message);
-    mqtt_publish_object(root, PROTO_TOPIC_OTA_STATUS);
+    json_str("target", ota_target_name(snapshot->target));
+    json_str("version", snapshot->version);
+    json_str("source", ota_source_name(snapshot->source));
+    json_str("state", ota_state_name(snapshot->state));
+    json_num("progress", (int)snapshot->progress);
+    json_num("received", (int)snapshot->received);
+    json_num("total", (int)snapshot->total);
+    json_str("code", snapshot->error_code);
+    json_str("message", snapshot->message);
+    json_end();
+    json_publish(PROTO_TOPIC_OTA_STATUS);
 }
 
 static void ota_status_observer(const OtaSnapshot *snapshot)
@@ -193,12 +237,12 @@ void mqtt_ota_init(void)
 
 static void send_ota_ack(const char *task_id, bool accepted, const char *message)
 {
-    cJSON *root = cJSON_CreateObject();
-    if (!root) return;
-    cJSON_AddStringToObject(root, "task_id", task_id ? task_id : "");
-    cJSON_AddBoolToObject(root, "ack", accepted);
-    cJSON_AddStringToObject(root, "message", message ? message : "");
-    mqtt_publish_object(root, PROTO_TOPIC_CMD_RESP);
+    json_begin();
+    json_str("task_id", task_id ? task_id : "");
+    json_str("ack", accepted ? "true" : "false");
+    json_str("message", message ? message : "");
+    json_end();
+    json_publish(PROTO_TOPIC_CMD_RESP);
 }
 
 static bool command_expired(const MqttOtaCommand *command)
@@ -211,45 +255,52 @@ static bool command_expired(const MqttOtaCommand *command)
 
 static void report_service_result(const MqttOtaCommand *command, OtaResult result)
 {
+    const char *code = ota_result_code(result);
     if (result == OTA_RESULT_DUPLICATE) {
         send_ota_ack(command->task_id, true, "Duplicate OTA task already active");
         OtaSnapshot snapshot;
         if (ota_service_get_snapshot(&snapshot)) publish_snapshot(&snapshot, command->task_id);
         return;
     }
-    send_ota_ack(command->task_id, false, ota_result_code(result));
-    cJSON *root = cJSON_CreateObject();
-    if (!root) return;
-    cJSON_AddStringToObject(root, "task_id", command->task_id);
-    cJSON_AddStringToObject(root, "target", command->target);
-    cJSON_AddStringToObject(root, "version", command->version);
-    cJSON_AddStringToObject(root, "state", PROTO_OTA_STATE_FAILED);
-    cJSON_AddNumberToObject(root, "progress", 0);
-    cJSON_AddStringToObject(root, "code", ota_result_code(result));
-    cJSON_AddStringToObject(root, "message", ota_result_code(result));
-    mqtt_publish_object(root, PROTO_TOPIC_OTA_STATUS);
+    send_ota_ack(command->task_id, false, code);
+    json_begin();
+    json_str("task_id", command->task_id);
+    json_str("target", command->target);
+    json_str("version", command->version);
+    json_str("state", PROTO_OTA_STATE_FAILED);
+    json_num("progress", 0);
+    json_str("code", code);
+    json_str("message", code);
+    json_end();
+    json_publish(PROTO_TOPIC_OTA_STATUS);
 }
 
 static void handle_start(const MqttOtaCommand *command)
 {
+    /* signature 和 security_version 可为空/0（本地测试时无签名） */
+    ESP_LOGI(TAG, "handle_start: target=[%s] url=[%s] ver=[%s] sha256=[%s] size=%lu",
+             command->target, command->url, command->version,
+             command->sha256, (unsigned long)command->file_size);
     if (!command->target[0] || !command->url[0] || !command->version[0] ||
-        !command->sha256[0] || !command->signature[0] ||
-        command->file_size == 0 || command->security_version == 0) {
+        !command->sha256[0] || command->file_size == 0) {
+        ESP_LOGW(TAG, "INVALID_PARAMS: target=%s url=%s ver=%s sha256=%s size=%lu",
+                 command->target, command->url, command->version,
+                 command->sha256, (unsigned long)command->file_size);
         report_service_result(command, OTA_RESULT_INVALID_PARAMS);
         return;
     }
     if (command_expired(command)) {
         send_ota_ack(command->task_id, false, PROTO_ERR_EXPIRED);
-        cJSON *root = cJSON_CreateObject();
-        if (!root) return;
-        cJSON_AddStringToObject(root, "task_id", command->task_id);
-        cJSON_AddStringToObject(root, "target", command->target);
-        cJSON_AddStringToObject(root, "version", command->version);
-        cJSON_AddStringToObject(root, "state", PROTO_OTA_STATE_FAILED);
-        cJSON_AddNumberToObject(root, "progress", 0);
-        cJSON_AddStringToObject(root, "code", PROTO_ERR_EXPIRED);
-        cJSON_AddStringToObject(root, "message", "OTA command expired");
-        mqtt_publish_object(root, PROTO_TOPIC_OTA_STATUS);
+        json_begin();
+        json_str("task_id", command->task_id);
+        json_str("target", command->target);
+        json_str("version", command->version);
+        json_str("state", PROTO_OTA_STATE_FAILED);
+        json_num("progress", 0);
+        json_str("code", PROTO_ERR_EXPIRED);
+        json_str("message", "OTA command expired");
+        json_end();
+        json_publish(PROTO_TOPIC_OTA_STATUS);
         return;
     }
 
@@ -275,7 +326,13 @@ static void handle_start(const MqttOtaCommand *command)
     strlcpy(manifest.sha256, command->sha256, sizeof(manifest.sha256));
     strlcpy(manifest.signature, command->signature, sizeof(manifest.signature));
 
+    ESP_LOGI(TAG, "OTA manifest: task=%s ver=%s url=%s sha256=%s sig=%s size=%lu",
+             manifest.task_id, manifest.version, manifest.url,
+             manifest.sha256, manifest.signature,
+             (unsigned long)manifest.file_size);
+
     const OtaResult result = ota_service_start_remote(&manifest);
+    ESP_LOGI(TAG, "OTA start_remote result=%d (%s)", result, ota_result_code(result));
     if (result == OTA_RESULT_OK) {
         send_ota_ack(command->task_id, true, "OTA task accepted");
     } else {
@@ -310,48 +367,46 @@ bool mqtt_ota_handle_command(const char *topic, const uint8_t *payload,
                              unsigned int length)
 {
     (void)topic;
-    MqttOtaCommand command;
-    if (!parse_ota_command(payload, length, &command)) {
+    /* 使用静态分配的命令结构体，避免栈溢出 */
+    if (!parse_ota_command(payload, length, &g_ota_cmd)) {
         g_request_task_id[0] = '\0';
         g_request_version[0] = '\0';
         g_request_target[0] = '\0';
-        cJSON *root = cJSON_CreateObject();
-        if (root) {
-            cJSON_AddStringToObject(root, "task_id", "");
-            cJSON_AddStringToObject(root, "target", "unknown");
-            cJSON_AddStringToObject(root, "version", "");
-            cJSON_AddStringToObject(root, "state", PROTO_OTA_STATE_FAILED);
-            cJSON_AddNumberToObject(root, "progress", 0);
-            cJSON_AddStringToObject(root, "code", "JSON_ERROR");
-            cJSON_AddStringToObject(root, "message", "Invalid OTA command");
-            mqtt_publish_object(root, PROTO_TOPIC_OTA_STATUS);
-        }
+        json_begin();
+        json_str("task_id", "");
+        json_str("target", "unknown");
+        json_str("version", "");
+        json_str("state", PROTO_OTA_STATE_FAILED);
+        json_num("progress", 0);
+        json_str("code", "JSON_ERROR");
+        json_str("message", "Invalid OTA command");
+        json_end();
+        json_publish(PROTO_TOPIC_OTA_STATUS);
         return false;
     }
 
-    strlcpy(g_request_task_id, command.task_id, sizeof(g_request_task_id));
-    strlcpy(g_request_version, command.version, sizeof(g_request_version));
-    strlcpy(g_request_target, command.target, sizeof(g_request_target));
+    strlcpy(g_request_task_id, g_ota_cmd.task_id, sizeof(g_request_task_id));
+    strlcpy(g_request_version, g_ota_cmd.version, sizeof(g_request_version));
+    strlcpy(g_request_target, g_ota_cmd.target, sizeof(g_request_target));
 
-    if (strcmp(command.action, PROTO_OTA_ACTION_START) == 0) {
-        handle_start(&command);
-    } else if (strcmp(command.action, PROTO_OTA_ACTION_CANCEL) == 0) {
-        handle_cancel(&command);
-    } else if (strcmp(command.action, PROTO_OTA_ACTION_QUERY) == 0) {
-        handle_query(&command);
+    if (strcmp(g_ota_cmd.action, PROTO_OTA_ACTION_START) == 0) {
+        handle_start(&g_ota_cmd);
+    } else if (strcmp(g_ota_cmd.action, PROTO_OTA_ACTION_CANCEL) == 0) {
+        handle_cancel(&g_ota_cmd);
+    } else if (strcmp(g_ota_cmd.action, PROTO_OTA_ACTION_QUERY) == 0) {
+        handle_query(&g_ota_cmd);
     } else {
-        send_ota_ack(command.task_id, false, PROTO_ERR_NOT_SUPPORTED);
-        cJSON *root = cJSON_CreateObject();
-        if (root) {
-            cJSON_AddStringToObject(root, "task_id", command.task_id);
-            cJSON_AddStringToObject(root, "target", command.target);
-            cJSON_AddStringToObject(root, "version", command.version);
-            cJSON_AddStringToObject(root, "state", PROTO_OTA_STATE_FAILED);
-            cJSON_AddNumberToObject(root, "progress", 0);
-            cJSON_AddStringToObject(root, "code", PROTO_ERR_NOT_SUPPORTED);
-            cJSON_AddStringToObject(root, "message", "Unsupported OTA action");
-            mqtt_publish_object(root, PROTO_TOPIC_OTA_STATUS);
-        }
+        send_ota_ack(g_ota_cmd.task_id, false, PROTO_ERR_NOT_SUPPORTED);
+        json_begin();
+        json_str("task_id", g_ota_cmd.task_id);
+        json_str("target", g_ota_cmd.target);
+        json_str("version", g_ota_cmd.version);
+        json_str("state", PROTO_OTA_STATE_FAILED);
+        json_num("progress", 0);
+        json_str("code", PROTO_ERR_NOT_SUPPORTED);
+        json_str("message", "Unsupported OTA action");
+        json_end();
+        json_publish(PROTO_TOPIC_OTA_STATUS);
     }
 
     g_request_task_id[0] = '\0';

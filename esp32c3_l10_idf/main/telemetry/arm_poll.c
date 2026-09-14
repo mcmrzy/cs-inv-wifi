@@ -22,7 +22,6 @@
 #include "config.h"
 #include "mqtt_handler.h"
 #include "nvs_storage.h"
-#include "uart_ota.h"
 #include "arm_ota.h"
 
 static const char *TAG = "ARMPOLL";
@@ -355,7 +354,7 @@ static void uart_rx_task(void *arg)
             for (i = 0; i < n; i++) {
                 /* ARM OTA 激活时 (IAP 模式): 帧字节交给 OTA 解析器, 不干扰 CS PPP */
                 if (arm_ota_active()) {
-                    uart_ota_rx_byte(buf[i]);
+                    arm_ota_rx_byte(buf[i]);
                     continue;
                 }
                 s_rx_active = true;
@@ -383,8 +382,7 @@ void arm_poll_init(void)
 {
     s_param_mutex = xSemaphoreCreateMutex();
     cs_ppp_rx_init(&s_ppp_rx);
-    uart_ota_set_callback(arm_ota_handle_uart);
-    uart_ota_rx_reset();
+    arm_ota_rx_reset();
     memset(&g_run_param, 0, sizeof(g_run_param));
     memset(&g_only_read, 0, sizeof(g_only_read));
     memset(&g_read_write, 0, sizeof(g_read_write));

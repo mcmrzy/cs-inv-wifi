@@ -19,13 +19,14 @@
 static const char *TAG = "SNTP";
 
 #define UTC_WRITE_INTERVAL_MS  (24UL * 3600UL * 1000UL)  /* 每天一次 */
-#define UTC_WRITE_RETRY_MS     (60UL * 1000UL)           /* 失败后 1 分钟重试 */
+#define UTC_WRITE_RETRY_MS     (5UL * 60UL * 1000UL)    /* 失败后 5 分钟重试 */
 
 static bool     s_synced;            /* SNTP 已同步 */
 static bool     s_utc_written;       /* UTC 曾成功写入 ARM */
 static uint32_t s_last_utc_write_ms; /* 最近一次成功写入时刻 */
 static uint32_t s_last_attempt_ms;   /* 最近一次发起写入时刻 (防重试风暴) */
 static uint32_t s_now_ms;
+static uint32_t s_fail_count;        /* 连续失败次数 (用于节流日志) */
 
 static uint32_t now_ms(void)
 {
@@ -40,10 +41,16 @@ static void on_write_done(uint8_t cmd, uint16_t param1, uint16_t param2, int err
         if (err == 0) {
             s_utc_written = true;
             s_last_utc_write_ms = s_now_ms;
+            s_fail_count = 0;
             arm_poll_mark_utc_done();
             ESP_LOGI(TAG, "UTC written to ARM ok");
         } else {
-            ESP_LOGW(TAG, "UTC write to ARM failed err=%d", err);
+            s_fail_count++;
+            /* 首次失败 + 每 10 次打一次 WARN, 其余静默 */
+            if (s_fail_count <= 1 || s_fail_count % 10 == 0) {
+                ESP_LOGW(TAG, "UTC write failed err=%d (fail#%lu, retry in 5min)",
+                         err, (unsigned long)s_fail_count);
+            }
         }
     }
 }
@@ -55,6 +62,7 @@ void sntp_sync_init(void)
     s_last_utc_write_ms = 0;
     s_last_attempt_ms = 0;
     s_now_ms = 0;
+    s_fail_count = 0;
 
     arm_poll_set_write_cb(on_write_done);
 
@@ -113,6 +121,9 @@ void sntp_sync_tick(void)
 
     s_last_attempt_ms = s_now_ms;
     if (arm_poll_send_write(CS_CMD_WRITE_R_W_DATA, INDEX_UTC_L, 4, data) == 0) {
-        ESP_LOGI(TAG, "UTC %lu queued to ARM", (unsigned long)utc);
+        /* 首次或成功后首次打印, 重试期间静默 */
+        if (s_fail_count == 0) {
+            ESP_LOGI(TAG, "UTC %lu queued to ARM", (unsigned long)utc);
+        }
     }
 }

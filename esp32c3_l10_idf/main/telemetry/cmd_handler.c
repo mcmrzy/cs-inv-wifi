@@ -1,7 +1,7 @@
 /*
  * cmd_handler.c — 云端命令 → WRITE_CTRLPARAM 地址映射
  *
- * V2.0 下行信封 (CS-L10-6K2_MQTT_上报协议设计_V2.0.md §11.2):
+ * V2.1 下行信封 (CS-L10-6K2_MQTT_上报协议设计_V2.1.md §11.2):
  *   {"v":2,"task_id":"...","t":...,"cmd":"set_charge_limit","args":[50]}
  *   兼容旧格式 {"cmd":"...","value":<number>} (及 name/action/param 别名)
  *
@@ -10,12 +10,13 @@
  *  scale=100 → 值*0.01 单位 (如频率 0.01Hz)
  *  scale=1 → 原始整数
  *
- * 响应 (cmd/response, QoS1, 信封内 data):
- *  {"task_id":..,"cmd":"<cmd>","result":"OK","err":0}              已排队下发
+ * 响应 (cmd/response, QoS1, 信封内 data, V2.1 §11.4):
+ *  {"task_id":..,"cmd":"<cmd>","result":"OK","err":0,
+ *   "applied_args":[<工程单位>],"reported_revision":<CtrlParamAlterTime>}  已排队下发
  *  {"task_id":..,"cmd":"<cmd>","result":"INVALID_ARGS","err":-2}  参数错误/未知命令
  *  {"task_id":..,"cmd":"<cmd>","result":"BUSY","err":-3}          ARM 链路忙
  *  {"task_id":..,"cmd":"<cmd>","result":"EXEC_FAILED","err":-1}  ARM 应答 err!=0 或超时 (补发)
- *  {"task_id":..,"cmd":"<cmd>","result":"NOT_SUPPORTED","err":-4} 未支持命令 (含 query_config 阶段 2)
+ *  {"task_id":..,"cmd":"<cmd>","result":"NOT_SUPPORTED","err":-4} 未支持命令
  */
 #include <stdio.h>
 #include <string.h>
@@ -118,7 +119,37 @@ static void send_response(const char *cmd, const char *result, int err,
     }
 }
 
-/* ---- 待确认命令 (ARM 写结果闭环, V2.0 §11.4) ---- */
+/* ---- OK 响应: 带 applied_args + reported_revision (V2.1 §11.4) ---- */
+/* value 为 ARM 实际采纳的工程单位值; reported_revision 取 CtrlParamAlterTime */
+static void send_response_ok(const char *cmd, double value, const char *task_id)
+{
+    char buf[256];
+    int n;
+
+    /* reported_revision: 取锁读 g_read_write (ARM 应答 0x04 后更新) */
+    uint32_t rev = 0;
+    if (arm_poll_take_param()) {
+        rev = g_read_write.CtrlParamAlterTime;
+        arm_poll_give_param();
+    }
+
+    if (task_id && task_id[0]) {
+        n = snprintf(buf, sizeof(buf),
+                     "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"result\":\"%s\",\"err\":0,"
+                     "\"applied_args\":[%g],\"reported_revision\":%lu}",
+                     task_id, cmd, PROTO_ERR_OK, value, (unsigned long)rev);
+    } else {
+        n = snprintf(buf, sizeof(buf),
+                     "{\"cmd\":\"%s\",\"result\":\"%s\",\"err\":0,"
+                     "\"applied_args\":[%g],\"reported_revision\":%lu}",
+                     cmd, PROTO_ERR_OK, value, (unsigned long)rev);
+    }
+    if (n > 0 && n < (int)sizeof(buf)) {
+        mqtt_publish(PROTO_TOPIC_CMD_RESP, buf, 0, 1, 0);
+    }
+}
+
+/* ---- 待确认命令 (ARM 写结果闭环, V2.1 §11.4) ---- */
 typedef struct {
     bool     active;
     uint16_t addr;
@@ -144,6 +175,9 @@ static void on_arm_write_done(uint8_t cmd, uint16_t param1, uint16_t param2,
         ESP_LOGW(TAG, "cmd %s: ARM exec failed err=%d", s_pending.cmd, err);
         send_response(s_pending.cmd, PROTO_ERR_EXEC_FAILED, -1,
                       s_pending.task_id);
+    } else {
+        /* 写入生效 (V2.1 §11.4 命令闭环): 立即索取最新配置 (rev 变化后上报) */
+        telemetry_request_config();
     }
 }
 
@@ -187,7 +221,69 @@ static void handle_cmd(const char *cmd_name, double value, const char *task_id)
     snprintf(s_pending.task_id, sizeof(s_pending.task_id), "%s",
              (task_id && task_id[0]) ? task_id : "");
     ESP_LOGI(TAG, "cmd %s addr=0x%04X raw=%u queued", cmd_name, entry->addr, raw);
-    send_response(cmd_name, PROTO_ERR_OK, 0, task_id);
+    send_response_ok(cmd_name, value, task_id);
+}
+
+/* ---- BLE 本地通道：命令名 → 映射条目查找 ---- */
+static const cmd_map_t *cmd_lookup(const char *name)
+{
+    if (!name) return NULL;
+    for (int i = 0; i < (int)CMD_MAP_SIZE; i++) {
+        if (strcmp(s_cmd_map[i].name, name) == 0) {
+            return &s_cmd_map[i];
+        }
+    }
+    return NULL;
+}
+
+cmd_handle_result_t cmd_handler_write_param(const char *name, double value)
+{
+    const cmd_map_t *entry = cmd_lookup(name);
+    if (!entry) {
+        ESP_LOGW(TAG, "BLE cmd unknown param_id: %s", name ? name : "(null)");
+        return CMD_HANDLE_UNKNOWN;
+    }
+
+    /* 值域检查: 0 <= value*scale <= 65535 (与云端 handle_cmd 一致) */
+    if (value < 0 || value * entry->scale > 65535) {
+        ESP_LOGW(TAG, "BLE cmd %s value out of range: %f", name, value);
+        return CMD_HANDLE_OUT_OF_RANGE;
+    }
+
+    uint16_t raw = (uint16_t)(value * entry->scale);
+    uint8_t data[2];
+    data[0] = (uint8_t)(raw & 0xFF);
+    data[1] = (uint8_t)(raw >> 8);
+
+    /*** 注意：BLE 通道不占用 s_pending（该状态机属 MQTT 下行闭环）；
+     * 直接排队写入 ARM，ARM 应答 err 由 cmd_handler 的写回调处理。
+     * 若需 BLE 侧写失败闭环可扩展 on_arm_write_done 增加通道维度。 ***/
+    int rc = arm_poll_send_write(CS_CMD_WRITE_CTRLPARAM, entry->addr, 2, data);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "BLE cmd %s: ARM busy", name);
+        return CMD_HANDLE_BUSY;
+    }
+    ESP_LOGI(TAG, "BLE cmd %s addr=0x%04X raw=%u queued", name, entry->addr, raw);
+    return CMD_HANDLE_OK;
+}
+
+bool cmd_handler_get_param(const char *name, double *out)
+{
+    if (!out) return false;
+    const cmd_map_t *entry = cmd_lookup(name);
+    if (!entry) return false;
+
+    /* 仅支持落在 READ_CTRLPARAM 快照范围内 (索引 0x0000-0x0029) 的参数 */
+    if (entry->addr >= CTRL_PARAM_COUNT) {
+        ESP_LOGW(TAG, "BLE get_param %s: addr 0x%04X not in snapshot", name, entry->addr);
+        return false;
+    }
+
+    if (!arm_poll_take_param()) return false;
+    uint16_t raw = g_ctrl_param[entry->addr];
+    arm_poll_give_param();
+    *out = (double)raw / entry->scale;
+    return true;
 }
 
 /* ---- 查询命令 (V2.0 §11.3, 无参数) ---- */
@@ -204,8 +300,9 @@ static bool handle_query_cmd(const char *cmd_name, const char *task_id)
         return true;
     }
     if (strcmp(cmd_name, PROTO_CMD_QUERY_CONFIG) == 0) {
-        /* config 上报为阶段 2 (READ_CTRLPARAM 未实现), 暂不支持 */
-        send_response(cmd_name, PROTO_ERR_NOT_SUPPORTED, -4, task_id);
+        /* 立即补报一次 config (V2.1 §11.3) */
+        telemetry_request_config();
+        send_response(cmd_name, PROTO_ERR_OK, 0, task_id);
         return true;
     }
     return false;

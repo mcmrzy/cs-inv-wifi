@@ -18,9 +18,12 @@
 #define PROTO_TOPIC_HEARTBEAT   "heartbeat"
 #define PROTO_TOPIC_INFO        "info"
 #define PROTO_TOPIC_ALARM       "alarm"
+#define PROTO_TOPIC_CONFIG      "config"
 #define PROTO_TOPIC_STATUS      "status"
 #define PROTO_TOPIC_CMD_RESP    "cmd/response"
 #define PROTO_TOPIC_OTA_STATUS  "ota/status"
+/* OTA 过程留痕: 与 ota/status 分开, 避免干扰后端状态机 (后端只认 ota/status) */
+#define PROTO_TOPIC_OTA_DEBUG   "ota/debug"
 
 /* 主题前缀格式 (用于 snprintf) */
 #define PROTO_TOPIC_FMT         "cs_inv/%s/%s"

@@ -39,6 +39,20 @@ const char *mqtt_get_client_id(void);
 /* 触发离线缓存补传 (QoS1 + PUBACK 等待) */
 void mqtt_flush_offline_cache(void);
 
+/*
+ * OTA 过程留痕: 发布到 cs_inv/{sn}/ota/debug, 供人在 MQTT 侧远程判读
+ * (等价于串口的 OTA 日志)。与 ota/status 分开, 不参与后端状态机。
+ * detail 会做 JSON 转义与长度截断。
+ * 只能从栈足够大的任务调用 (内部走 mqtt_publish, 其栈上有 2KB 缓冲)。
+ */
+void mqtt_publish_ota_trace(const char *stage, const char *detail);
+
+/* 断线超过 timeout_ms 仍未重连 → true (供主循环强制重启客户端) */
+bool mqtt_is_stuck(int64_t timeout_ms);
+
+/* 销毁并重建 MQTT 客户端 (清除卡住的内部重连状态) */
+void mqtt_force_restart(void);
+
 #ifdef __cplusplus
 }
 #endif

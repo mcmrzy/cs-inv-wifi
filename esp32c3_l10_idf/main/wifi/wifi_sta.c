@@ -19,6 +19,8 @@ const int WIFI_CONNECTED_BIT = BIT0;
 
 static char s_ip_str[32] = "0.0.0.0";
 static uint8_t s_last_disconnect_reason = 0;
+static int s_disconnect_count = 0;
+#define WIFI_RESET_AFTER_FAILS  5
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
@@ -35,9 +37,18 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         case WIFI_EVENT_STA_DISCONNECTED: {
             const wifi_event_sta_disconnected_t *evt = event_data;
             s_last_disconnect_reason = evt->reason;
-            ESP_LOGW(TAG, "STA disconnected, reason=%u", evt->reason);
+            s_disconnect_count++;
+            ESP_LOGW(TAG, "STA disconnected, reason=%u (count=%d)",
+                     evt->reason, s_disconnect_count);
             xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-            /* esp_wifi 自动重连 (CONFIG_ESP_WIFI_ENABLE_WPA3_SAE 等默认开启 auto-reconnect) */
+            if (s_disconnect_count >= WIFI_RESET_AFTER_FAILS) {
+                ESP_LOGW(TAG, "Too many disconnects, resetting WiFi");
+                esp_wifi_stop();
+                esp_wifi_start();
+                s_disconnect_count = 0;
+                return;    /* esp_wifi_start 后 auto-reconnect 生效 */
+            }
+            esp_wifi_connect();
             break;
         }
         default:
@@ -47,6 +58,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         const ip_event_got_ip_t *evt = event_data;
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&evt->ip_info.ip));
         ESP_LOGI(TAG, "Got IP: %s", s_ip_str);
+        s_disconnect_count = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -92,20 +104,32 @@ bool wifi_sta_connect(const char *ssid, const char *pass)
         strncpy((char *)sta_cfg.sta.password, pass,
                 sizeof(sta_cfg.sta.password) - 1);
     }
-    /* 自动重连 (默认开启, 显式设置一次) */
     sta_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
+    /* 先设新配置, 再断开: 断开事件的 auto-reconnect 直接连新 AP,
+       避免先断开→重连旧 AP→再切新 AP 的双倍耗时 */
     esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "STA config failed: %s", esp_err_to_name(ret));
         return false;
     }
-    ret = esp_wifi_connect();
-    if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_STARTED) {
-        ESP_LOGW(TAG, "connect failed: %s", esp_err_to_name(ret));
-        return false;
+
+    /* 用驱动真实状态判断，event group bit 可能已被上面 clear */
+    wifi_ap_record_t ap_info;
+    bool driver_connected = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
+
+    if (wifi_sta_is_connected() || driver_connected) {
+        /* 已连接: 先 disconnect，STA_DISCONNECTED 回调会用新配置 auto-reconnect */
+        esp_wifi_disconnect();
+        ESP_LOGI(TAG, "reconnecting to SSID=%s", ssid);
+    } else {
+        esp_err_t cr = esp_wifi_connect();
+        if (cr != ESP_OK && cr != ESP_ERR_WIFI_NOT_STARTED) {
+            ESP_LOGW(TAG, "connect failed: %s", esp_err_to_name(cr));
+            return false;
+        }
+        ESP_LOGI(TAG, "connecting to SSID=%s", ssid);
     }
-    ESP_LOGI(TAG, "connecting to SSID=%s", ssid);
     return true;
 }
 

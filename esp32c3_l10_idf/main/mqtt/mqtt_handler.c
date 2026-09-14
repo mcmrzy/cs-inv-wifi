@@ -7,6 +7,7 @@
  *  - 离线缓存补传 (QoS1 + PUBACK 等待)
  */
 #include "mqtt_handler.h"
+#include "config.h"
 #include "nvs_storage.h"
 #include "offline_cache.h"
 #include "cs_protocol_defs.h"
@@ -42,12 +43,12 @@ static char g_lwt_payload[MQTT_PAYLOAD_MAX] = {0};
 
 static atomic_bool g_mqtt_connected;
 static atomic_bool g_mqtt_started;
-static int64_t g_last_reconnect = 0;
-static int64_t g_reconnect_delay = MQTT_RECONNECT_MIN;
-static int g_reconnect_attempts = 0;
+static int64_t g_disconnect_start_ms = 0;  /* 断线开始时刻, 用于检测卡住 */
+static int g_force_restart_count = 0;      /* 连续强制重启次数, 动态延长超时 */
 static int64_t g_last_cache_flush = 0;
 
 static MQTTMessageHandler g_msg_handler = NULL;
+static MQTTMessageHandler g_msg_handler_saved = NULL;  /* force_restart 用 */
 
 static atomic_bool g_flush_pending;
 static atomic_bool g_cache_flush_running;
@@ -158,8 +159,8 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
         atomic_store(&g_mqtt_connected, true);
         atomic_store(&g_mqtt_started, true);
-        g_reconnect_attempts = 0;
-        g_reconnect_delay = MQTT_RECONNECT_MIN;
+        g_disconnect_start_ms = 0;
+        g_force_restart_count = 0;
 
         /* status: online + rssi + ip */
         {
@@ -173,6 +174,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 wifi_sta_get_rssi(), ip);
             esp_mqtt_client_publish(g_mqtt_client, g_status_topic,
                                     online_payload, 0, 1, 1);
+            telemetry_reset_heartbeat_timer();
         }
 
         /* 订阅云端命令 */
@@ -251,6 +253,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT_EVENT_DISCONNECTED");
         atomic_store(&g_mqtt_connected, false);
+        if (g_disconnect_start_ms == 0) {
+            g_disconnect_start_ms = esp_timer_get_time() / 1000;
+        }
         if (g_offline_ack_queue) {
             const int disconnected = -1;
             xQueueSend(g_offline_ack_queue, &disconnected, 0);
@@ -281,10 +286,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
 bool mqtt_init(MQTTMessageHandler msg_handler)
 {
     g_msg_handler = msg_handler;
+    g_msg_handler_saved = msg_handler;
     mqtt_rx_reset();
-    g_last_reconnect = 0;
-    g_reconnect_delay = MQTT_RECONNECT_MIN;
-    g_reconnect_attempts = 0;
+    g_disconnect_start_ms = 0;
 
     if (!g_offline_ack_queue) {
         g_offline_ack_queue = xQueueCreate(8, sizeof(int));
@@ -339,8 +343,9 @@ bool mqtt_init(MQTTMessageHandler msg_handler)
         },
         /* 自有固定服务器: 不配置 CA, 配合 CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY 跳过证书验证 (TLS 加密仍在; OTA 固件有 Ed25519 签名兜底) */
         .broker.verification.skip_cert_common_name_check = true,
-        .network.reconnect_timeout_ms = MQTT_RECONNECT_MIN,
-        .task.stack_size = 4096,
+        .network.reconnect_timeout_ms = 10000,
+        .session.keepalive = MQTT_KEEPALIVE,
+        .task.stack_size = 8192,  /* OTA JSON 解析需要较大栈空间 */
     };
 
     g_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -362,26 +367,18 @@ bool mqtt_connect(void)
     if (atomic_load(&g_mqtt_connected)) return true;
     if (atomic_load(&g_mqtt_started)) return true;
 
-    int64_t now = esp_timer_get_time() / 1000;
-    if (now - g_last_reconnect < g_reconnect_delay) {
-        return false;
-    }
-    g_last_reconnect = now;
-
-    g_reconnect_attempts++;
-    ESP_LOGI(TAG, "Connect attempt %d to %s", g_reconnect_attempts, g_mqtt_uri);
+    ESP_LOGI(TAG, "Starting MQTT client to %s", g_mqtt_uri);
 
     esp_err_t err = esp_mqtt_client_start(g_mqtt_client);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_mqtt_client_start failed: %s", esp_err_to_name(err));
-        g_reconnect_delay = MIN(g_reconnect_delay * 2, MQTT_RECONNECT_MAX);
-        if (g_reconnect_attempts >= MQTT_RECONNECT_MAX_ATTEMPTS) {
-            ESP_LOGW(TAG, "Max retries reached");
-        }
         return false;
     }
 
     atomic_store(&g_mqtt_started, true);
+    if (g_disconnect_start_ms == 0) {
+        g_disconnect_start_ms = esp_timer_get_time() / 1000;
+    }
     return true;
 }
 
@@ -418,7 +415,7 @@ int mqtt_publish(const char *sub_topic, const char *data, int len, int qos,
         return stored ? 1 : -1;
     }
 
-    char full_payload[1024];
+    char full_payload[2048];
     uint32_t timestamp = (uint32_t)time(NULL);
     int payload_len = snprintf(full_payload, sizeof(full_payload),
         "{\"t\":%" PRIu32 ",\"v\":%d,\"data\":%s}",
@@ -430,8 +427,48 @@ int mqtt_publish(const char *sub_topic, const char *data, int len, int qos,
 
     int msg_id = esp_mqtt_client_publish(g_mqtt_client, full_topic,
                                          full_payload, payload_len, qos, retain);
-    if (msg_id >= 0) return 0;
+    if (msg_id >= 0) {
+        telemetry_reset_heartbeat_timer();
+        return 0;
+    }
     return offline_cache_add(sub_topic, data, timestamp) ? 1 : -4;
+}
+
+void mqtt_publish_ota_trace(const char *stage, const char *detail)
+{
+    char buf[512];
+    size_t n = 0;
+    const char *p;
+
+    if (!stage) stage = "";
+    if (!detail) detail = "";
+
+    n += (size_t)snprintf(buf + n, sizeof(buf) - n, "{\"stage\":\"");
+    for (p = stage; *p && n + 4 < sizeof(buf); ++p) {
+        buf[n++] = (*p == '"' || *p == '\\') ? '\'' : *p;
+    }
+    n += (size_t)snprintf(buf + n, sizeof(buf) - n, "\",\"detail\":\"");
+    for (p = detail; *p && n + 8 < sizeof(buf); ++p) {
+        const unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            buf[n++] = '\'';            /* JSON 里不能裸传引号/反斜杠 */
+        } else if (c < 0x20) {
+            buf[n++] = ' ';             /* 控制字符(含换行)替换为空格, 保持单行 */
+        } else {
+            buf[n++] = (char)c;         /* ASCII 与 UTF-8 原样保留 */
+        }
+    }
+    /* 若在 UTF-8 多字节字符中间被截断, 回退到完整字符边界, 免得 JSON 非法 */
+    while (n > 0) {
+        const unsigned char c = (unsigned char)buf[n - 1];
+        if ((c & 0xC0) == 0x80) { n--; continue; }  /* 续字节: 继续回退 */
+        if (c >= 0xC0) { n--; }                     /* 首字节: 整个字符丢弃 */
+        break;
+    }
+    if (n + 3 >= sizeof(buf)) return;
+
+    n += (size_t)snprintf(buf + n, sizeof(buf) - n, "\"}");
+    mqtt_publish(PROTO_TOPIC_OTA_DEBUG, buf, (int)n, 0, 0);
 }
 
 int mqtt_subscribe(const char *sub_topic, int qos)
@@ -490,4 +527,23 @@ void mqtt_flush_offline_cache(void)
         atomic_store(&g_cache_flush_running, false);
         ESP_LOGE(TAG, "Failed to create offline cache flush task");
     }
+}
+
+bool mqtt_is_stuck(int64_t timeout_ms)
+{
+    if (atomic_load(&g_mqtt_connected)) return false;
+    if (g_disconnect_start_ms == 0) return false;
+    /* 连续重启次数越多, 超时越长 (上限 10 分钟) */
+    int64_t effective = timeout_ms * (1 + g_force_restart_count);
+    if (effective > 600000) effective = 600000;
+    int64_t now = esp_timer_get_time() / 1000;
+    return (now - g_disconnect_start_ms) >= effective;
+}
+
+void mqtt_force_restart(void)
+{
+    g_force_restart_count++;
+    ESP_LOGW(TAG, "Force restarting MQTT client (count=%d)", g_force_restart_count);
+    mqtt_disconnect();
+    mqtt_init(g_msg_handler_saved);
 }

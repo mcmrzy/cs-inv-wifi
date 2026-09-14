@@ -21,9 +21,9 @@
 #define UART_PORT_NUM    UART_NUM_0
 
 /* 软件反相补偿: 1=UART 硬件极性反转 (空闲/起始/停止位一并反转) */
-/* 用户决定: TX 与 RX 均反相 */
-#define UART_INVERT_TX   1
-#define UART_INVERT_RX   1
+/*  TX 与 RX 均反相 */
+#define UART_INVERT_TX   0
+#define UART_INVERT_RX   0
 
 /* ---- ARM OTA 帧协议 (与 esp32c3_idf/Arduino 版一致, 兼容 ARM 端 IAP) ---- */
 #define FRAME_HEADER     0xAA
@@ -52,9 +52,6 @@
 #define MQTT_DEFAULT_HOST   CONFIG_CS_INV_MQTT_HOST
 #define MQTT_DEFAULT_PORT   CONFIG_CS_INV_MQTT_PORT
 #define MQTT_KEEPALIVE      60
-#define MQTT_RECONNECT_MIN  1000
-#define MQTT_RECONNECT_MAX  60000
-#define MQTT_RECONNECT_MAX_ATTEMPTS 10
 #define MQTT_USERNAME       CONFIG_CS_INV_MQTT_USERNAME
 #define MQTT_PASSWORD       CONFIG_CS_INV_MQTT_PASSWORD
 
@@ -77,11 +74,18 @@
 #define OFFLINE_CACHE_TTL_DAYS   CONFIG_CS_INV_CACHE_TTL_DAYS
 #define OFFLINE_CACHE_ENABLED    1
 
-/* ---- 版本 ---- */
-#define FIRMWARE_VERSION "V1.2.0.L10"
+/* ---- 版本 (由 CMake 从 version.txt 注入) ---- */
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "V0.0.0.dev"
+#endif
 
 /* ---- 上报周期 (ms) ---- */
-#define TELEMETRY_PERIOD_MS   180000  /* heartbeat 周期上报 (3 分钟, V2.0 协议) */
+#define TELEMETRY_PERIOD_MS   30000   /* V2 heartbeat 周期上报 (30s, 需ARM应答; ARM 本就按 30s 刷新 RunParam) */
+#define ONLINE_PERIOD_MS      90000   /* 在线状态上报 (90s, 无需ARM应答) */
+#define ARM_FAIL_THRESHOLD    3       /* ARM 连续无应答次数 → 故障上报 */
+
+/* ---- MQTT 重连 ---- */
+#define MQTT_STUCK_TIMEOUT_MS  120000  /* 2 分钟未连上 → 强制重建客户端 */
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 

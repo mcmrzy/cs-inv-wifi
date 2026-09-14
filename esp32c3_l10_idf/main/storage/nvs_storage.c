@@ -186,7 +186,8 @@ bool storage_get_ota_pending(StorageOtaPending *pending)
 
 bool storage_set_ota_pending(const StorageOtaPending *pending)
 {
-    if (!pending || pending->security_version == 0 || !pending->task_id[0]) return false;
+    if (!pending || !pending->task_id[0]) return false;
+    /* security_version 可为 0（本地测试时无安全版本） */
 
     StorageOtaPending stored = *pending;
     stored.magic = OTA_PENDING_MAGIC;

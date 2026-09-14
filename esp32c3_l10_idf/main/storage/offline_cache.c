@@ -248,6 +248,28 @@ static void evict_if_needed(void) {
     }
 }
 
+/* ---- Internal: read one batch file into cJSON array (caller holds mutex) ---- */
+static cJSON *read_batch_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return NULL; }
+    char *buf = malloc(sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    fread(buf, 1, sz, f);
+    buf[sz] = '\0';
+    fclose(f);
+    cJSON *arr = cJSON_Parse(buf);
+    free(buf);
+    if (!arr || !cJSON_IsArray(arr)) {
+        cJSON_Delete(arr);
+        return NULL;
+    }
+    return arr;
+}
+
 /* ---- Internal: flush batch buffer to SPIFFS ---- */
 
 /* SPIFFS 满时删除最旧的批次文件腾出空间 */
@@ -507,53 +529,40 @@ bool offline_cache_reserve_space(size_t bytes) {
 int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *payload, uint32_t timestamp)) {
     if (!s_initialized || !send_func) return 0;
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-
-    /* First flush any buffered messages */
+    /* 首先刷新 RAM 批次缓冲到 SPIFFS (持 mutex) */
+    xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200));
     if (s_batch_count > 0) {
         flush_batch();
         s_batch_start_ms = now_ms();
     }
+    xSemaphoreGive(s_mutex);
 
     int sent = 0;
     int failed = 0;
 
     ESP_LOGI(TAG, "Flushing cached batches...");
 
+    /* 逐文件处理: 读取持 mutex, 发送释放 mutex, 删除再持 mutex */
     while (1) {
-        uint32_t min_seq = find_min_seq();
-        if (min_seq == UINT32_MAX) break; /* no more files */
+        /* 1. 持 mutex: 找到最旧文件 + 读取内容 */
+        if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) != pdTRUE) break;
 
+        uint32_t min_seq = find_min_seq();
+        if (min_seq == UINT32_MAX) {
+            xSemaphoreGive(s_mutex);
+            break;
+        }
         char path[280];
         make_filename(min_seq, path, sizeof(path));
-
-        FILE *f = fopen(path, "r");
-        if (!f) { remove(path); continue; }
-
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f);
-        fseek(f, 0, SEEK_SET);
-
-        if (sz <= 0) {
-            fclose(f);
+        cJSON *arr = read_batch_file(path);
+        if (!arr) {
             remove(path);
+            xSemaphoreGive(s_mutex);
             continue;
         }
+        xSemaphoreGive(s_mutex);
 
-        char *buf = malloc(sz + 1);
-        if (!buf) { fclose(f); break; }
-        fread(buf, 1, sz, f);
-        buf[sz] = '\0';
-        fclose(f);
-
-        cJSON *arr = cJSON_Parse(buf);
-        free(buf);
-        if (!arr || !cJSON_IsArray(arr)) {
-            cJSON_Delete(arr);
-            remove(path);
-            continue;
-        }
-
+        /* 2. 不持 mutex: 逐条发送 (MQTT 可能阻塞数秒) */
         int n = cJSON_GetArraySize(arr);
         bool batch_ok = true;
         int first_unsent = n;
@@ -566,11 +575,8 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
 
             if (!jt || !jp) continue;
 
-            const char *topic = jt->valuestring;
-            const char *payload = jp->valuestring;
-            uint32_t ts = jts ? (uint32_t)jts->valuedouble : 0;
-
-            if (send_func(topic, payload, ts)) {
+            if (send_func(jt->valuestring, jp->valuestring,
+                          jts ? (uint32_t)jts->valuedouble : 0)) {
                 sent++;
             } else {
                 failed++;
@@ -581,54 +587,53 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
             }
         }
 
-        if (!batch_ok && first_unsent > 0) {
-            cJSON *remaining = cJSON_CreateArray();
-            for (int i = first_unsent; remaining && i < n; ++i) {
-                cJSON *copy = cJSON_Duplicate(cJSON_GetArrayItem(arr, i), true);
-                if (!copy) {
-                    cJSON_Delete(remaining);
-                    remaining = NULL;
-                    break;
+        /* 3. 持 mutex: 删除已发送文件 / 重写未发送部分 */
+        if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            if (!batch_ok && first_unsent > 0) {
+                cJSON *remaining = cJSON_CreateArray();
+                for (int i = first_unsent; remaining && i < n; ++i) {
+                    cJSON *copy = cJSON_Duplicate(cJSON_GetArrayItem(arr, i), true);
+                    if (!copy) { cJSON_Delete(remaining); remaining = NULL; break; }
+                    cJSON_AddItemToArray(remaining, copy);
                 }
-                cJSON_AddItemToArray(remaining, copy);
+                char *remaining_json = remaining ? cJSON_PrintUnformatted(remaining) : NULL;
+                cJSON_Delete(remaining);
+                if (remaining_json) {
+                    char tmp_path[300];
+                    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+                    FILE *out = fopen(tmp_path, "w");
+                    size_t expected = strlen(remaining_json);
+                    bool saved = out && fwrite(remaining_json, 1, expected, out) == expected &&
+                                 fflush(out) == 0 && fsync(fileno(out)) == 0;
+                    if (out) fclose(out);
+                    if (saved && rename(tmp_path, path) != 0) saved = false;
+                    if (!saved) remove(tmp_path);
+                    free(remaining_json);
+                }
             }
-            char *remaining_json = remaining ? cJSON_PrintUnformatted(remaining) : NULL;
-            cJSON_Delete(remaining);
-            if (remaining_json) {
-                char tmp_path[300];
-                snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
-                FILE *out = fopen(tmp_path, "w");
-                size_t expected = strlen(remaining_json);
-                bool saved = out && fwrite(remaining_json, 1, expected, out) == expected &&
-                             fflush(out) == 0 && fsync(fileno(out)) == 0;
-                if (out) fclose(out);
-                if (saved && rename(tmp_path, path) != 0) saved = false;
-                if (!saved) remove(tmp_path);
-                free(remaining_json);
+
+            if (batch_ok) {
+                remove(path);
+                s_total_msgs -= (s_total_msgs >= (uint32_t)n) ? (uint32_t)n : s_total_msgs;
             }
+            xSemaphoreGive(s_mutex);
         }
 
         cJSON_Delete(arr);
+        if (!batch_ok) break;
+    }
 
-        if (batch_ok) {
-            remove(path);
-            s_total_msgs -= (s_total_msgs >= (uint32_t)n) ? (uint32_t)n : s_total_msgs;
-        } else {
-            break;
+    /* 最终元数据更新 */
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        s_total_msgs = count_all_messages();
+        if (sent > 0 && failed == 0) {
+            s_last_sync = now_epoch();
         }
-    }
-
-    s_total_msgs = count_all_messages();
-    if (sent > 0 && failed == 0) {
-        s_last_sync = now_epoch();
         save_meta();
+        xSemaphoreGive(s_mutex);
     }
 
-    save_meta();
-    ESP_LOGI(TAG, "Flush done: sent=%d, failed=%d, remaining files=%d",
-             sent, failed, count_files());
-
-    xSemaphoreGive(s_mutex);
+    ESP_LOGI(TAG, "Flush done: sent=%d, failed=%d", sent, failed);
     return sent;
 }
 
