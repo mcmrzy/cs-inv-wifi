@@ -31,6 +31,7 @@
 #include "cs_protocol_defs.h"
 #include "telemetry.h"
 #include "cmd_handler.h"
+#include "ble_ct_cmd.h"
 
 static const char *TAG = "CMD";
 
@@ -159,6 +160,17 @@ typedef struct {
 
 static pending_cmd_t s_pending;
 
+typedef struct {
+    bool active;
+    bool acked;
+    uint16_t addr;
+    uint16_t expected_raw;
+    uint16_t scale;
+    char param_id[32];
+} pending_ble_cmd_t;
+
+static pending_ble_cmd_t s_ble_pending;
+
 /* ARM 写应答回调: 应答 err!=0 或超时 → 补发 EXEC_FAILED (err==0 时排队已回 OK) */
 static void on_arm_write_done(uint8_t cmd, uint16_t param1, uint16_t param2,
                               int err)
@@ -167,18 +179,48 @@ static void on_arm_write_done(uint8_t cmd, uint16_t param1, uint16_t param2,
     if (cmd != CS_CMD_WRITE_CTRLPARAM) {
         return;   /* UTC 等其它写由 sntp_sync 回调处理 */
     }
-    if (!s_pending.active || s_pending.addr != param1) {
+    if (s_ble_pending.active && s_ble_pending.addr == param1) {
+        ble_ct_cmd_on_write_ack(s_ble_pending.param_id, err);
+        if (err != 0) {
+            s_ble_pending.active = false;
+        } else {
+            s_ble_pending.acked = true;
+            telemetry_request_config();
+        }
+    }
+    if (s_pending.active && s_pending.addr == param1) {
+        s_pending.active = false;
+        if (err != 0) {
+            ESP_LOGW(TAG, "cmd %s: ARM exec failed err=%d", s_pending.cmd, err);
+            send_response(s_pending.cmd, PROTO_ERR_EXEC_FAILED, -1,
+                          s_pending.task_id);
+        } else {
+            telemetry_request_config();
+        }
+    }
+}
+
+static void on_ctrl_snapshot(const uint16_t *values, size_t count,
+                             uint32_t parameter_revision)
+{
+    if (!s_ble_pending.active || !s_ble_pending.acked) return;
+    if (!values || s_ble_pending.addr >= count) {
+        ble_ct_cmd_on_write_ack(s_ble_pending.param_id, -2);
+        s_ble_pending.active = false;
         return;
     }
-    s_pending.active = false;
-    if (err != 0) {
-        ESP_LOGW(TAG, "cmd %s: ARM exec failed err=%d", s_pending.cmd, err);
-        send_response(s_pending.cmd, PROTO_ERR_EXEC_FAILED, -1,
-                      s_pending.task_id);
+    uint16_t actual_raw = values[s_ble_pending.addr];
+    if (actual_raw != s_ble_pending.expected_raw) {
+        ESP_LOGW(TAG, "BLE cmd %s readback mismatch expected=%u actual=%u",
+                 s_ble_pending.param_id, s_ble_pending.expected_raw, actual_raw);
+        ble_ct_cmd_on_write_ack(s_ble_pending.param_id, -2);
     } else {
-        /* 写入生效 (V2.1 §11.4 命令闭环): 立即索取最新配置 (rev 变化后上报) */
-        telemetry_request_config();
+        ble_ct_cmd_on_write_readback(
+            s_ble_pending.param_id,
+            (double)actual_raw / s_ble_pending.scale,
+            parameter_revision);
     }
+    s_ble_pending.active = false;
 }
 
 static void handle_cmd(const char *cmd_name, double value, const char *task_id)
@@ -255,11 +297,15 @@ cmd_handle_result_t cmd_handler_write_param(const char *name, double value)
     data[0] = (uint8_t)(raw & 0xFF);
     data[1] = (uint8_t)(raw >> 8);
 
-    /*** 注意：BLE 通道不占用 s_pending（该状态机属 MQTT 下行闭环）；
-     * 直接排队写入 ARM，ARM 应答 err 由 cmd_handler 的写回调处理。
-     * 若需 BLE 侧写失败闭环可扩展 on_arm_write_done 增加通道维度。 ***/
+    memset(&s_ble_pending, 0, sizeof(s_ble_pending));
+    s_ble_pending.active = true;
+    s_ble_pending.addr = entry->addr;
+    s_ble_pending.expected_raw = raw;
+    s_ble_pending.scale = entry->scale;
+    snprintf(s_ble_pending.param_id, sizeof(s_ble_pending.param_id), "%s", name);
     int rc = arm_poll_send_write(CS_CMD_WRITE_CTRLPARAM, entry->addr, 2, data);
     if (rc != 0) {
+        s_ble_pending.active = false;
         ESP_LOGW(TAG, "BLE cmd %s: ARM busy", name);
         return CMD_HANDLE_BUSY;
     }
@@ -284,6 +330,65 @@ bool cmd_handler_get_param(const char *name, double *out)
     arm_poll_give_param();
     *out = (double)raw / entry->scale;
     return true;
+}
+
+/* ---- 单设备调试模式: set_debug_telemetry ----
+ * args = [enabled(0/1), interval_seconds(5..3600, 缺省 5), duration_seconds(0→默认3600)]
+ * OK 回执附 effective_interval_seconds 与设备侧 expires_at (unix 秒)。
+ * 与映射表命令不同: 本命令多参数、只改本地心跳调度, 不写 ARM。 */
+static void handle_debug_cmd(const char *cmd_name, const cJSON *root,
+                             const char *task_id)
+{
+    cJSON *jargs = cJSON_GetObjectItemCaseSensitive(root, "args");
+    if (!cJSON_IsArray(jargs) || cJSON_GetArraySize(jargs) < 1) {
+        send_response(cmd_name, PROTO_ERR_INVALID_ARGS, -2, task_id);
+        return;
+    }
+    cJSON *je = cJSON_GetArrayItem(jargs, 0);
+    if (!cJSON_IsNumber(je) ||
+        (je->valuedouble != 0 && je->valuedouble != 1)) {
+        send_response(cmd_name, PROTO_ERR_INVALID_ARGS, -2, task_id);
+        return;
+    }
+    int enabled  = (int)je->valuedouble;
+    int interval = 5;      /* 缺省 5s (调试高频) */
+    int duration = 3600;   /* 缺省 60 分钟 */
+    if (cJSON_GetArraySize(jargs) > 1) {
+        cJSON *ji = cJSON_GetArrayItem(jargs, 1);
+        if (cJSON_IsNumber(ji) && ji->valuedouble >= 5 && ji->valuedouble <= 3600) {
+            interval = (int)ji->valuedouble;
+        }
+    }
+    if (cJSON_GetArraySize(jargs) > 2) {
+        cJSON *jd = cJSON_GetArrayItem(jargs, 2);
+        if (cJSON_IsNumber(jd) && jd->valuedouble >= 0 && jd->valuedouble <= 86400) {
+            duration = (int)jd->valuedouble;
+        }
+    }
+
+    uint32_t effective = 0;
+    int64_t  expires_at = 0;
+    telemetry_debug_set(enabled ? true : false, (uint32_t)interval,
+                        (uint32_t)duration, &effective, &expires_at);
+
+    char buf[224];
+    int n;
+    if (task_id && task_id[0]) {
+        n = snprintf(buf, sizeof(buf),
+                     "{\"task_id\":\"%s\",\"cmd\":\"%s\",\"result\":\"%s\",\"err\":0,"
+                     "\"effective_interval_seconds\":%lu,\"expires_at\":%lld}",
+                     task_id, cmd_name, PROTO_ERR_OK,
+                     (unsigned long)effective, (long long)expires_at);
+    } else {
+        n = snprintf(buf, sizeof(buf),
+                     "{\"cmd\":\"%s\",\"result\":\"%s\",\"err\":0,"
+                     "\"effective_interval_seconds\":%lu,\"expires_at\":%lld}",
+                     cmd_name, PROTO_ERR_OK,
+                     (unsigned long)effective, (long long)expires_at);
+    }
+    if (n > 0 && n < (int)sizeof(buf)) {
+        mqtt_publish(PROTO_TOPIC_CMD_RESP, buf, 0, 1, 0);
+    }
 }
 
 /* ---- 查询命令 (V2.0 §11.3, 无参数) ---- */
@@ -311,7 +416,9 @@ static bool handle_query_cmd(const char *cmd_name, const char *task_id)
 void cmd_handler_init(void)
 {
     arm_poll_set_write_cb(on_arm_write_done);
+    arm_poll_set_ctrl_snapshot_cb(on_ctrl_snapshot);
     s_pending.active = false;
+    s_ble_pending.active = false;
     ESP_LOGI(TAG, "init done (%d cmds)", (int)CMD_MAP_SIZE);
 }
 
@@ -361,6 +468,13 @@ void cmd_handler_on_mqtt_message(const char *topic, const char *payload,
 
     /* 查询命令: 无需数值参数 */
     if (handle_query_cmd(jcmd->valuestring, task_id)) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* 单设备调试模式: 多参数命令 (args 数组), 独立于单值映射表处理 */
+    if (strcmp(jcmd->valuestring, PROTO_CMD_SET_DEBUG_TELEMETRY) == 0) {
+        handle_debug_cmd(jcmd->valuestring, root, task_id);
         cJSON_Delete(root);
         return;
     }

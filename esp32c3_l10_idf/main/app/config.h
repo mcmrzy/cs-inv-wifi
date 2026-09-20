@@ -80,7 +80,7 @@
 #endif
 
 /* ---- 上报周期 (ms) ---- */
-#define TELEMETRY_PERIOD_MS   30000   /* V2 heartbeat 周期上报 (30s, 需ARM应答; ARM 本就按 30s 刷新 RunParam) */
+#define TELEMETRY_PERIOD_MS   180000  /* V2 heartbeat 默认周期上报 (180s=协议 V2.1 基线, 需ARM应答); 调试模式可临时切 5s */
 #define ONLINE_PERIOD_MS      90000   /* 在线状态上报 (90s, 无需ARM应答) */
 #define ARM_FAIL_THRESHOLD    3       /* ARM 连续无应答次数 → 故障上报 */
 

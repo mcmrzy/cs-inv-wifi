@@ -3,7 +3,7 @@
  *
  * V2.1 协议 (CS-L10-6K2_MQTT_上报协议设计_V2.1.md):
  *  - heartbeat: 57 值 {sys[11], pv[5], ac[11], chr[3], bat[5], eng[14], fan[2], diag[3], sock[3]}
- *    30s + 启动立即 + query_telemetry 补报; 实时快照未连接时直接丢弃
+ *    默认180s + 启动立即 + query_telemetry 补报 + 调试模式5s; 实时快照未连接时直接丢弃
  *  - info: 设备能力与固件信息 (连接时/信息变化/query_info)
  *  - config: v2 语义键值对 (连接时/写入生效后/query_config, 42 键工程单位 + rev)
  *  - alarm: {source, code, level, state} 事件闭环 (QoS1)
@@ -46,8 +46,15 @@ static bool     s_alarm_armed;       /* 首次收到运行参数后开始检测 
 static uint64_t s_last_warning;
 static uint32_t s_last_fault;
 static uint16_t s_last_bms;
-static uint32_t s_arm_fail_count;    /* ARM 连续无应答计数 (30s 周期) */
+static uint32_t s_arm_fail_count;    /* ARM 连续无应答计数 (心跳周期) */
 static bool     s_fault_reported;    /* 故障已上报, 恢复前不重复触发 */
+
+/* ---- 单设备调试模式 (云端 set_debug_telemetry) ----
+ * 临时切换 heartbeat 周期; 到期/关闭/重启自动恢复默认 TELEMETRY_PERIOD_MS。
+ * deadline 与 now_ms() 同源 (单调时钟), 不受 NTP 回拨影响; 不持久化。 */
+static volatile bool     s_debug_active;
+static volatile uint32_t s_debug_interval_ms;
+static volatile uint32_t s_debug_deadline_ms;   /* 单调 ms, 0=未启用 */
 
 static uint32_t now_ms(void)
 {
@@ -519,6 +526,38 @@ void telemetry_reset_heartbeat_timer(void)
     s_last_online_ms = now_ms();
 }
 
+bool telemetry_debug_set(bool enabled, uint32_t interval_s, uint32_t duration_s,
+                         uint32_t *out_effective_interval_s, int64_t *out_expires_at_unix)
+{
+    if (!enabled) {
+        s_debug_active = false;
+        s_debug_deadline_ms = 0;
+        if (out_effective_interval_s) *out_effective_interval_s = (uint32_t)TELEMETRY_PERIOD_MS / 1000U;
+        if (out_expires_at_unix) *out_expires_at_unix = (int64_t)time(NULL);
+        telemetry_request_heartbeat();
+        ESP_LOGI(TAG, "debug telemetry disabled, revert default period");
+        return true;
+    }
+    if (interval_s < 5U)    interval_s = 5U;
+    if (interval_s > 3600U) interval_s = 3600U;
+    if (duration_s == 0U || duration_s > 86400U) duration_s = 3600U;
+    s_debug_interval_ms = interval_s * 1000U;
+    s_debug_deadline_ms = now_ms() + duration_s * 1000U;
+    s_debug_active = true;
+    if (out_effective_interval_s) *out_effective_interval_s = interval_s;
+    if (out_expires_at_unix) *out_expires_at_unix = (int64_t)time(NULL) + (int64_t)duration_s;
+    /* 立即按新周期补报一帧, 云端据此确认切换已生效 */
+    telemetry_request_heartbeat();
+    ESP_LOGI(TAG, "debug telemetry enabled: interval=%luus duration=%luus",
+             (unsigned long)interval_s, (unsigned long)duration_s);
+    return true;
+}
+
+bool telemetry_debug_active(void)
+{
+    return s_debug_active;
+}
+
 void telemetry_request_info(void)
 {
     /* 立即补报现有 info (若有) + 请求 ARM 重读 */
@@ -577,8 +616,18 @@ void telemetry_tick(void)
     /* 有 RUNPARAM 数据 + ARM 可达 → 可上报 heartbeat */
     bool arm_ok = have_run && arm_reachable;
 
-    /* 30s V2 heartbeat (需ARM应答); query_telemetry 也可触发 */
-    if (s_hb_requested || (s_now_ms - s_last_hb_ms) >= TELEMETRY_PERIOD_MS) {
+    /* 调试模式到期: 自动恢复默认周期 (重启同样恢复默认, 调试开关不持久化) */
+    if (s_debug_active && s_debug_deadline_ms != 0 &&
+        (int32_t)(s_now_ms - s_debug_deadline_ms) >= 0) {
+        s_debug_active = false;
+        s_debug_deadline_ms = 0;
+        ESP_LOGI(TAG, "debug telemetry expired, revert default period");
+    }
+    uint32_t hb_period_ms = s_debug_active ? s_debug_interval_ms
+                                           : (uint32_t)TELEMETRY_PERIOD_MS;
+
+    /* V2 heartbeat (需ARM应答; 调试模式按切换后的周期); query_telemetry 也可触发 */
+    if (s_hb_requested || (s_now_ms - s_last_hb_ms) >= hb_period_ms) {
         s_hb_requested = false;
         s_last_hb_ms = s_now_ms;
 

@@ -55,6 +55,9 @@
 #define PROTO_ERR_EXPIRED       "EXPIRED"
 #define PROTO_ERR_EXEC_FAILED   "EXEC_FAILED"
 
+/* 单设备调试模式: 云端临时切换心跳采样周期, 到期/关闭/重启自动恢复默认 */
+#define PROTO_CMD_SET_DEBUG_TELEMETRY "set_debug_telemetry"
+
 /* 查询命令 (无参数, args 为空数组) */
 #define PROTO_CMD_QUERY_TELEMETRY "query_telemetry"
 #define PROTO_CMD_QUERY_INFO      "query_info"
