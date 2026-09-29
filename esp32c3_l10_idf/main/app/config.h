@@ -51,6 +51,7 @@
 /* ---- MQTT ---- */
 #define MQTT_DEFAULT_HOST   CONFIG_CS_INV_MQTT_HOST
 #define MQTT_DEFAULT_PORT   CONFIG_CS_INV_MQTT_PORT
+#define MQTT_DEFAULT_FALLBACK_IP "101.43.90.25"
 #define MQTT_KEEPALIVE      60
 #define MQTT_USERNAME       CONFIG_CS_INV_MQTT_USERNAME
 #define MQTT_PASSWORD       CONFIG_CS_INV_MQTT_PASSWORD
@@ -81,7 +82,7 @@
 
 /* ---- 上报周期 (ms) ---- */
 #define TELEMETRY_PERIOD_MS   180000  /* V2 heartbeat 默认周期上报 (180s=协议 V2.1 基线, 需ARM应答); 调试模式可临时切 5s */
-#define ONLINE_PERIOD_MS      90000   /* 在线状态上报 (90s, 无需ARM应答) */
+#define ONLINE_PERIOD_MS      300000   /* 在线状态上报 (300s, 无需ARM应答) */
 #define ARM_FAIL_THRESHOLD    3       /* ARM 连续无应答次数 → 故障上报 */
 
 /* ---- MQTT 重连 ---- */

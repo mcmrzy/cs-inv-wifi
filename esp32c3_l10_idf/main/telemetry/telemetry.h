@@ -22,6 +22,8 @@ void telemetry_init(void);
 
 /* 主循环周期调用 (每 100ms): 内部 30s 心跳调度 + 告警变化检测 */
 void telemetry_tick(void);
+/* OTA 静默窗口: true 期间停发周期心跳/派生上报 (online 与进度不受影响) */
+void telemetry_set_quiet(bool quiet);
 
 /* MQTT 连接建立后调用: 立即上报 info + heartbeat + 请求 ARM 重读 info */
 void telemetry_on_mqtt_connected(void);
@@ -35,9 +37,6 @@ void telemetry_request_info(void);
 
 /* 请求重读控制参数并补报一次 config (query_config/写入生效/连接成功) */
 void telemetry_request_config(void);
-
-/* 重置心跳计时器: 任何有效上行数据发布后调用, 避免冗余心跳 */
-void telemetry_reset_heartbeat_timer(void);
 
 /* 单设备调试模式 (云端 set_debug_telemetry 命令):
  * 临时切换 heartbeat 周期; 到期/关闭/重启自动恢复默认周期, 不持久化。

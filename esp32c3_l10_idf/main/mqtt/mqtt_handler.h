@@ -28,8 +28,28 @@ void mqtt_disconnect(void);
  * 发布 (自动拼接 cs_inv/{sn}/ 前缀 + 信封 {"t":..,"v":1,"data":<data>}):
  *  返回 0=已发送, 1=已入离线缓存, <0=失败
  */
+void mqtt_clear_retained_status(const char *sn);
+
 int mqtt_publish(const char *sub_topic, const char *data, int len,
                  int qos, int retain);
+
+/*
+ * 实时发布: 与 mqtt_publish 同格式, 但断连时直接丢弃 (不写离线缓存)。
+ * 用于调试日志之类"补传无价值、也不该挤占遥测补传槽位"的上行。
+ * 返回 0=已发送, <0=失败/未连接
+ */
+int mqtt_publish_volatile(const char *sub_topic, const char *data, int len,
+                          int qos);
+
+/*
+ * heartbeat 专用发布 (信封版本 3, 不走离线缓存):
+ * data 为 ARM RunParamDef 原样转发的 {"run":[87 个 u16]}, 服务端按结构体
+ * 定义解析。不缓存见 mqtt_handler.c 实现处注释 (缓存 payload 上限 512B /
+ * 补传按 v2 重组信封会与 v3 冲突 / 状态快照补传价值低)。
+ * 返回 0=已发送, <0=失败/未连接
+ */
+int mqtt_publish_heartbeat_raw(const char *sub_topic, const char *data,
+                               int len);
 
 int mqtt_subscribe(const char *sub_topic, int qos);
 
@@ -43,7 +63,7 @@ void mqtt_flush_offline_cache(void);
  * OTA 过程留痕: 发布到 cs_inv/{sn}/ota/debug, 供人在 MQTT 侧远程判读
  * (等价于串口的 OTA 日志)。与 ota/status 分开, 不参与后端状态机。
  * detail 会做 JSON 转义与长度截断。
- * 只能从栈足够大的任务调用 (内部走 mqtt_publish, 其栈上有 2KB 缓冲)。
+ * 仅实时发送，断连时丢弃；信封按实际长度临时分配，不占用 2KB 任务栈。
  */
 void mqtt_publish_ota_trace(const char *stage, const char *detail);
 

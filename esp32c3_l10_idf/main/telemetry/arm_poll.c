@@ -2,7 +2,8 @@
  * arm_poll.c — ARM 串口轮询调度
  *
  *  UART1 (9600, 8N1) 连接 ARM 采集器接口 :
- *   - 每 30s 轮询运行参数 (READ_RUNPARAM 0x03E8, 176B): 保活 + 数据保鲜
+ *   - 每 30s 轮询运行参数 (READ_RUNPARAM 0x03E8, 174B): 保活 + 数据保鲜
+ *     (请求长度随 RUN_PARAM_SIZE 自动为 174B)
  *   - 只读信息 (READ_R_DATA 0x0190, 52B) 事件性读取: 上电/MQTT连接/query_info 时,
  *     失败按 30s 节流重试, 成功即停
  *   - MQTT 发布周期 (heartbeat 180s 等) 由 telemetry_tick 统一控制
@@ -26,7 +27,7 @@
 
 static const char *TAG = "ARMPOLL";
 
-/* 应答超时 (ms): 9600 波特率下 200B 帧 ~200ms, ARM 处理 <100ms */
+/* 应答超时 (ms): 9600 波特率下 174B 帧 ~180ms, ARM 处理 <100ms; 800ms 覆盖收帧+处理 */
 #define ARM_RESP_TIMEOUT_MS    800
 /* 接收字节间隔超时 (ms), 与 ARM 端 1s 一致, 防止残帧堆积 */
 #define ARM_RX_GAP_TIMEOUT_MS  1000
@@ -80,6 +81,7 @@ static uint8_t s_cfg_phase;
 /* 写命令结果回调 (多路: sntp_sync 校时 + cmd_handler 命令闭环, 各自按 cmd/addr 过滤) */
 #define WRITE_CB_MAX  2
 static arm_write_result_cb_t s_write_cbs[WRITE_CB_MAX];
+static arm_ctrl_snapshot_cb_t s_ctrl_snapshot_cb;
 
 /* 连续超时计数 (用于节流 timeout 日志) */
 static uint32_t s_timeout_count;
@@ -114,7 +116,13 @@ static void send_frame_cmd(uint8_t cmd, uint16_t param1, uint16_t param2,
 
 /* ---------------- 接收分发 (UART RX 任务) ---------------- */
 
-/* ---------------- 调试打印: 0x06/0x03 应答字段 (按地址顺序, 输出到 USB 虚拟串口) ---- */
+/* ---------------- 调试打印: 0x06/0x03 应答字段 (按地址顺序, 输出到 USB 虚拟串口) ----
+ * ⚠ 本表仅供本地串口调试时人读 (ESP_LOGD 级), **不在上报数据路径上**:
+ * heartbeat 已改为按 pack(1) 字序原样转发 87 个 u16 (见 telemetry.c
+ * publish_heartbeat), ESP 零解析。
+ * 字段语义/单位/界限的**权威在服务端** device-communication/internal/telemetry/
+ * heartbeat_v3.go (与 arm_param.h 布局同源; 单位以 ARM UsartDsp.c 的 //单位X
+ * 注释为准)。若本表与服务端不一致, 以服务端为准 —— 切勿照本表反向改服务端解析。*/
 typedef struct {
     const char *name;
     uint16_t    off;    /* 结构体内字节偏移 */
@@ -137,37 +145,42 @@ static const arm_dbg_field_t s_onlyread_fields[] = {
     { "BLVersion",           50,  2 },
 };
 
-/* 运行参数 0x03E8 起 (RunParamDef, 176B, 字段宽度 2/4/8 混合) */
+/* 运行参数 0x03E8 起 (RunParamDef, 174B App(10) 直传布局, 全 u16/s16 + 4 处 u32/u64) */
 static const arm_dbg_field_t s_runparam_fields[] = {
     { "SysStatus",          0,  2 }, { "Vpv1",               2,  2 },
-    { "Vpv2",               4,  2 }, { "Ppv",                6,  4 },
-    { "Buck1Curr",         10,  2 }, { "Buck2Curr",         12,  2 },
-    { "BoostTemp",         14,  2 }, { "InvertTemp",        16,  2 },
-    { "OutputWatt",        18,  4 }, { "OutputVA",          22,  4 },
-    { "OutputCurr",        26,  2 }, { "ACChrWatt",         28,  4 },
-    { "ACChrVA",           32,  4 }, { "GridVolt",          36,  2 },
-    { "GridFreq",          38,  2 }, { "ACOutputVolt",      40,  2 },
-    { "ACOutputFreq",      42,  2 }, { "ACInWatt",          44,  4 },
-    { "ACInVA",            48,  4 }, { "ACDisChrWatt",      52,  4 },
-    { "ACDisChrVA",        56,  4 }, { "ACChrCurr",         60,  2 },
-    { "BatVolt",           62,  2 }, { "BatterySOC",        64,  2 },
-    { "BatDisChrWatt",     66,  4 }, { "BatChrWatt",        70,  4 },
-    { "BatChgCurr",        74,  2 }, { "BatDischgCurr",     76,  2 },
-    { "BatOverCharge",     78,  2 }, { "BusVolt",           80,  2 },
-    { "PvTemp",            82,  2 }, { "InvCurr",           84,  2 },
-    { "TransformerTemp",   86,  2 }, { "LoadPercent",       88,  2 },
-    { "ParaChgCurr",       90,  2 }, { "WorkTimeTotal",     92,  4 },
-    { "MpptFanSpeed",      96,  2 }, { "InvFanSpeed",       98,  2 },
-    { "PairedSocket",     100,  2 }, { "OnlineSocket",     102,  2 },
-    { "OnSocket",         104,  2 }, { "Warning",          106,  8 },
-    { "BmsWarning",       114,  2 }, { "FaultValue",       116,  4 },
-    { "EGen_today",       120,  4 }, { "EGen_total",       124,  4 },
-    { "Epv_today",        128,  4 }, { "Epv_total",        132,  4 },
-    { "Eac_chrToday",     136,  4 }, { "Eac_chrTotal",     140,  4 },
-    { "Ebat_dischrToday", 144,  4 }, { "Ebat_dischrTotal", 148,  4 },
-    { "Ebat_chrToday",    152,  4 }, { "Ebat_chrTotal",    156,  4 },
-    { "Eac_dischrToday",  160,  4 }, { "Eac_dischrTotal",  164,  4 },
-    { "Eop_dischrToday",  168,  4 }, { "Eop_dischrTotal",  172,  4 },
+    { "Vpv2",               4,  2 }, { "Ppv1",               6,  2 },
+    { "Ppv2",               8,  2 }, { "Ppv",               10,  2 },
+    { "Buck1Curr",         12,  2 }, { "Buck2Curr",         14,  2 },
+    { "BoostTemp",         16,  2 }, { "InvertTemp",        18,  2 },
+    { "OutputWatt",        20,  2 }, { "OutputVA",          22,  2 },
+    { "OutputCurr",        24,  2 }, { "ACChrWatt",         26,  2 },
+    { "ACChrVA",           28,  2 }, { "GridVolt",          30,  2 },
+    { "GridFreq",          32,  2 }, { "ACOutputVolt",      34,  2 },
+    { "ACOutputFreq",      36,  2 }, { "ACInWatt",          38,  2 },
+    { "ACInVA",            40,  2 }, { "ACDisChrWatt",      42,  2 },
+    { "ACDisChrVA",        44,  2 }, { "ACChrCurr",         46,  2 },
+    { "BatVolt",           48,  2 }, { "BatterySOC",        50,  2 },
+    { "BatDisChrWatt",     52,  2 }, { "BatChrWatt",        54,  2 },
+    { "BatChgCurr",        56,  2 }, { "BatDischgCurr",     58,  2 },
+    { "BatOverCharge",     60,  2 }, { "BusVolt",           62,  2 },
+    { "Ibus",              64,  2 }, { "PvTemp",            66,  2 },
+    { "InvCurr",           68,  2 }, { "TransformerTemp",   70,  2 },
+    { "LoadPercent",       72,  2 }, { "GridPercent",       74,  2 },
+    { "ParaChgCurr",       76,  2 }, { "WorkTimeTotal",     78,  4 },
+    { "MpptFanSpeed",      82,  2 }, { "InvFanSpeed",       84,  2 },
+    { "PairedSocket",      86,  2 }, { "OnlineSocket",      88,  2 },
+    { "OnSocket",          90,  2 }, { "Warning",           92,  8 },
+    { "BmsWarning",       100,  2 }, { "FaultValue",       102,  4 },
+    { "EGen_today",       106,  4 }, { "EGen_total",       110,  4 },
+    { "Epv_today",        114,  4 }, { "Epv_total",        118,  4 },
+    { "Eac_chrToday",     122,  4 }, { "Eac_chrTotal",     126,  4 },
+    { "Ebat_dischrToday", 130,  4 }, { "Ebat_dischrTotal", 134,  4 },
+    { "Ebat_chrToday",    138,  4 }, { "Ebat_chrTotal",    142,  4 },
+    { "Eac_dischrToday",  146,  4 }, { "Eac_dischrTotal",  150,  4 },
+    { "Eop_dischrToday",  154,  4 }, { "Eop_dischrTotal",  158,  4 },
+    { "VinvtA",           162,  2 }, { "IinvtA",           164,  2 },
+    { "InvtFreq",         166,  2 }, { "Pinvt",            168,  2 },
+    { "Sinvt",            170,  2 }, { "InvtPercent",      172,  2 },
 };
 
 /* 按地址顺序打印字段表 (调试用) */
@@ -225,7 +238,16 @@ static void sync_sn_from_onlyread(void)
     if (strcmp(arm_sn, g_device_sn) != 0) {
         char old_sn[SN_MAX_LEN];
         strlcpy(old_sn, g_device_sn, sizeof(old_sn));
-        storage_set_sn(arm_sn);
+        /* 换 SN 前清掉旧 SN 的 retained status: 否则旧主题会作为"幽灵设备"
+         * 永久留在 broker/设备列表里 (见 mqtt_clear_retained_status 注释)。 */
+        mqtt_clear_retained_status(old_sn);
+        if (!storage_set_sn(arm_sn)) {
+            /* NVS 写失败(分区满/碎片)时绝不能置重启标志: 否则每次开机都同步一次
+             * 又一次重启, 设备永远起不来, 现场表现得像"配网/配置全丢"。 */
+            ESP_LOGE(TAG, "SN from ARM: %s but NVS save FAILED; keeping %s",
+                     arm_sn, old_sn);
+            return;
+        }
         strlcpy(g_device_sn, arm_sn, sizeof(g_device_sn));
         s_sn_changed = true;
         ESP_LOGW(TAG, "SN from ARM: %s (was %s), restart to apply",
@@ -297,6 +319,10 @@ static void handle_frame(uint8_t *raw, size_t len)
         if (param2 == CTRL_PARAM_SIZE && len >= 8 + CTRL_PARAM_SIZE) {
             memcpy(g_ctrl_param, data, CTRL_PARAM_SIZE);
             g_arm_stat.last_ctrl_ms = now;
+            if (s_ctrl_snapshot_cb) {
+                s_ctrl_snapshot_cb(g_ctrl_param, CTRL_PARAM_COUNT,
+                                   g_read_write.CtrlParamAlterTime);
+            }
             if (s_wait_resp && s_wait_cmd == cmd) {
                 s_wait_resp = false;
             }
@@ -493,6 +519,21 @@ void arm_poll_set_write_cb(arm_write_result_cb_t cb)
     ESP_LOGW(TAG, "write cb slots full (%d)", WRITE_CB_MAX);
 }
 
+void arm_poll_set_ctrl_snapshot_cb(arm_ctrl_snapshot_cb_t cb)
+{
+    s_ctrl_snapshot_cb = cb;
+}
+
+/* OTA 静默窗口: 停发周期轮询(0x03), 但保留残帧超时/应答超时等状态维护,
+ * 使恢复后不会因为计数或残帧而误判。仅 ESP 自升级用 (ARM/DSP/BMS 的传输
+ * 通道就是这条 UART, 绝不能停)。 */
+static volatile bool s_quiet = false;
+
+void arm_poll_set_quiet(bool quiet)
+{
+    s_quiet = quiet;
+}
+
 void arm_poll_tick(void)
 {
     s_now_ms = now_ms();
@@ -559,8 +600,9 @@ void arm_poll_tick(void)
         return;
     }
 
-    /* 6. 周期/事件轮询: 0x03 每 30s 保活; 0x06 事件性 (请求置位, 30s 节流防失败轰炸) */
-    if (!s_wait_resp) {
+    /* 6. 周期/事件轮询: 0x03 每 30s 保活; 0x06 事件性 (请求置位, 30s 节流防失败轰炸)。
+     * 静默窗口内只跳过发送, 其它状态维护(残帧/应答超时)照常。 */
+    if (!s_wait_resp && !s_quiet) {
         if (s_info_requested &&
             (s_now_ms - s_last_info_req_ms) >= ARM_POLL_INTERVAL_MS) {
             s_info_requested = false;

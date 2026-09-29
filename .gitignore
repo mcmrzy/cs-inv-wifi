@@ -61,3 +61,18 @@ esp32c2_idf/managed_components/
 
 # Test outputs
 test_results/
+
+# L10 local artifacts (build/test/draft outputs, never commit)
+Testing/
+build-host-ninja/
+*.obj
+*.exe
+.codewhale/
+release/
+viz/
+esp32c3_l10_idf/tmp1.html
+esp32c3_l10_idf/tmp2.html
+esp32c3_l10_idf/docs/dsp数据.html
+esp32c3_l10_idf/tools/BmsFwPack/*.bin
+esp32c3_l10_idf/tools/cs_inv_l10_vdev.bin
+esp32c3_l10_idf/tools/cs_inv_l10_vdev_merged.bin

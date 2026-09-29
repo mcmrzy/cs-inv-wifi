@@ -1,25 +1,29 @@
 /**
  * ================================================================
- *  ARM OTA 模块实现 (ESP-IDF) — Collector PULL 协议
+ *  Collector IAP OTA 模块实现 (ESP-IDF) — ARM / DSP / BMS 共用 PULL 协议
  *
  *  与 ARM 端 (external/driver_arm 的 Collector.c / Update.c) 逐字节对齐:
  *    1. App 触发:   ESP 发 0x07/param1=0x0001/param2=4/"ARMU"
  *                   App 回 status 0 后延时复位进 bootloader
- *    2. 信息查询:   boot 发 0x09/param1=1 (空 payload, 3s 窗口, 无重试)
- *                   ESP 回 0x09: data[0]=0 + transport size(u32LE)
- *                                + 链式 CRC32(u32LE, 对加密后 payload 链算)
- *    3. boot 整片擦除 APP 区后发 0x0A/param1=1 请求第 0 包 (每包窗口 5s)
- *       ESP 发 0x0B: data[0..1]=包号(LE) + FwKey TEA-CBC(零 IV) 加密 payload
- *                    第 0 包 payload = 16B 传输头 + 前 1024B 应用
- *    4. boot 每包回 0x0B ACK (data[0]=status); 最后一包 ACK 带整包 CRC 结果
- *    5. 成功后 boot 自动转查 DSP: 0x09/param1=2 → ESP 回 data[0]=1 (无新固件)
+ *    2. 信息查询:   boot 发 0x09/param1=1(ARM) 或 2(DSP) 或 3(BMS)
+ *                   ESP 回 0x09: data[0]=0 + transport size + 链式 CRC
+ *                  或 data[0]=1 (无新固件); 对非本会话 target 一律回"无"
+ *    3. 擦除后 0x0A 要第 0 包; ESP 发 0x0B: 包号 LE + TEA 加密 payload
+ *    4. 每包 0x0B ACK; 末包 status=0 = 整包 CRC 通过
  *
- *  boot 侧任何一步超时都会回到 NoGetFwInfo 重新查询 0x09, 因此本侧在事件
- *  等待超时或收到重查帧后重发 info 即可重新对齐; 整片擦除开始后不可长时间
- *  中断传输, 否则 ARM 停在 bootloader (整机断电重启后 boot 会重新查询, 可恢复)。
+ *  BMS 差异 (《BMS固件升级通信协议规格说明书》V1.0, ARM boot BmsUpdate.c 中转):
+ *    - 0x0A 是握手结果通知: status=1 即 boot 已终止 BMS 任务, 本侧快速失败
+ *    - 块失败 (0x0B status=1, ERROR=101/102/103/0xFF): boot 包号不递增,
+ *      本侧重发同一包号 (上限 BMS_PACKET_MAX_RETRIES)
+ *    - 末包 ACK 覆盖 0xFC+BMS 整体 CRC32, 等待窗口放宽到 30s
+ *    - 全程 ~13-15s/块 (9600 baud), 92KB 约 5-6 分钟
  *
- *  传输在 OTA 任务内同步执行; 期间 arm_poll 暂停 CS 轮询, 其 uart_rx_task
- *  把串口字节逐个喂入 arm_ota_rx_byte()。
+ *  目标选择 (s_iap_target):
+ *    ARM-only: p1=1 有货, p1=2 回"无"
+ *    DSP-only: p1=1 回"无", p1=2 有货; 仍要 ARMU 进 IAP
+ *
+ *  boot 侧任何一步超时都会回到 NoGetFwInfo 重新查询 0x09。
+ *  传输在 OTA 任务内同步执行; arm_poll 在 is_streaming 期间暂停 CS 轮询。
  * ================================================================
  */
 
@@ -30,6 +34,7 @@
 
 #include <errno.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -46,7 +51,9 @@
 
 static const char* TAG = "ARM-OTA";
 
-#define STAGE_PATH              "/cache/arm_ota.bin"
+#define STAGE_PATH_ARM          "/cache/arm_ota.bin"
+#define STAGE_PATH_DSP          "/cache/dsp_ota.bin"
+#define STAGE_PATH_BMS          "/cache/bms_ota.bin"
 
 /* ARM boot 命令 (Boot/source/Collector/Collector.c InstructionProcess) */
 #define IAP_CMD_FW_INFO         0x09    /* 双向: boot 查询 / ESP 应答固件信息 */
@@ -62,11 +69,20 @@ static const char* TAG = "ARM-OTA";
 #define ARMU_RESP_TIMEOUT_MS    2000    /* App 对 ARMU 的应答 */
 #define TRIGGER_ATTEMPTS        3
 #define BOOT_INFO_WINDOW_MS     15000   /* 复位后等 boot 0x09 (覆盖 boot 自检) */
-#define PACKET_EVENT_WAIT_MS    8000    /* 0x0A / 每包 ACK 等待 */
+/* 每包 ACK 等待: 4112B 帧 @9600bps 单程 ≈4.3s, 加 boot→BMS 转发 + 4KB 擦除
+ * + ACK 回传, 全往返 ≈13s; 窗口 15s 覆盖。 */
+#define PACKET_EVENT_WAIT_MS    15000   /* 0x0A / 每包 ACK 等待 */
 #define ARM_ERASE_WAIT_MS      45000    /* info 应答后等 boot 擦完 APP 区发 0x0A */
-#define DSP_QUERY_WAIT_MS       3000    /* 最终 ACK 后等 DSP 查询 */
+#define DSP_ERASE_WAIT_MS      60000    /* DSP 路径: 握手+擦除 (ARM 侧最长约 24s, 留裕量) */
+#define BMS_HANDSHAKE_WAIT_MS  60000    /* BMS: info 应答后等 0x0A 握手通知
+                                         * (boot 轮询握手 30×200ms + BMS 可能先静默复位) */
+#define BMS_FINAL_ACK_WAIT_MS  30000    /* BMS 末包 ACK = 块写入 + 0xFC + BMS 整体 CRC32 */
+#define BMS_PACKET_MAX_RETRIES 3        /* BMS 单块 status=1 重发同包的上限 */
+#define DSP_QUERY_WAIT_MS       3000    /* 最终 ACK 后等对端查询 */
 #define RETRIGGER_DELAY_MS      1500    /* 重试前等待 ARM 复位回落 */
 #define TRANSFER_MAX_RESTARTS   5       /* boot 重查 0x09 的容忍次数 */
+#define ARM_OTA_ALLOC_ATTEMPTS  3
+#define ARM_OTA_ALLOC_RETRY_MS  50
 
 static ArmOtaState       g_ota_state = ARM_OTA_IDLE;
 static ArmOtaCallback    g_ota_callback = NULL;
@@ -77,28 +93,23 @@ static int64_t           g_state_enter_time = 0;
 static char              g_message[128] = {0};
 /* 失败原因: 只留在设备日志里时无从判断是暂存问题还是 ARM 协议问题, 需要上报云端 */
 static char              g_last_error[96] = {0};
+static bool              g_last_storage_error = false;
 
 static bool              g_streaming_mode = false;   /* 会话开启(含 staging 阶段) */
 static uint16_t          g_total_packets = 0;
 static uint16_t          g_current_packet = 0;
+static IapTarget         s_iap_target = IAP_TARGET_ARM;
 
 static FILE*             g_stage_file = NULL;
 static size_t            g_stage_written = 0;
 static size_t            g_stage_total = 0;
 static bool              g_spiffs_ready = false;
+static const char*       g_stage_path = STAGE_PATH_ARM;
 
 /* Collector 帧 RX: uart_rx_task 喂字节, OTA worker 消费完整帧 */
 static cs_ppp_rx_t       s_col_rx;
 static SemaphoreHandle_t s_frame_sem = NULL;
 static SemaphoreHandle_t s_frame_mutex = NULL;
-static uint8_t           s_plain[CS_FRAME_MAX];
-static struct {
-    uint8_t  raw[CS_FRAME_MAX];
-    size_t   len;
-    uint8_t  cmd;
-    uint16_t p1;
-    uint16_t p2;
-}                        s_frame;
 static volatile bool     s_frame_ready = false;
 
 /* 收包留痕 → MQTT (cs_inv/{sn}/ota/debug)。
@@ -106,12 +117,34 @@ static volatile bool     s_frame_ready = false;
  * 2KB 缓冲, 会栈溢出), 所以只把摘要写进静态缓冲, 由 OTA 任务在等待循环里取走发布。 */
 static char              s_rx_trace[224];
 static volatile bool     s_rx_trace_pending = false;
-/* 解密前的原始(加密)帧字节, 仅用于失败留痕 */
-static uint8_t           s_raw_rx[CS_FRAME_MAX];
 
-/* 传输期工作区 (仅 OTA worker 调用, 用 static 避免挤占任务栈) */
-static uint8_t           s_packet[ARM_IAP_FIRST_PAYLOAD_SIZE];
-static uint8_t           s_tx[CS_FRAME_MAX * 2 + 4];
+/* ---- ARM IAP 工作区: 只在 ARM/DSP/BMS 传输期使用, 按需整块分配 ----
+ * ESP 自升级完全用不到这 ~20KB; 而整机堆只有 ~131KB, OTA 窗口还要拿接收缓冲
+ * 和 (https 时的)TLS 上下文, 常驻等于挤占。整块一次 malloc、显式一次 free,
+ * 避免多处分配/释放泄漏:
+ *   - 分配: 固件已暂存完成、真正进入 IAP 传输前才懒分配，避免与下载传输
+ *     缓冲同时占堆；OOM 时清理暂存会话并干净失败；
+ *   - 释放: 每次 ARM/DSP/BMS 会话结束后由 ota_service 的统一出口释放；ESP
+ *     会话入口再做一次防御性释放，确保该约 20KB 工作区绝不跨会话常驻。
+ * RX 路径由 arm_poll 的 arm_ota_active() 门控 (会话外不会有字节路由进来),
+ * TX/打包路径只在会话内; 所有使用点仍带 s_ws 空指针护栏, 不命中即失败不崩溃。 */
+typedef struct {
+    /* TX 上限: 4KB IAP 包封装后 ~4136B, ×2 容纳 PPP 7E 转义最坏膨胀 */
+    uint8_t  tx[CS_FRAME_TX_MAX * 2 + 4];
+    uint8_t  iap_data[2 + ARM_IAP_MAX_PAYLOAD_SIZE];  /* 0x0B data: 包号(u16)+payload */
+    uint8_t  plain[CS_FRAME_MAX];
+    uint8_t  raw_rx[CS_FRAME_MAX];   /* 解密前的原始(加密)帧字节, 仅用于失败留痕 */
+    uint8_t  scratch[CS_FRAME_MAX];  /* 合并帧尾部恢复用 */
+    struct {
+        uint8_t  raw[CS_FRAME_MAX];
+        size_t   len;
+        uint8_t  cmd;
+        uint16_t p1;
+        uint16_t p2;
+    }        frame;
+} ArmOtaWorkspace;
+
+static ArmOtaWorkspace*  s_ws;
 
 static int64_t get_time_ms(void)
 {
@@ -128,6 +161,68 @@ static void record_error(const char* fmt, ...)
     va_end(args);
 }
 
+/* 工作区懒分配: 只在 OTA worker 即将进入 IAP PULL 传输时调用。 */
+static bool ws_ensure(void)
+{
+    if (s_ws) return true;
+    for (unsigned attempt = 1; attempt <= ARM_OTA_ALLOC_ATTEMPTS; ++attempt) {
+        s_ws = malloc(sizeof(*s_ws));
+        if (s_ws) return true;
+        ESP_LOGW(TAG, "workspace allocation failed (%u/%u, %u bytes)",
+                 attempt, ARM_OTA_ALLOC_ATTEMPTS, (unsigned)sizeof(*s_ws));
+        if (attempt < ARM_OTA_ALLOC_ATTEMPTS)
+            vTaskDelay(pdMS_TO_TICKS(ARM_OTA_ALLOC_RETRY_MS));
+    }
+    record_error("ARM OTA workspace malloc failed after %u attempts (%u bytes)",
+                 ARM_OTA_ALLOC_ATTEMPTS, (unsigned)sizeof(*s_ws));
+    return false;
+}
+
+/* 见工作区注释: 只应在没有 ARM 会话时调用。 */
+void arm_ota_workspace_release(void)
+{
+    if (g_streaming_mode || g_ota_state != ARM_OTA_IDLE) {
+        ESP_LOGE(TAG, "workspace release refused: ARM session active");
+        return;
+    }
+    /* 与 RX 路径串行: uart_rx_task 可能刚通过 arm_ota_active() 判断、正持锁在用
+     * s_ws (TOCTOU)。取同一把 s_frame_mutex 再 free, 保证没有在飞的使用者。 */
+    if (s_frame_mutex && xSemaphoreTake(s_frame_mutex, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+    if (s_ws) {
+        free(s_ws);
+        s_ws = NULL;
+        ESP_LOGI(TAG, "ARM OTA workspace released (+%u bytes heap)",
+                 (unsigned)sizeof(ArmOtaWorkspace));
+    }
+    if (s_frame_mutex) xSemaphoreGive(s_frame_mutex);
+}
+
+static const char* iap_target_name(IapTarget target)
+{
+    return target == IAP_TARGET_DSP ? "DSP"
+         : target == IAP_TARGET_BMS ? "BMS" : "ARM";
+}
+
+static const char* stage_path_for(IapTarget target)
+{
+    return target == IAP_TARGET_DSP ? STAGE_PATH_DSP
+         : target == IAP_TARGET_BMS ? STAGE_PATH_BMS : STAGE_PATH_ARM;
+}
+
+static int64_t erase_wait_ms_for(IapTarget target)
+{
+    return target == IAP_TARGET_BMS ? BMS_HANDSHAKE_WAIT_MS
+         : target == IAP_TARGET_DSP ? DSP_ERASE_WAIT_MS : ARM_ERASE_WAIT_MS;
+}
+
+static size_t iap_packet_size_for(IapTarget target)
+{
+    return target == IAP_TARGET_BMS
+        ? ARM_IAP_BMS_PACKET_SIZE : ARM_IAP_LEGACY_PACKET_SIZE;
+}
+
 /* 释放异常收尾留下的会话。不走 arm_ota_cancel(): 那条路径会触发状态回调,
  * 暂存阶段被上层当成一次"取消"上报。释放后 g_ota_state 回 IDLE, arm_poll
  * 才会恢复 CS 轮询与串口 RX 路由。 */
@@ -137,7 +232,7 @@ static void release_stale_session(void)
         fclose(g_stage_file);
         g_stage_file = NULL;
     }
-    remove(STAGE_PATH);
+    remove(g_stage_path);
     g_stage_written = 0;
     g_stage_total = 0;
     g_streaming_mode = false;
@@ -191,12 +286,13 @@ static bool iap_cancelled(void)
 static bool iap_send_frame(uint8_t cmd, uint16_t param1, uint16_t param2,
                            const uint8_t* data)
 {
-    size_t n = cs_frame_send(s_tx, cmd, param1, param2, data, esp_random());
+    if (!s_ws) return false;   /* 只在会话内被调用; 护栏兜底 */
+    size_t n = cs_frame_send(s_ws->tx, cmd, param1, param2, data, esp_random());
     if (n == 0) {
         ESP_LOGE(TAG, "frame build failed cmd=0x%02X p2=%u", cmd, param2);
         return false;
     }
-    uart_write_bytes(UART_PORT_NUM, s_tx, n);
+    uart_write_bytes(UART_PORT_NUM, s_ws->tx, n);
     ESP_LOGI(TAG, "TX cmd=0x%02X p1=0x%04X p2=%u (%u bytes)", cmd, param1,
              param2, (unsigned)n);
     return true;
@@ -271,13 +367,13 @@ static bool iap_wait_event(int64_t deadline, iap_event_t* ev)
                 valid = s_frame_ready;
                 if (valid) {
                     const size_t plen =
-                        (s_frame.len > CS_OFF_DATA) ? (s_frame.len - CS_OFF_DATA) : 0;
+                        (s_ws->frame.len > CS_OFF_DATA) ? (s_ws->frame.len - CS_OFF_DATA) : 0;
                     const uint16_t n = (plen > sizeof(ev->payload))
                         ? (uint16_t)sizeof(ev->payload) : (uint16_t)plen;
-                    ev->cmd = s_frame.cmd;
-                    ev->p1 = s_frame.p1;
-                    ev->p2 = s_frame.p2;
-                    memcpy(ev->payload, s_frame.raw + CS_OFF_DATA, n);
+                    ev->cmd = s_ws->frame.cmd;
+                    ev->p1 = s_ws->frame.p1;
+                    ev->p2 = s_ws->frame.p2;
+                    memcpy(ev->payload, s_ws->frame.raw + CS_OFF_DATA, n);
                     ev->payload_len = n;
                 }
                 s_frame_ready = false;
@@ -314,48 +410,56 @@ static bool iap_wait_event(int64_t deadline, iap_event_t* ev)
 /* ---- staged 文件 → FwKey 加密数据包 ---- */
 
 /* 第 packet_id 包的加密 payload。传输头**只在第 0 包**:
- *   ARM boot (Update.c InvFwUpdatingProcess) 对首包按 1040B 收取并跳过前 16B 写
- *   APP (databuf+4), 其余包按 1024B 直写, 末包按 (Size-16)%1024 收。
+ *   ARM boot (Update.c InvFwUpdatingProcess) 对首包收取并跳过前 16B 写 APP
+ *   (databuf+4), 其余包直写, 末包按 (Size-16)%包大小 收。
  *   若每包都加 16B 头: ① 链式 CRC 从第 1 包起就与 boot 不一致 → 末包报 CRC 错;
  *   ② 写进 flash 的镜像每包错位 16B (即使 CRC 对上也是坏镜像)。
  *   与 arm_iap_codec.c 的 arm_iap_build_packet() 保持同一语义。
+ * 包大小按目标选择: ARM/DSP=1024B，匹配 boot 的 1088B 接收帧及 DSP 协议；
+ * BMS=4096B，匹配 UPDATE_FW_BLOCK_LEN 与 flash block 编址。
  * 镜像按 8 字节对齐补零, 补零部分不在 staged 文件里, 由 memset 兜底。 */
-static size_t iap_build_packet(FILE* f, uint16_t packet_id, size_t padded)
+static size_t iap_build_packet(FILE* f, uint16_t packet_id, size_t padded,
+                               uint8_t* packet, size_t capacity)
 {
-    const size_t offset = (size_t)packet_id * ARM_IAP_APP_PACKET_SIZE;
+    if (!packet) return 0;
+    const size_t packet_size = iap_packet_size_for(s_iap_target);
+    const size_t offset = (size_t)packet_id * packet_size;
     if (offset >= padded) return 0;
     size_t len = padded - offset;
-    if (len > ARM_IAP_APP_PACKET_SIZE) len = ARM_IAP_APP_PACKET_SIZE;
+    if (len > packet_size) len = packet_size;
 
-    memset(s_packet, 0, sizeof(s_packet));
     size_t want = len;   /* 应用字节数 */
     const size_t available = (g_stage_total > offset) ? (g_stage_total - offset) : 0;
     if (want > available) want = available;
     const size_t header = (packet_id == 0) ? ARM_IAP_HEADER_SIZE : 0u;
+    const size_t total = len + header;
+    if (total > capacity) return 0;
+    memset(packet, 0, total);
     if (fseek(f, (long)offset, SEEK_SET) != 0) return 0;
-    if (want > 0 && fread(s_packet + header, 1, want, f) != want) {
+    if (want > 0 && fread(packet + header, 1, want, f) != want) {
         return 0;
     }
 
-    const size_t total = len + header;
-    arm_iap_crypt_payload(s_packet, total, 1);
+    arm_iap_crypt_payload(packet, total, 1);
     return total;
 }
 
 /* 链式 CRC: 对每包加密后的 payload 链算 (与 ARM 端 DataCRC 一致) */
 static bool iap_compute_chain_crc(uint16_t packets, size_t padded, uint32_t* out)
 {
-    FILE* f = fopen(STAGE_PATH, "rb");
+    if (!s_ws) return false;
+    FILE* f = fopen(g_stage_path, "rb");
     if (!f) return false;
     uint32_t crc = ARM_IAP_CRC_INIT;
     bool ok = true;
     for (uint16_t k = 0; k < packets && ok; ++k) {
-        const size_t len = iap_build_packet(f, k, padded);
+        const size_t len = iap_build_packet(
+            f, k, padded, s_ws->iap_data + 2, sizeof(s_ws->iap_data) - 2);
         if (len == 0 || (len & 3u) != 0) {
             ok = false;
             break;
         }
-        crc = arm_iap_crc32_update(s_packet, len, crc);
+        crc = arm_iap_crc32_update(s_ws->iap_data + 2, len, crc);
     }
     fclose(f);
     if (ok) *out = crc;
@@ -364,15 +468,17 @@ static bool iap_compute_chain_crc(uint16_t packets, size_t padded, uint32_t* out
 
 static bool iap_send_packet(FILE* f, uint16_t packet_id, size_t padded)
 {
-    const size_t payload_len = iap_build_packet(f, packet_id, padded);
-    if (payload_len == 0) return false;
+    if (!s_ws) return false;
 
-    /* data = 包号(u16 LE) + payload */
-    static uint8_t data[2 + ARM_IAP_FIRST_PAYLOAD_SIZE];
-    data[0] = (uint8_t)(packet_id & 0xFF);
-    data[1] = (uint8_t)((packet_id >> 8) & 0xFF);
-    memcpy(data + 2, s_packet, payload_len);
-    return iap_send_frame(IAP_CMD_FW_DATA, 1, (uint16_t)(2 + payload_len), data);
+    /* data = 包号(u16 LE) + payload；直接构建到最终帧数据区，避免再保留/复制
+     * 一份 4112B packet 缓冲。 */
+    s_ws->iap_data[0] = (uint8_t)(packet_id & 0xFF);
+    s_ws->iap_data[1] = (uint8_t)((packet_id >> 8) & 0xFF);
+    const size_t payload_len = iap_build_packet(
+        f, packet_id, padded, s_ws->iap_data + 2, sizeof(s_ws->iap_data) - 2);
+    if (payload_len == 0) return false;
+    return iap_send_frame(IAP_CMD_FW_DATA, s_iap_target,
+                          (uint16_t)(2 + payload_len), s_ws->iap_data);
 }
 
 static bool iap_send_info(size_t transport, uint32_t chain_crc)
@@ -380,25 +486,63 @@ static bool iap_send_info(size_t transport, uint32_t chain_crc)
     uint8_t info[9] = {0};   /* data[0]=0 有新固件; [1..4]=size; [5..8]=CRC */
     put_u32_le(info + 1, (uint32_t)transport);
     put_u32_le(info + 5, chain_crc);
-    return iap_send_frame(IAP_CMD_FW_INFO, 1, sizeof(info), info);
+    return iap_send_frame(IAP_CMD_FW_INFO, s_iap_target, sizeof(info), info);
+}
+
+static bool iap_send_no_fw(IapTarget target)
+{
+    const uint8_t no_fw = 1;
+    return iap_send_frame(IAP_CMD_FW_INFO, target, 1, &no_fw);
 }
 
 /* ---- PULL 传输主流程 ---- */
 
+/* Wait for the 0x09 matching this session target. The boot queries every IAP
+ * target in its chain (ARM→DSP→BMS) before reaching ours; reply "none" to the
+ * others immediately or the peer wastes its query window and times out. */
+static bool wait_target_fw_query(iap_event_t* ev)
+{
+    const int64_t deadline = get_time_ms() + BOOT_INFO_WINDOW_MS;
+    const uint16_t want = (uint16_t)s_iap_target;
+    while (iap_wait_event(deadline, ev)) {
+        if (ev->cmd != IAP_CMD_FW_INFO) continue;
+        if (ev->p1 == want) return true;
+        if (ev->p1 == IAP_TARGET_ARM || ev->p1 == IAP_TARGET_DSP ||
+            ev->p1 == IAP_TARGET_BMS) {
+            ESP_LOGI(TAG, "%s-only: reject 0x09/p1=%u (no image this session)",
+                     iap_target_name(s_iap_target), (unsigned)ev->p1);
+            {
+                char line[64];
+                snprintf(line, sizeof(line),
+                         "%s-only: no p1=%u firmware this session",
+                         iap_target_name(s_iap_target), (unsigned)ev->p1);
+                mqtt_publish_ota_trace("iap-0x09", line);
+            }
+            iap_send_no_fw((IapTarget)ev->p1);
+            continue;
+        }
+    }
+    return false;
+}
+
 static bool pull_transfer(void)
 {
     g_last_error[0] = '\0';
+    /* 下载收尾刚经历 flash 连续写 + WiFi 收包功耗尖峰, 立即触发 ARMU 会让
+     * ARM 复位浪涌与之叠加——现场实测第二轮任务起在下载尾段/触发段间歇性把
+     * 共电轨拉穿 brownout 阈值(档7=2.51V, 已是最低档), ESP 猝死重启。先静默
+     * 600ms 让电源回稳, 再触发 ARM 复位进 boot。 */
+    vTaskDelay(pdMS_TO_TICKS(600));
     const size_t padded = (g_stage_total + 7u) & ~(size_t)7u;
     const size_t transport = padded + ARM_IAP_HEADER_SIZE;
-    const uint16_t packets = arm_iap_packet_count(padded);
+    const size_t packet_size = iap_packet_size_for(s_iap_target);
+    const uint16_t packets = arm_iap_packet_count(padded, packet_size);
+    const char* tname = iap_target_name(s_iap_target);
     if (packets == 0) {
         record_error("image size not storable: %u bytes", (unsigned)g_stage_total);
         ESP_LOGE(TAG, "image size not storable: %u", (unsigned)g_stage_total);
         return false;
     }
-    /* 总包数必须在这里登记: update_progress() 以 g_total_packets 为分母, 为 0 时
-     * 恒返回 0 —— 于是上层算出的进度永远是 70%, 又被"至少 +5%"节流挡掉, 表现为
-     * "升级过程一条进度都不上报"。 */
     g_total_packets = packets;
     g_current_packet = 0;
 
@@ -408,33 +552,34 @@ static bool pull_transfer(void)
         ESP_LOGE(TAG, "chain CRC computation failed");
         return false;
     }
-    ESP_LOGI(TAG, "transfer start: image=%u padded=%u transport=%u packets=%u crc=0x%08lx",
-             (unsigned)g_stage_total, (unsigned)padded, (unsigned)transport,
-             packets, (unsigned long)chain_crc);
+    ESP_LOGI(TAG, "transfer start target=%s image=%u padded=%u transport=%u chunk=%u packets=%u crc=0x%08lx",
+             tname, (unsigned)g_stage_total, (unsigned)padded, (unsigned)transport,
+             (unsigned)packet_size, packets, (unsigned long)chain_crc);
     {
         char line[96];
         snprintf(line, sizeof(line),
-                 "image=%u transport=%u packets=%u crc=0x%08lx",
-                 (unsigned)g_stage_total, (unsigned)transport, packets,
+                 "target=%s image=%u transport=%u packets=%u crc=0x%08lx",
+                 tname, (unsigned)g_stage_total, (unsigned)transport, packets,
                  (unsigned long)chain_crc);
         mqtt_publish_ota_trace("transfer-start", line);
     }
 
-    FILE* f = fopen(STAGE_PATH, "rb");
+    FILE* f = fopen(g_stage_path, "rb");
     if (!f) {
         record_error("reopen staged firmware failed (errno=%d)", errno);
         ESP_LOGE(TAG, "reopen staged firmware failed");
         return false;
     }
 
+    const uint16_t want_p1 = (uint16_t)s_iap_target;
+    const int64_t first_erase_wait = erase_wait_ms_for(s_iap_target);
     bool success = false;
-    bool trigger_acked = false;   /* ARM App 应答过 0x07 ARMU */
-    bool info_seen = false;       /* 见过 bootloader 的 0x09 查询 */
+    bool trigger_acked = false;
+    bool info_seen = false;
+    bool handshake_fatal = false;   /* BMS 握手身份不匹配: 重试无意义 */
     for (unsigned attempt = 1;
          attempt <= TRIGGER_ATTEMPTS && !success && !iap_cancelled();
          ++attempt) {
-        /* 1. 触发 ARM App 进 IAP。若 ARM 已在 bootloader (上次失败遗留),
-         *    这一步无应答属预期, 直接进入等 0x09 阶段。 */
         iap_send_frame(CS_CMD_CTRLCMD, CS_CTRL_ENTER_BOOT,
                        (uint16_t)strlen(ARMU_PAYLOAD), (const uint8_t*)ARMU_PAYLOAD);
         iap_event_t ev;
@@ -443,68 +588,96 @@ static bool pull_transfer(void)
             ev.p2 == 1 && ev.payload_len >= 1 && ev.payload[0] == 0) {
             trigger_acked = true;
             ESP_LOGI(TAG, "ARM accepted OTA trigger");
-            mqtt_publish_ota_trace("arm-trigger", "ARMU acked (App 在线, 准备复位进 boot)");
+            mqtt_publish_ota_trace("arm-trigger", "ARMU acked (App online, will reset to boot)");
         } else {
-            ESP_LOGW(TAG, "no ARMU ack (attempt %u), ARM 可能已在 bootloader", attempt);
+            ESP_LOGW(TAG, "no ARMU ack (attempt %u), ARM may already be in bootloader", attempt);
         }
 
-        /* 2. 等 bootloader 固件信息查询 (boot 每 ~3.1s 重查一次) */
-        if (!iap_wait_event(get_time_ms() + BOOT_INFO_WINDOW_MS, &ev) ||
-            ev.cmd != IAP_CMD_FW_INFO || ev.p1 != 1) {
-            record_error("no ARM bootloader 0x09 within %us (attempt %u/%u, ARMU ack=%d)",
-                         BOOT_INFO_WINDOW_MS / 1000, attempt, TRIGGER_ATTEMPTS,
+        if (!wait_target_fw_query(&ev)) {
+            record_error("no %s bootloader 0x09 within %us (attempt %u/%u, ARMU ack=%d)",
+                         tname, BOOT_INFO_WINDOW_MS / 1000, attempt, TRIGGER_ATTEMPTS,
                          (int)trigger_acked);
-            ESP_LOGW(TAG, "bootloader 0x09 not seen (attempt %u)", attempt);
-            mqtt_publish_ota_trace("arm-boot-0x09", "NOT seen (ARM 未进 bootloader 或不发 0x09)");
+            ESP_LOGW(TAG, "bootloader 0x09/%u not seen (attempt %u)", want_p1, attempt);
+            mqtt_publish_ota_trace("arm-boot-0x09", "NOT seen (ARM not in bootloader or no 0x09)");
             vTaskDelay(pdMS_TO_TICKS(RETRIGGER_DELAY_MS));
             continue;
         }
         info_seen = true;
-        mqtt_publish_ota_trace("arm-boot-0x09", "seen: bootloader 已进入 IAP, 立即应答固件信息");
+        {
+            char line[80];
+            snprintf(line, sizeof(line), "seen: p1=%u in IAP, reply firmware info now",
+                     (unsigned)want_p1);
+            mqtt_publish_ota_trace("arm-boot-0x09", line);
+        }
 
-        /* 3. 信息应答 + 数据包循环。
-         * 首次查询必须**立即**应答: boot 的 0x09 是一次性查询(发出后自己只等
-         * ~3s), 旧实现等 boot 重查才回 info, 双方互等 → boot 超时跳回 App,
-         * 永远进不了数据阶段(1.5.8 现场实测的死锁)。
-         * boot 收到 info 后先整片擦除 APP 区才发 0x0A, 可能长达数十秒,
-         * 故应答后的首帧等待单独放宽(ARM_ERASE_WAIT_MS)。 */
         if (!iap_send_info(transport, chain_crc)) {
             record_error("send info frame failed (first reply)");
             ESP_LOGE(TAG, "send info frame failed");
             break;
         }
-        mqtt_publish_ota_trace("arm-info", "已回发 info (transport/chain crc)");
+        mqtt_publish_ota_trace("arm-info", "info sent (transport/chain crc)");
 
         uint16_t sent = 0;
         unsigned restarts = 0;
-        int64_t wait_ms = ARM_ERASE_WAIT_MS;
+        unsigned bms_retries = 0;
+        int64_t wait_ms = first_erase_wait;
         while (!success && !iap_cancelled()) {
-            if (!iap_wait_event(get_time_ms() + wait_ms, &ev)) {
-                record_error("no ARM frame within %us (packet %u/%u)",
-                             (unsigned)(wait_ms / 1000),
+            /* BMS 末包 ACK 覆盖 块写入+0xFC+BMS 整体 CRC32, 窗口放宽 */
+            const int64_t iter_wait =
+                (s_iap_target == IAP_TARGET_BMS && sent >= packets)
+                    ? BMS_FINAL_ACK_WAIT_MS : wait_ms;
+            if (!iap_wait_event(get_time_ms() + iter_wait, &ev)) {
+                record_error("no %s frame within %us (packet %u/%u)",
+                             tname, (unsigned)(iter_wait / 1000),
                              (unsigned)g_current_packet, packets);
                 ESP_LOGW(TAG, "no frame in %.1fs (attempt %u)",
-                         wait_ms / 1000.0, attempt);
+                         iter_wait / 1000.0, attempt);
                 break;
             }
-            wait_ms = PACKET_EVENT_WAIT_MS;   /* 首帧之后的帧恢复常规窗口 */
-            if (ev.cmd == IAP_CMD_FW_INFO && ev.p1 == 1) {
-                /* boot (重新)查询: 重发 info, 从第 0 包重来 */
+            wait_ms = PACKET_EVENT_WAIT_MS;
+            if (ev.cmd == IAP_CMD_FW_INFO && ev.p1 == want_p1) {
                 if (++restarts > TRANSFER_MAX_RESTARTS) {
-                    record_error("ARM boot re-queried 0x09 over %u times", TRANSFER_MAX_RESTARTS);
+                    record_error("%s boot re-queried 0x09 over %u times",
+                                 tname, TRANSFER_MAX_RESTARTS);
                     ESP_LOGE(TAG, "boot re-query loop exceeds %u", TRANSFER_MAX_RESTARTS);
                     break;
                 }
-                ESP_LOGW(TAG, "boot re-queried 0x09, restarting transfer");
+                ESP_LOGW(TAG, "boot re-queried 0x09/%u, restarting transfer", want_p1);
+                {
+                    /* MQTT 侧留痕: boot 中途重查 0x09 意味着传输将从 packet 0
+                     * 重爬(进度回退), 失败记录里的 block 号属于重启后的那一遍
+                     * ——不看这条 trace 会把两遍传输的进度混为一谈。 */
+                    char line[80];
+                    snprintf(line, sizeof(line), "boot re-queried 0x09, restart #%u at packet %u/%u",
+                             restarts, (unsigned)sent, (unsigned)packets);
+                    mqtt_publish_ota_trace("iap-restart", line);
+                }
                 if (!iap_send_info(transport, chain_crc)) {
                     record_error("send info frame failed (packet restart)");
                     break;
                 }
-                wait_ms = ARM_ERASE_WAIT_MS;   /* 重查后 boot 会再次擦除 */
+                wait_ms = first_erase_wait;
                 continue;
             }
-            if (ev.cmd == IAP_CMD_FW_REQ && ev.p1 == 1) {
-                /* boot 要第 0 包 */
+            if (ev.cmd == IAP_CMD_FW_REQ && ev.p1 == want_p1) {
+                if (s_iap_target == IAP_TARGET_BMS && ev.payload_len >= 1 &&
+                    ev.payload[0] != 0) {
+                    /* BMS 的 0x0A 是握手结果通知 (status=1 即握手失败, boot 已
+                     * 终止本次 BMS 任务): 0xFF=无应答, 202~205=型号不匹配 */
+                    const uint8_t bms_err =
+                        ev.payload_len > 4 ? ev.payload[4] : 0u;
+                    record_error("BMS handshake failed: ERROR=%u%s", bms_err,
+                                 bms_err == 0xFF ? " (no BMS response)" : "");
+                    ESP_LOGE(TAG, "BMS handshake failed ERROR=%u", bms_err);
+                    /* 协议书 §5: 握手失败即终止 BMS 任务, 不分错误码一律不再重试。
+                     * 实测 1.7.4: boot 的 WaitTimeOut 会 3s 后重查 0x09 (无上限),
+                     * 本侧若再答 info / 再触发 ARMU, 就和 boot 形成"查询→握手→
+                     * BMS 复位→失败"的无限循环。立即失败回 IDLE 后, boot 的重查
+                     * 询无人应答, 它自己的 WaitFwInfor 1s tick 到期即跳到 PC 阶段
+                     * 退出, BMS 停止被反复复位。 */
+                    handshake_fatal = true;
+                    break;
+                }
                 if (!iap_send_packet(f, 0, padded)) {
                     record_error("send packet 0 failed");
                     break;
@@ -515,15 +688,40 @@ static bool pull_transfer(void)
                 set_state(ARM_OTA_WAIT_ACK, "Waiting for packet 0 ACK");
                 continue;
             }
-            if (ev.cmd == IAP_CMD_FW_DATA && ev.p1 == 1) {
-                if (ev.payload_len < 1) continue;   /* 异常 ACK, 忽略 */
+            if (ev.cmd == IAP_CMD_FW_DATA && ev.p1 == want_p1) {
+                if (ev.payload_len < 1) continue;
                 if (ev.payload[0] != 0) {
-                    record_error("ARM boot reported CRC failure (packet %u/%u)",
-                                 (unsigned)g_current_packet, packets);
+                    const uint8_t bms_err =
+                        ev.payload_len > 4 ? ev.payload[4] : 0u;
+                    if (s_iap_target == IAP_TARGET_BMS && sent > 0) {
+                        /* BMS 块失败 (101/102/103/0xFF): boot 的包号不递增,
+                         * 协议要求重发"同一包号"的数据包 (协议书 §5) */
+                        if (++bms_retries > BMS_PACKET_MAX_RETRIES) {
+                            record_error("BMS block %u failed %u times (ERROR=%u)",
+                                         (unsigned)(sent - 1), bms_retries,
+                                         bms_err);
+                            ESP_LOGE(TAG, "BMS block %u keeps failing (ERROR=%u)",
+                                     (unsigned)(sent - 1), bms_err);
+                            break;
+                        }
+                        ESP_LOGW(TAG, "BMS block %u ACK status=1 ERROR=%u, resend %u/%u",
+                                 (unsigned)(sent - 1), bms_err, bms_retries,
+                                 BMS_PACKET_MAX_RETRIES);
+                        if (!iap_send_packet(f, sent - 1, padded)) {
+                            record_error("resend BMS block %u failed",
+                                         (unsigned)(sent - 1));
+                            break;
+                        }
+                        set_state(ARM_OTA_WAIT_ACK, "Resending BMS block");
+                        continue;
+                    }
+                    record_error("%s boot reported CRC failure (packet %u/%u)",
+                                 tname, (unsigned)g_current_packet, packets);
                     ESP_LOGE(TAG, "boot reported CRC failure");
-                    break;   /* boot 会重新查询, 走 restart 分支 */
+                    break;
                 }
-                if (sent == 0) continue;            /* 无包在传, 忽略 */
+                bms_retries = 0;
+                if (sent == 0) continue;
                 if (sent < packets) {
                     if (!iap_send_packet(f, sent, padded)) {
                         record_error("send packet %u failed", (unsigned)sent);
@@ -535,14 +733,13 @@ static bool pull_transfer(void)
                     set_state(ARM_OTA_SENDING, "Sending next packet");
                     continue;
                 }
-                /* 最后一包的 ACK: status 已确认为 0, 整包 CRC 校验通过 */
                 success = true;
                 break;
             }
-            /* 其他帧忽略 */
         }
 
         if (success) break;
+        if (handshake_fatal) break;
         if (attempt < TRIGGER_ATTEMPTS) {
             vTaskDelay(pdMS_TO_TICKS(RETRIGGER_DELAY_MS));
         }
@@ -550,22 +747,28 @@ static bool pull_transfer(void)
     fclose(f);
 
     if (success) {
-        /* 4. boot 自动转查 DSP 固件: 明确回复"无", 让它退出升级链 */
+        /* 收尾: boot 升级链若还查其他 target 的 0x09, 回"无固件"放行 */
         iap_event_t ev;
         if (iap_wait_event(get_time_ms() + DSP_QUERY_WAIT_MS, &ev) &&
-            ev.cmd == IAP_CMD_FW_INFO && ev.p1 == 2) {
-            const uint8_t no_dsp_fw = 1;
-            iap_send_frame(IAP_CMD_FW_INFO, 2, 1, &no_dsp_fw);
+            ev.cmd == IAP_CMD_FW_INFO &&
+            ev.p1 != (uint16_t)s_iap_target &&
+            (ev.p1 == IAP_TARGET_ARM || ev.p1 == IAP_TARGET_DSP ||
+             ev.p1 == IAP_TARGET_BMS)) {
+            iap_send_no_fw((IapTarget)ev.p1);
         }
-        remove(STAGE_PATH);
-        mqtt_publish_ota_trace("arm-result", "OK: ARM 传输完成 (整包 CRC 通过)");
+        remove(g_stage_path);
+        {
+            char line[64];
+            snprintf(line, sizeof(line), "OK: %s transfer complete (chain CRC pass)", tname);
+            mqtt_publish_ota_trace("arm-result", line);
+        }
         return true;
     }
     if (g_last_error[0] == '\0') {
-        record_error("ARM transfer incomplete: ARMU ack=%d, boot 0x09=%d, packets=%u",
-                     (int)trigger_acked, (int)info_seen, (unsigned)packets);
+        record_error("%s transfer incomplete: ARMU ack=%d, boot 0x09=%d, packets=%u",
+                     tname, (int)trigger_acked, (int)info_seen, (unsigned)packets);
     }
-    ESP_LOGE(TAG, "ARM transfer aborted: %s", g_last_error);
+    ESP_LOGE(TAG, "%s transfer aborted: %s", tname, g_last_error);
     mqtt_publish_ota_trace("arm-result", g_last_error);
     return false;
 }
@@ -595,14 +798,33 @@ static bool ensure_stage_fs(void)
         ESP_LOGE(TAG, "Failed to mount OTA cache: %s", esp_err_to_name(err));
         return false;
     }
+    /* 断电/panic 中断会把暂存固件留在 /cache, 而会话标志在 RAM: 重启后
+     * stale-session 清理永不触发, offline_cache_reserve_space 又只逐遥测
+     * 批次文件, 残留会把之后所有中继升级堵死在空间检查上。下载只以 "wb"
+     * 截断写、无跨重启续传, 故重启后挂载成功的残留必是垃圾, 直接清掉。 */
+    static bool s_stage_swept;
+    if (!s_stage_swept) {
+        s_stage_swept = true;
+        int swept = 0;
+        if (remove(STAGE_PATH_ARM) == 0) swept++;
+        if (remove(STAGE_PATH_DSP) == 0) swept++;
+        if (remove(STAGE_PATH_BMS) == 0) swept++;
+        if (swept > 0) {
+            ESP_LOGW(TAG, "Swept %d stale OTA stage file(s) from /cache", swept);
+        }
+    }
     g_spiffs_ready = true;
     return true;
 }
 
-bool arm_ota_start_streaming(size_t total_size)
+bool arm_ota_start_streaming_for(IapTarget target, size_t total_size)
 {
+    g_last_storage_error = false;
+    s_iap_target = target;
+    g_stage_path = stage_path_for(target);
     if (total_size == 0 || total_size > ARM_OTA_MAX_IMAGE_SIZE) {
-        record_error("bad ARM image size: %u bytes (max %u)",
+        record_error("bad %s image size: %u bytes (max %u)",
+                     iap_target_name(target),
                      (unsigned)total_size, (unsigned)ARM_OTA_MAX_IMAGE_SIZE);
         return false;
     }
@@ -621,6 +843,7 @@ bool arm_ota_start_streaming(size_t total_size)
     s_trace_pub_count = 0;
     if (!ensure_stage_fs()) return false;
     if (!offline_cache_reserve_space(total_size + 16 * 1024)) {
+        g_last_storage_error = true;
         const size_t need = total_size + 16 * 1024;
         size_t total = 0, used = 0;
         const esp_err_t info = esp_spiffs_info("cache", &total, &used);
@@ -631,9 +854,9 @@ bool arm_ota_start_streaming(size_t total_size)
         ESP_LOGE(TAG, "Insufficient cache space for ARM OTA staging");
         return false;
     }
-    g_stage_file = fopen(STAGE_PATH, "wb");
+    g_stage_file = fopen(g_stage_path, "wb");
     if (!g_stage_file) {
-        record_error("open %s failed (errno=%d)", STAGE_PATH, errno);
+        record_error("open %s failed (errno=%d)", g_stage_path, errno);
         return false;
     }
     g_stage_total = total_size;
@@ -642,8 +865,14 @@ bool arm_ota_start_streaming(size_t total_size)
     g_total_packets = 0;
     g_current_packet = 0;
     g_progress = 0;
-    ESP_LOGI(TAG, "Staging ARM firmware: %u bytes", (unsigned)total_size);
+    ESP_LOGI(TAG, "Staging %s firmware: %u bytes",
+             iap_target_name(target), (unsigned)total_size);
     return true;
+}
+
+bool arm_ota_start_streaming(size_t total_size)
+{
+    return arm_ota_start_streaming_for(IAP_TARGET_ARM, total_size);
 }
 
 bool arm_ota_feed(const uint8_t* data, size_t len)
@@ -665,8 +894,10 @@ bool arm_ota_feed(const uint8_t* data, size_t len)
 
 /* ---- 会话收尾 ---- */
 
-bool arm_ota_end_streaming_cancelable(const volatile bool* cancel_flag)
+bool arm_ota_end_streaming_for(IapTarget target, const volatile bool* cancel_flag)
 {
+    s_iap_target = target;
+    g_stage_path = stage_path_for(target);
     if (!g_stage_file) {
         record_error("end_streaming called without an open stage file");
         return false;
@@ -674,6 +905,12 @@ bool arm_ota_end_streaming_cancelable(const volatile bool* cancel_flag)
     if (g_stage_written != g_stage_total) {
         record_error("staged size mismatch: %u/%u bytes",
                      (unsigned)g_stage_written, (unsigned)g_stage_total);
+        arm_ota_cancel();
+        return false;
+    }
+    /* 暂存下载已结束，4.5KB 传输缓冲已由 ota_service 释放；此刻才申请约
+     * 20KB IAP 工作区，避免两块大内存在下载阶段叠加。 */
+    if (!ws_ensure()) {
         arm_ota_cancel();
         return false;
     }
@@ -686,10 +923,8 @@ bool arm_ota_end_streaming_cancelable(const volatile bool* cancel_flag)
     g_abort_flag = NULL;
     if (!ok) {
         const bool cancelled = iap_cancelled();
-        /* 失败必须释放会话并回 IDLE: 否则 g_streaming_mode 常驻 true, 后续 ARM
-         * 推送会被 start_streaming 直接拒绝, arm_poll 也会一直暂停 CS 轮询。 */
         release_stale_session();
-        ESP_LOGE(TAG, "ARM transfer failed: %s",
+        ESP_LOGE(TAG, "Collector IAP transfer failed: %s",
                  g_last_error[0] ? g_last_error : "unknown");
         if (cancelled) {
             set_state(ARM_OTA_IDLE, "OTA cancelled");
@@ -697,13 +932,23 @@ bool arm_ota_end_streaming_cancelable(const volatile bool* cancel_flag)
         return false;
     }
     g_progress = 100;
-    set_state(ARM_OTA_DONE, "ARM OTA transfer complete");
+    set_state(ARM_OTA_DONE, "Collector IAP transfer complete");
     return true;
+}
+
+bool arm_ota_end_streaming_cancelable(const volatile bool* cancel_flag)
+{
+    return arm_ota_end_streaming_for(s_iap_target, cancel_flag);
 }
 
 bool arm_ota_end_streaming(void)
 {
-    return arm_ota_end_streaming_cancelable(NULL);
+    return arm_ota_end_streaming_for(s_iap_target, NULL);
+}
+
+IapTarget arm_ota_get_iap_target(void)
+{
+    return s_iap_target;
 }
 
 bool arm_ota_is_streaming_mode(void)
@@ -728,6 +973,8 @@ void arm_ota_init(void)
     g_stage_file = NULL;
     g_stage_written = 0;
     g_stage_total = 0;
+    s_iap_target = IAP_TARGET_ARM;
+    g_stage_path = STAGE_PATH_ARM;
     s_frame_ready = false;
     cs_ppp_rx_init(&s_col_rx);
     if (!s_frame_sem) s_frame_sem = xSemaphoreCreateBinary();
@@ -770,6 +1017,11 @@ const char* arm_ota_get_last_error(void)
     return g_last_error;
 }
 
+bool arm_ota_last_error_is_storage(void)
+{
+    return g_last_storage_error;
+}
+
 void arm_ota_reset(void)
 {
     g_progress = 0;
@@ -786,7 +1038,7 @@ void arm_ota_cancel(void)
     if (g_stage_file) {
         fclose(g_stage_file);
         g_stage_file = NULL;
-        remove(STAGE_PATH);
+        remove(g_stage_path);
         g_stage_written = 0;
         g_stage_total = 0;
     }
@@ -811,11 +1063,12 @@ void arm_ota_rx_reset(void)
 static void dispatch_frame(const uint8_t* buf, size_t len,
                            uint8_t cmd, uint16_t p1, uint16_t p2)
 {
-    memcpy(s_frame.raw, buf, len);
-    s_frame.len = len;
-    s_frame.cmd = cmd;
-    s_frame.p1 = p1;
-    s_frame.p2 = p2;
+    if (!s_ws) return;
+    memcpy(s_ws->frame.raw, buf, len);
+    s_ws->frame.len = len;
+    s_ws->frame.cmd = cmd;
+    s_ws->frame.p1 = p1;
+    s_ws->frame.p2 = p2;
     s_frame_ready = true;
     ESP_LOGI(TAG, "RX cmd=0x%02X p1=0x%04X p2=%u len=%u", cmd, p1, p2,
              (unsigned)len);
@@ -826,16 +1079,15 @@ static void dispatch_frame(const uint8_t* buf, size_t len,
  * 从缓冲尾部按 8 字节对齐切出的完整子帧可以独立解密校验。 */
 static bool recover_suffix_frame(size_t len)
 {
-    static uint8_t scratch[CS_FRAME_MAX];
-    if (len < 24) return false;
+    if (!s_ws) return false;
     for (size_t take = 24; take < len; take += 8) {
-        memcpy(scratch, s_plain + len - take, take);
+        memcpy(s_ws->scratch, s_ws->plain + len - take, take);
         uint8_t cmd;
         uint16_t p1, p2;
-        if (cs_decrypt_rx(scratch, take) != 0) continue;
-        if (cs_frame_parse(scratch, take, &cmd, &p1, &p2, NULL) != 0) continue;
+        if (cs_decrypt_rx(s_ws->scratch, take) != 0) continue;
+        if (cs_frame_parse(s_ws->scratch, take, &cmd, &p1, &p2, NULL) != 0) continue;
         ESP_LOGW(TAG, "从合并帧尾部恢复子帧 len=%u", (unsigned)take);
-        dispatch_frame(scratch, take, cmd, p1, p2);
+        dispatch_frame(s_ws->scratch, take, cmd, p1, p2);
         return true;
     }
     return false;
@@ -881,26 +1133,32 @@ void arm_ota_rx_byte(uint8_t byte)
     if (xSemaphoreTake(s_frame_mutex, portMAX_DELAY) != pdTRUE) {
         return;
     }
+    if (!s_ws) {
+        /* 会话外不会有字节路由进来 (arm_ota_active() 门控); 万一进来, 丢弃。
+         * 持锁后再判: 释放工作区的路径也持这把锁, 故此处不会摸到已 free 的指针。 */
+        xSemaphoreGive(s_frame_mutex);
+        return;
+    }
     if (cs_ppp_rx_byte(&s_col_rx, byte)) {
         const size_t len = s_col_rx.length;
-        memcpy(s_plain, s_col_rx.buf, len);
-        memcpy(s_raw_rx, s_col_rx.buf, len);   /* 解密是就地改写, 先留原始 */
+        memcpy(s_ws->plain, s_col_rx.buf, len);
+        memcpy(s_ws->raw_rx, s_col_rx.buf, len);   /* 解密是就地改写, 先留原始 */
         cs_ppp_rx_init(&s_col_rx);
 
         /* 每一帧完整留痕: 原始(加密)字节 —— 用于判读 ARM 侧到底发了什么 */
         ESP_LOGI(TAG, "RX raw len=%u", (unsigned)len);
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, s_plain, len, ESP_LOG_INFO);
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, s_ws->plain, len, ESP_LOG_INFO);
 
         uint8_t cmd = 0;
         uint16_t p1 = 0, p2 = 0;
         bool valid = false;
-        if (cs_decrypt_rx(s_plain, len) != 0) {
+        if (cs_decrypt_rx(s_ws->plain, len) != 0) {
             ESP_LOGW(TAG, "帧解密失败 len=%u", (unsigned)len);
-            record_bad_frame("decrypt-fail", s_raw_rx, len, s_plain);
+            record_bad_frame("decrypt-fail", s_ws->raw_rx, len, s_ws->plain);
         } else {
-            const int rc = cs_frame_parse(s_plain, len, &cmd, &p1, &p2, NULL);
+            const int rc = cs_frame_parse(s_ws->plain, len, &cmd, &p1, &p2, NULL);
             if (rc == 0) {
-                dispatch_frame(s_plain, len, cmd, p1, p2);
+                dispatch_frame(s_ws->plain, len, cmd, p1, p2);
                 valid = true;
             } else if (rc == -2) {
                 /* rc == -2 只在 header/CmdLen/长度 全部合法、仅 CRC 不符时返回。
@@ -912,30 +1170,30 @@ void arm_ota_rx_byte(uint8_t byte)
                 /* rc == -2 时 cs_frame_parse 在回填 cmd/p1/p2 之前就返回了,
                  * 必须自己从帧里取 —— 否则按 cmd=0 分发会被状态机过滤掉,
                  * 表现为"帧收到了却永远等不到 0x09"(1.5.7 的实测教训)。 */
-                cmd    = s_plain[CS_OFF_CMD];
-                p1     = (uint16_t)(s_plain[CS_OFF_PARAM1] |
-                                    (s_plain[CS_OFF_PARAM1 + 1] << 8));
-                p2     = (uint16_t)(s_plain[CS_OFF_PARAM2] |
-                                    (s_plain[CS_OFF_PARAM2 + 1] << 8));
+                cmd    = s_ws->plain[CS_OFF_CMD];
+                p1     = (uint16_t)(s_ws->plain[CS_OFF_PARAM1] |
+                                    (s_ws->plain[CS_OFF_PARAM1 + 1] << 8));
+                p2     = (uint16_t)(s_ws->plain[CS_OFF_PARAM2] |
+                                    (s_ws->plain[CS_OFF_PARAM2 + 1] << 8));
                 const uint16_t cmdlen =
-                    (uint16_t)(s_plain[1] | (s_plain[2] << 8));
+                    (uint16_t)(s_ws->plain[1] | (s_ws->plain[2] << 8));
                 const uint32_t crc_got =
-                    (uint32_t)s_plain[cmdlen] |
-                    ((uint32_t)s_plain[cmdlen + 1] << 8) |
-                    ((uint32_t)s_plain[cmdlen + 2] << 16) |
-                    ((uint32_t)s_plain[cmdlen + 3] << 24);
+                    (uint32_t)s_ws->plain[cmdlen] |
+                    ((uint32_t)s_ws->plain[cmdlen + 1] << 8) |
+                    ((uint32_t)s_ws->plain[cmdlen + 2] << 16) |
+                    ((uint32_t)s_ws->plain[cmdlen + 3] << 24);
                 ESP_LOGW(TAG, "帧 CRC 不符但结构合法, 放行 cmd=0x%02X p1=0x%04X "
                          "p2=%u crc_calc=0x%08lx crc_got=0x%08lx",
                          cmd, p1, p2,
-                         (unsigned long)cs_crc32_words(s_plain, cmdlen >> 2),
+                         (unsigned long)cs_crc32_words(s_ws->plain, cmdlen >> 2),
                          (unsigned long)crc_got);
-                record_bad_frame("crc-mismatch", s_raw_rx, len, s_plain);
-                dispatch_frame(s_plain, len, cmd, p1, p2);
+                record_bad_frame("crc-mismatch", s_ws->raw_rx, len, s_ws->plain);
+                dispatch_frame(s_ws->plain, len, cmd, p1, p2);
                 valid = true;
             } else {
                 ESP_LOGW(TAG, "帧结构非法 len=%u header=0x%02X", (unsigned)len,
-                         s_plain[0]);
-                record_bad_frame("parse-fail", s_raw_rx, len, s_plain);
+                         s_ws->plain[0]);
+                record_bad_frame("parse-fail", s_ws->raw_rx, len, s_ws->plain);
                 valid = recover_suffix_frame(len);
             }
         }

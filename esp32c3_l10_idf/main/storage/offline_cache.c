@@ -55,6 +55,13 @@ static SemaphoreHandle_t s_mutex = NULL;
 
 /* Write batch buffer */
 static OfflineCacheItem *s_batch = NULL;
+/* OTA 静默窗口: 暂停周期补传 (缓冲继续积压, 事后照常补) */
+static volatile bool s_quiet = false;
+
+void offline_cache_set_quiet(bool quiet)
+{
+    s_quiet = quiet;
+}
 static int s_batch_count = 0;
 static int64_t s_batch_start_ms = 0;
 static int64_t s_last_process_ms = 0;
@@ -340,6 +347,10 @@ static esp_err_t flush_batch(void) {
     s_next_seq++;
     s_total_msgs += s_batch_count;
     s_batch_count = 0;
+    if (s_batch) {          /* 冲空即归还, 空闲期不占堆 (下次 add 再分配) */
+        free(s_batch);
+        s_batch = NULL;
+    }
     save_meta();
 
     return ESP_OK;
@@ -353,8 +364,9 @@ void offline_cache_init(void) {
     s_mutex = xSemaphoreCreateMutex();
     configASSERT(s_mutex);
 
-    s_batch = calloc(MAX_BATCH_ITEMS, sizeof(OfflineCacheItem));
-    configASSERT(s_batch);
+    /* 批缓冲按需分配 (2026-09-22): 常态(已连接)下缓存为空, 这 10×584B 常年闲置;
+     * 首次需要缓存时才 malloc, 冲空后立刻归还。 */
+    s_batch = NULL;
     s_batch_count = 0;
     s_batch_start_ms = now_ms();
     s_last_process_ms = s_batch_start_ms;
@@ -411,8 +423,17 @@ bool offline_cache_add(const char *topic, const char *payload, uint32_t timestam
     if (!s_initialized || !topic || !payload || strlen(topic) >= sizeof(s_batch[0].topic) ||
         strlen(payload) >= sizeof(s_batch[0].payload)) return false;
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
 
+    if (!s_batch) {
+        s_batch = calloc(MAX_BATCH_ITEMS, sizeof(OfflineCacheItem));
+        if (!s_batch) {
+            ESP_LOGE(TAG, "batch alloc failed (%u bytes); message dropped",
+                     (unsigned)(MAX_BATCH_ITEMS * sizeof(OfflineCacheItem)));
+            xSemaphoreGive(s_mutex);
+            return false;
+        }
+    }
     if (s_batch_count >= MAX_BATCH_ITEMS && flush_batch() != ESP_OK) {
         xSemaphoreGive(s_mutex);
         return false;
@@ -445,7 +466,13 @@ void offline_cache_process(void) {
     if (current_ms - s_last_process_ms < 1000) return;
     s_last_process_ms = current_ms;
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
+    if (s_quiet) {
+        /* 不能持锁 return：main_loop 下一次调用会永久阻塞在同一把非递归 mutex，
+         * 随后持续触发 Task WDT，且 OTA 结束也无法恢复。 */
+        xSemaphoreGive(s_mutex);
+        return;
+    }
     if (s_batch_count > 0 && current_ms - s_batch_start_ms >= FLUSH_INTERVAL_MS) {
         if (flush_batch() != ESP_OK) {
             ESP_LOGW(TAG, "Periodic batch flush failed; retaining %d messages in RAM",

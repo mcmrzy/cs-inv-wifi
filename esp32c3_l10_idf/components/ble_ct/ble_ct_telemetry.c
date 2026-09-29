@@ -1,6 +1,5 @@
 #include "ble_ct_telemetry.h"
 #include "ble_ct.h"
-#include "ble_ct_auth.h"
 #include "esp_log.h"
 #include "host/ble_hs.h"
 #include <string.h>
@@ -29,7 +28,7 @@ void ble_ct_telemetry_set_snapshot(const char *json, uint16_t len)
 }
 
 bool ble_ct_telemetry_should_push(void) {
-    return ble_ct_auth_is_authenticated() && ble_ct_is_telemetry_subscribed();
+    return ble_ct_is_telemetry_subscribed();
 }
 
 static void send_frame(uint16_t conn, uint16_t handle, uint8_t ctrl,
@@ -79,7 +78,8 @@ void ble_ct_telemetry_notify(const char *json, uint16_t len) {
 /* TELEMETRY Read：返回最近一次遥测快照（未获取到数据时返回空） */
 int ble_ct_telemetry_read_cb(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    (void)conn_handle; (void)attr_handle; (void)arg;
+    (void)attr_handle; (void)arg; (void)conn_handle;
+    /* 2026-09-22 起遥测不再要求鉴权 (鉴权协议已移除, App 侧无调用点) */
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
     if (s_snapshot_len == 0) {
         /* 尚无快照: 返回空对象, App 解析为空数据 */

@@ -1,7 +1,7 @@
 /*
  * arm_poll.h — ARM 串口轮询调度
  *
- *  - 每 30s 轮询运行参数 (READ_RUNPARAM 0x03E8, 176B): 保活 + 数据保鲜
+ *  - 每 30s 轮询运行参数 (READ_RUNPARAM 0x03E8, 174B): 保活 + 数据保鲜
  *  - 只读信息 (READ_R_DATA 0x0190, 52B) 事件性读取: 上电/MQTT连接/query_info 时,
  *    失败按 30s 节流重试
  *  - SNTP 校时后写入 UTC (WRITE_R_W_DATA 0x00CA, 4B), 每天一次
@@ -54,6 +54,8 @@ void arm_poll_init(void);
 
 /* 主循环周期调用 (每 100ms), 内部调度 3min 轮询/校时/超时判定 */
 void arm_poll_tick(void);
+/* OTA 静默窗口 (见 arm_poll.c): true 期间停发周期轮询 */
+void arm_poll_set_quiet(bool quiet);
 
 /* 立即请求重读 info (如 MQTT 连接建立后) */
 void arm_poll_request_info(void);
@@ -93,6 +95,11 @@ void arm_poll_give_param(void);
 typedef void (*arm_write_result_cb_t)(uint8_t cmd, uint16_t param1,
                                       uint16_t param2, int err);
 void arm_poll_set_write_cb(arm_write_result_cb_t cb);
+
+/* 控制参数快照更新回调；values 仅在回调期间有效。 */
+typedef void (*arm_ctrl_snapshot_cb_t)(const uint16_t *values, size_t count,
+                                       uint32_t parameter_revision);
+void arm_poll_set_ctrl_snapshot_cb(arm_ctrl_snapshot_cb_t cb);
 
 #ifdef __cplusplus
 }

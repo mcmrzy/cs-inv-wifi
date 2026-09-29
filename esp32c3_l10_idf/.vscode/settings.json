@@ -1,6 +1,10 @@
 {
     "idf.currentSetup": "D:\\.espressif\\v5.5.4\\esp-idf",
-    "idf.portWin": "COM13",
+    "idf.pythonBinPathWin": "C:\\Users\\29538\\.espressif\\python_env\\idf5.5_py3.13_env\\Scripts\\python.exe",
+    "idf.portWin": "COM19",
     "idf.flashType": "UART",
-    "idf.flashBaudRate": "115200"
+    "idf.flashBaudRate": "115200",
+    "idf.openOcdConfigs": [
+        "board/esp32c3-builtin.cfg"
+    ]
 }

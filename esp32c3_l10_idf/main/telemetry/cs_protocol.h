@@ -32,7 +32,10 @@ extern "C" {
 
 /* ---- 帧常量 (ComProtocol.h) ---- */
 #define CS_HEADER           0xAA
-#define CS_FRAME_MAX        1088    /* FRAMLEN */
+#define CS_FRAME_MAX        1088    /* FRAMLEN: CS 轮询/遥测/接收帧上限 */
+/* 发送帧构建上限: IAP 4KB 包(param2=4114)的 total≈4136B。发送侧直接在调用方
+ * 输出缓冲内构建并倒序 PPP 转义；接收侧 boot 应答仍受 CS_FRAME_MAX 约束。 */
+#define CS_FRAME_TX_MAX     4352
 #define CS_CMD_MIN_LEN      8
 #define CS_PPP_ESC_7E       0x7E
 #define CS_PPP_ESC_7D       0x7D

@@ -51,10 +51,16 @@ size_t arm_iap_transport_size(size_t image_size)
     return image_size == 0 || (image_size & 7u) != 0 ? 0 : image_size + ARM_IAP_HEADER_SIZE;
 }
 
-uint16_t arm_iap_packet_count(size_t image_size)
+static int valid_packet_size(size_t packet_size)
 {
-    if (arm_iap_transport_size(image_size) == 0) return 0;
-    size_t count = (image_size + ARM_IAP_APP_PACKET_SIZE - 1u) / ARM_IAP_APP_PACKET_SIZE;
+    return packet_size != 0 && packet_size <= ARM_IAP_MAX_PACKET_SIZE &&
+           (packet_size & 7u) == 0;
+}
+
+uint16_t arm_iap_packet_count(size_t image_size, size_t packet_size)
+{
+    if (arm_iap_transport_size(image_size) == 0 || !valid_packet_size(packet_size)) return 0;
+    size_t count = (image_size + packet_size - 1u) / packet_size;
     return count > UINT16_MAX ? 0 : (uint16_t)count;
 }
 
@@ -99,15 +105,15 @@ void arm_iap_crypt_payload(uint8_t *data, size_t len, int encrypt)
 }
 
 size_t arm_iap_build_packet(const uint8_t *image, size_t image_size,
-                            uint16_t packet_id, uint8_t *output,
+                            size_t packet_size, uint16_t packet_id, uint8_t *output,
                             size_t output_capacity)
 {
     size_t offset, length;
-    if (!image || !output || arm_iap_packet_count(image_size) == 0) return 0;
-    offset = (size_t)packet_id * ARM_IAP_APP_PACKET_SIZE;
+    if (!image || !output || arm_iap_packet_count(image_size, packet_size) == 0) return 0;
+    offset = (size_t)packet_id * packet_size;
     if (offset >= image_size) return 0;
     length = image_size - offset;
-    if (length > ARM_IAP_APP_PACKET_SIZE) length = ARM_IAP_APP_PACKET_SIZE;
+    if (length > packet_size) length = packet_size;
     if (packet_id == 0) {
         if (output_capacity < length + ARM_IAP_HEADER_SIZE) return 0;
         memset(output, 0, ARM_IAP_HEADER_SIZE);
@@ -121,14 +127,15 @@ size_t arm_iap_build_packet(const uint8_t *image, size_t image_size,
     return length;
 }
 
-uint32_t arm_iap_image_crc(const uint8_t *image, size_t image_size)
+uint32_t arm_iap_image_crc(const uint8_t *image, size_t image_size,
+                           size_t packet_size)
 {
-    uint8_t packet[ARM_IAP_FIRST_PAYLOAD_SIZE];
-    uint16_t count = arm_iap_packet_count(image_size), packet_id;
+    uint8_t packet[ARM_IAP_MAX_PAYLOAD_SIZE];
+    uint16_t count = arm_iap_packet_count(image_size, packet_size), packet_id;
     uint32_t crc = ARM_IAP_CRC_INIT;
     if (count == 0) return 0;
     for (packet_id = 0; packet_id < count; ++packet_id) {
-        size_t length = arm_iap_build_packet(image, image_size, packet_id,
+        size_t length = arm_iap_build_packet(image, image_size, packet_size, packet_id,
                                              packet, sizeof(packet));
         if (length == 0) return 0;
         crc = arm_iap_crc32_update(packet, length, crc);

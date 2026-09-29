@@ -16,11 +16,11 @@ BleCtState ble_ct_get_state(void);
 
 uint16_t ble_ct_get_conn_handle(void);
 const char *ble_ct_get_sn(void);
+const char *ble_ct_get_session_id(void);
 
 // 句柄导出
 uint16_t ble_ct_get_telemetry_handle(void);
 uint16_t ble_ct_get_result_handle(void);
-uint16_t ble_ct_get_auth_handle(void);
 
 // 订阅状态
 bool ble_ct_is_telemetry_subscribed(void);

@@ -8,7 +8,8 @@ param(
     [string]$OtaUrl,
     [string]$Target,
     [switch]$SkipBuild,
-    [switch]$NoGitTag
+    [switch]$NoGitTag,
+    [switch]$Yes
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,7 +39,7 @@ $Version = $Version -replace '^v', ''
 Write-Host "  版本: $Version" -ForegroundColor White
 
 # OTA 下载地址
-if (-not $OtaUrl) {
+if (-not $OtaUrl -and -not $Yes) {
     $input = Read-Host "OTA 下载基地址 (如 https://ota.example.com/fw, 回车跳过生成 URL)"
     $OtaUrl = $input
 }
@@ -62,7 +63,7 @@ Write-Host "  目标: $Target" -ForegroundColor White
 
 # 确认
 Write-Host ""
-$confirm = Read-Host "确认开始构建? [Y/n]"
+$confirm = if ($Yes) { 'Y' } else { Read-Host "确认开始构建? [Y/n]" }
 if ($confirm -eq 'n' -or $confirm -eq 'N') {
     Write-Host "已取消" -ForegroundColor Yellow; exit 0
 }
@@ -77,18 +78,15 @@ Write-Host "--- 编译 ---" -ForegroundColor Cyan
 $Version | Out-File -NoNewline -Encoding ascii "version.txt"
 
 if (-not $SkipBuild) {
-    # 定位 ESP-IDF (如果 idf.py 不在 PATH 中, 直接用 Python 环境调用)
-    if (-not (Get-Command idf.py -ErrorAction SilentlyContinue)) {
-        $IdfPy = "D:\.espressif\v5.5.4\esp-idf\tools\idf.py"
-        $IdfPython = "C:\Users\29538\.espressif\python_env\idf5.5_py3.13_env\Scripts\python.exe"
-        if (-not (Test-Path $IdfPy)) { Write-Error "找不到 idf.py: $IdfPy"; exit 1 }
-        if (-not (Test-Path $IdfPython)) { Write-Error "找不到 ESP-IDF Python: $IdfPython"; exit 1 }
-        $env:IDF_PATH = "D:\.espressif\v5.5.4\esp-idf"
-        Write-Host "  ESP-IDF: $env:IDF_PATH" -ForegroundColor DarkGray
-        & $IdfPython $IdfPy build
-    } else {
-        idf.py build
-    }
+    $IdfRoot = "D:\.espressif\v5.5.4\esp-idf"
+    $Export = Join-Path $IdfRoot "export.bat"
+    if (-not (Test-Path $Export)) { Write-Error "找不到 ESP-IDF export.bat: $Export"; exit 1 }
+    Write-Host "  ESP-IDF: $IdfRoot" -ForegroundColor DarkGray
+    # 必须经 export.bat 注入工具链 PATH, 否则 riscv32-esp-elf-gcc 不在 PATH
+    # set "MSYSTEM=": 从 Git Bash/MSYS 启动时 MSYSTEM 会被继承, IDF 的 export.bat
+    # 见到它就直接退出 ("for Windows CMD.EXE shell only") 导致 idf.py 找不到;
+    # 注意必须用带引号的 set "VAR=" 写法 —— `set VAR= &&` 会把值设成空格, 仍算 defined
+    cmd /c "set `"MSYSTEM=`" && call `"$Export`" >nul 2>&1 && cd /d `"$PWD`" && idf.py build"
     if ($LASTEXITCODE -ne 0) { Write-Error "编译失败"; exit 1 }
     Write-Host "  编译完成" -ForegroundColor Green
 } else {
@@ -109,7 +107,7 @@ New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 
 Copy-Item $AppBin "$ReleaseDir\${FwName}.bin"
 Copy-Item "$BuildDir\bootloader\bootloader.bin" "$ReleaseDir\bootloader.bin" -ErrorAction SilentlyContinue
-Copy-Item "$BuildDir\partitions.bin" "$ReleaseDir\partitions.bin" -ErrorAction SilentlyContinue
+Copy-Item "$BuildDir\partition_table\partition-table.bin" "$ReleaseDir\partitions.bin" -ErrorAction SilentlyContinue
 
 $Hash = (Get-FileHash "$ReleaseDir\${FwName}.bin" -Algorithm SHA256).Hash.ToLower()
 $Size = (Get-Item "$ReleaseDir\${FwName}.bin").Length

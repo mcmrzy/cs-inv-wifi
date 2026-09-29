@@ -5,10 +5,16 @@ idf_component_register(
         "ota/arm_ota.c"
         "ota/arm_iap_codec.c"
         "telemetry/telemetry.c"
+        "telemetry/debug_log.c"
+        "telemetry/debug_log_ring.c"
         "telemetry/cmd_handler.c"
+        "mqtt/mqtt_broker_route.c"
+        "mqtt/mqtt_envelope.c"
         "mqtt/mqtt_handler.c"
         "mqtt/ota_mqtt_adapter.c"
         "ota/ota_service.c"
+        "ota/ota_transfer_policy.c"
+        "ota/ble_ota.c"
         "storage/offline_cache.c"
         "storage/nvs_storage.c"
         "ota/uart_ota.c"
@@ -38,6 +44,7 @@ idf_component_register(
         esp_rom
         esp_http_client
         esp_https_ota
+        esp-tls
         mbedtls
         app_update
         ble_prov

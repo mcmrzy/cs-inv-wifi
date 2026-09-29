@@ -12,6 +12,8 @@
 #include "cs_protocol_defs.h"
 #include "cJSON.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include <string.h>
 #include <math.h>
@@ -147,9 +149,30 @@ done:
     return valid;
 }
 
-/* ---- 无 snprintf 的轻量 JSON 构建器（避免栈溢出） ---- */
+/* ---- 无 snprintf 的轻量 JSON 构建器（避免栈溢出） ----
+ * 构建缓冲是静态共享的, 而"构建+发布"整段会被两个任务并发进入:
+ *   - MQTT 命令任务: send_ota_ack / publish_failure / handle_query
+ *   - OTA worker:    update_snapshot → ota_status_observer → publish_snapshot_json
+ * (start_remote 里的 reserve_manifest 与 finish_failure 也会在命令任务上回调
+ *  observer, 所以同一次 OTA 的两端确实会同时进这个临界区。)
+ * 无锁时后进入者会顶掉前者的内容: 表现为 ack 载荷被发到 ota/status(或反之),
+ * 以及一条状态/进度上报被整条吞掉 —— 云端因此卡在 accepted, 收不到失败原因。
+ * 故用互斥量把 json_begin..json_publish 串行化; 除 publish_snapshot /
+ * send_ota_ack / publish_failure / ota_status_observer 外, 本文件不再有裸的
+ * 构建调用点。 */
 static char s_json_buf[1024];
 static int s_json_pos;
+static SemaphoreHandle_t s_json_lock;
+
+static bool json_lock(void)
+{
+    return !s_json_lock || xSemaphoreTake(s_json_lock, portMAX_DELAY) == pdTRUE;
+}
+
+static void json_unlock(void)
+{
+    if (s_json_lock) xSemaphoreGive(s_json_lock);
+}
 
 static void json_begin(void) { s_json_pos = 0; s_json_buf[0] = '{'; s_json_pos = 1; }
 
@@ -188,8 +211,9 @@ static void json_publish(const char *topic) {
     mqtt_publish(topic, s_json_buf, s_json_pos, 1, 0);
 }
 
-static void publish_snapshot(const OtaSnapshot *snapshot,
-                             const char *request_task_id)
+/* 调用方必须已持有 s_json_lock */
+static void publish_snapshot_json(const OtaSnapshot *snapshot,
+                                  const char *request_task_id)
 {
     if (!snapshot) return;
     json_begin();
@@ -211,17 +235,29 @@ static void publish_snapshot(const OtaSnapshot *snapshot,
     json_publish(PROTO_TOPIC_OTA_STATUS);
 }
 
+static void publish_snapshot(const OtaSnapshot *snapshot,
+                             const char *request_task_id)
+{
+    if (!snapshot || !json_lock()) return;
+    publish_snapshot_json(snapshot, request_task_id);
+    json_unlock();
+}
+
 static void ota_status_observer(const OtaSnapshot *snapshot)
 {
     if (!snapshot || snapshot->source != OTA_SOURCE_MQTT) return;
 
+    /* 节流状态与构建缓冲同属一个临界区: 并发进入时"先比较后写入"会让同一条
+     * 状态被重复发布, 或让该发的状态变化被漏掉(例如 downloading@1 被吞)。 */
+    if (!json_lock()) return;
     const bool state_changed = snapshot->state != g_last_published_state;
     const bool progress_due = snapshot->progress >= g_last_published_progress + 5;
-    if (!state_changed && !progress_due && snapshot->progress != 100) return;
-
-    g_last_published_state = snapshot->state;
-    g_last_published_progress = snapshot->progress;
-    publish_snapshot(snapshot, NULL);
+    if (state_changed || progress_due || snapshot->progress == 100) {
+        g_last_published_state = snapshot->state;
+        g_last_published_progress = snapshot->progress;
+        publish_snapshot_json(snapshot, NULL);
+    }
+    json_unlock();
 }
 
 void mqtt_ota_init(void)
@@ -231,26 +267,61 @@ void mqtt_ota_init(void)
     g_request_target[0] = '\0';
     g_last_published_state = OTA_STATE_IDLE;
     g_last_published_progress = 0;
+    if (!s_json_lock) {
+        s_json_lock = xSemaphoreCreateMutex();
+        if (!s_json_lock) {
+            ESP_LOGE(TAG, "json lock create failed: OTA reports may interleave");
+        }
+    }
     ota_service_set_observer(ota_status_observer);
     ESP_LOGI(TAG, "MQTT OTA command adapter initialized");
 }
 
 static void send_ota_ack(const char *task_id, bool accepted, const char *message)
 {
+    if (!json_lock()) return;
     json_begin();
     json_str("task_id", task_id ? task_id : "");
     json_str("ack", accepted ? "true" : "false");
     json_str("message", message ? message : "");
     json_end();
     json_publish(PROTO_TOPIC_CMD_RESP);
+    json_unlock();
 }
 
 static bool command_expired(const MqttOtaCommand *command)
 {
     const time_t now = time(NULL);
-    return now >= 1704067200 &&
-        ((uint32_t)now < command->timestamp ||
-         (uint32_t)now - command->timestamp > PROTO_CMD_EXPIRE_S);
+    /* 时钟未同步(未过 2024-01-01)时不做时间判断, 沿用原行为 */
+    if (now < 1704067200) return false;
+
+    const uint32_t now_s = (uint32_t)now;
+    /* 未来时间戳不等于重放: 云端时钟比设备快是常态(实测差 1 秒), 小偏差必须放行,
+     * 否则刚发出的命令会被当成"来自未来"而拒绝(2026-09-22 的 EXPIRED 就是这么来的)。 */
+    if (command->timestamp > now_s) {
+        return command->timestamp - now_s > PROTO_CMD_FUTURE_SLACK_S;
+    }
+    return now_s - command->timestamp > PROTO_CMD_EXPIRE_S;
+}
+
+/* 失败态上报 (服务拒绝 / 命令过期 / 动作不支持 / JSON 解析失败共用同一形状):
+ * 收敛成一个加锁的 helper, 免得四处各拼一遍时漏锁、或被他人的构建顶掉。 */
+static void publish_failure(const char *task_id, const char *target,
+                            const char *version, const char *code,
+                            const char *message)
+{
+    if (!json_lock()) return;
+    json_begin();
+    json_str("task_id", task_id ? task_id : "");
+    json_str("target", target ? target : "");
+    json_str("version", version ? version : "");
+    json_str("state", PROTO_OTA_STATE_FAILED);
+    json_num("progress", 0);
+    json_str("code", code ? code : "");
+    json_str("message", message ? message : "");
+    json_end();
+    json_publish(PROTO_TOPIC_OTA_STATUS);
+    json_unlock();
 }
 
 static void report_service_result(const MqttOtaCommand *command, OtaResult result)
@@ -263,16 +334,7 @@ static void report_service_result(const MqttOtaCommand *command, OtaResult resul
         return;
     }
     send_ota_ack(command->task_id, false, code);
-    json_begin();
-    json_str("task_id", command->task_id);
-    json_str("target", command->target);
-    json_str("version", command->version);
-    json_str("state", PROTO_OTA_STATE_FAILED);
-    json_num("progress", 0);
-    json_str("code", code);
-    json_str("message", code);
-    json_end();
-    json_publish(PROTO_TOPIC_OTA_STATUS);
+    publish_failure(command->task_id, command->target, command->version, code, code);
 }
 
 static void handle_start(const MqttOtaCommand *command)
@@ -291,22 +353,16 @@ static void handle_start(const MqttOtaCommand *command)
     }
     if (command_expired(command)) {
         send_ota_ack(command->task_id, false, PROTO_ERR_EXPIRED);
-        json_begin();
-        json_str("task_id", command->task_id);
-        json_str("target", command->target);
-        json_str("version", command->version);
-        json_str("state", PROTO_OTA_STATE_FAILED);
-        json_num("progress", 0);
-        json_str("code", PROTO_ERR_EXPIRED);
-        json_str("message", "OTA command expired");
-        json_end();
-        json_publish(PROTO_TOPIC_OTA_STATUS);
+        publish_failure(command->task_id, command->target, command->version,
+                        PROTO_ERR_EXPIRED, "OTA command expired");
         return;
     }
 
     OtaTarget target;
     if (strcmp(command->target, "esp") == 0) target = OTA_TARGET_ESP;
     else if (strcmp(command->target, "arm") == 0) target = OTA_TARGET_ARM;
+    else if (strcmp(command->target, "dsp") == 0) target = OTA_TARGET_DSP;
+    else if (strcmp(command->target, "bms") == 0) target = OTA_TARGET_BMS;
     else {
         report_service_result(command, OTA_RESULT_INVALID_TARGET);
         return;
@@ -372,16 +428,7 @@ bool mqtt_ota_handle_command(const char *topic, const uint8_t *payload,
         g_request_task_id[0] = '\0';
         g_request_version[0] = '\0';
         g_request_target[0] = '\0';
-        json_begin();
-        json_str("task_id", "");
-        json_str("target", "unknown");
-        json_str("version", "");
-        json_str("state", PROTO_OTA_STATE_FAILED);
-        json_num("progress", 0);
-        json_str("code", "JSON_ERROR");
-        json_str("message", "Invalid OTA command");
-        json_end();
-        json_publish(PROTO_TOPIC_OTA_STATUS);
+        publish_failure("", "unknown", "", "JSON_ERROR", "Invalid OTA command");
         return false;
     }
 
@@ -397,16 +444,8 @@ bool mqtt_ota_handle_command(const char *topic, const uint8_t *payload,
         handle_query(&g_ota_cmd);
     } else {
         send_ota_ack(g_ota_cmd.task_id, false, PROTO_ERR_NOT_SUPPORTED);
-        json_begin();
-        json_str("task_id", g_ota_cmd.task_id);
-        json_str("target", g_ota_cmd.target);
-        json_str("version", g_ota_cmd.version);
-        json_str("state", PROTO_OTA_STATE_FAILED);
-        json_num("progress", 0);
-        json_str("code", PROTO_ERR_NOT_SUPPORTED);
-        json_str("message", "Unsupported OTA action");
-        json_end();
-        json_publish(PROTO_TOPIC_OTA_STATUS);
+        publish_failure(g_ota_cmd.task_id, g_ota_cmd.target, g_ota_cmd.version,
+                        PROTO_ERR_NOT_SUPPORTED, "Unsupported OTA action");
     }
 
     g_request_task_id[0] = '\0';

@@ -1,11 +1,21 @@
 #include "ota_service.h"
+#include "ota_transfer_policy.h"
+#include "offline_cache.h"
+#include "telemetry.h"
+#include "arm_poll.h"
+
+/* OTA 静默窗口: 定义见 install_esp 之前 */
+static void ota_quiet_begin(void);
+static void ota_quiet_end(void);
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "arm_ota.h"
 #include "esp_http_client.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -23,40 +33,75 @@
 #include "mqtt_handler.h"
 #include "ota_release_pubkey.h"
 
-#define OTA_BUFFER_SIZE       2048U
+/* 8KB: esp_ota_write 调用次数减为 1/4 (每块含 flash 锁/校验开销), BMS 暂存
+ * 与 HTTP recv 缓冲同源受益。进度上报节流按 ≥5%/≥1s, 块变大不影响粒度。 */
+#define OTA_BUFFER_SIZE       8192U
 #define OTA_ARM_MAX_SIZE      (256U * 1024U)
-#define OTA_TASK_STACK_SIZE   6144U
+#define OTA_DSP_MAX_SIZE      (512U * 1024U)
+#define OTA_BMS_MAX_SIZE      (256U * 1024U)
+/* 12KB: ota_remote 的调用链峰值 = mbedtls TLS 读(~4KB 深栈) + 外围帧 ~2KB,
+ * 6144 贴线运行——BMS 传输段/ESP 自升级下载写入中的间歇性 PANIC
+ * (reset_reason=PANIC, 位置漂移) 与栈溢出特征吻合, 翻倍消除。 */
+#define OTA_TASK_STACK_SIZE   12288U
 #define OTA_TASK_PRIORITY     5U
 #define OTA_READ_IDLE_MS      10U
 #define OTA_HEALTH_DELAY_MS   10000U
 #define OTA_HEALTH_MAX_AGE_MS 2000U
 #define OTA_HTTP_MAX_REDIRECTS 3U
+/* 断点续传次数上限: 每次抖动重连一次, 超过即判失败 */
+#define OTA_MAX_RESUMES       3U
+#define OTA_ALLOC_ATTEMPTS     3U
+#define OTA_ALLOC_RETRY_MS     50U
 
 static SemaphoreHandle_t g_lock;
 static OtaSnapshot g_snapshot;
 static OtaManifest g_manifest;
-static OtaStatusObserver g_observer;
+/* 多个适配器(MQTT 上报 + BLE 本地)都要收状态回调, 单槽会被后注册者覆盖:
+ * ble_ota_init() 在 mqtt_ota_init() 之后执行, 曾把 MQTT 的 observer 顶掉,
+ * 导致 MQTT OTA 全程不发 ota/status(进度/成功都上报不了)。各自按 source 过滤。 */
+static OtaStatusObserver g_observers[OTA_MAX_OBSERVERS];
+static size_t g_observer_count;
 static TaskHandle_t g_remote_task;
 static atomic_bool g_cancel_requested;
 static atomic_uint_fast32_t g_main_loop_tick;
 static bool g_active;
 static bool g_boot_validation_required;
 static StorageOtaPending g_boot_pending;
-/* The service admits only one transfer at a time, so one shared buffer avoids
- * placing 4 KiB on either the HTTP server or OTA worker stack. */
-static uint8_t g_transfer_buffer[OTA_BUFFER_SIZE];
+/* 传输缓冲按目标选择：BLE→ESP 的分片不超过 256B，其他路径保留 4608B。 */
 static wifi_ps_type_t g_saved_wifi_ps = WIFI_PS_NONE;
-/* ARM 阶段 (暂存/Collector PULL) 的失败原因, 由 install_arm 填充并随状态上报云端 */
+/* Collector PULL (ARM/DSP) 阶段的失败原因, 由 install_collector_iap 填充并上报云端 */
 static char g_arm_failure_detail[96];
+
+static bool create_ota_task_with_retry(TaskFunction_t entry, const char* name,
+                                       uint32_t stack_size, void* parameter,
+                                       TaskHandle_t* handle)
+{
+    for (unsigned attempt = 1; attempt <= OTA_ALLOC_ATTEMPTS; ++attempt) {
+        if (xTaskCreate(entry, name, stack_size, parameter,
+                        OTA_TASK_PRIORITY, handle) == pdPASS) return true;
+        if (handle) *handle = NULL;
+        ESP_LOGW("OTA", "%s task allocation failed (%u/%u), free=%u largest=%u",
+                 name, attempt, OTA_ALLOC_ATTEMPTS,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        if (attempt < OTA_ALLOC_ATTEMPTS)
+            vTaskDelay(pdMS_TO_TICKS(OTA_ALLOC_RETRY_MS));
+    }
+    return false;
+}
 
 static void notify_snapshot(const OtaSnapshot* snapshot)
 {
-    OtaStatusObserver observer = NULL;
+    OtaStatusObserver observers[OTA_MAX_OBSERVERS];
+    size_t count = 0;
     if (g_lock && xSemaphoreTake(g_lock, portMAX_DELAY) == pdTRUE) {
-        observer = g_observer;
+        count = g_observer_count;
+        for (size_t i = 0; i < count; ++i) observers[i] = g_observers[i];
         xSemaphoreGive(g_lock);
     }
-    if (observer) observer(snapshot);
+    for (size_t i = 0; i < count; ++i) {
+        if (observers[i]) observers[i](snapshot);
+    }
 }
 
 static void update_snapshot(OtaState state, uint8_t progress,
@@ -84,7 +129,10 @@ static void release_active(void)
 
 const char* ota_target_name(OtaTarget target)
 {
-    return target == OTA_TARGET_ARM ? "arm" : "esp";
+    if (target == OTA_TARGET_ARM) return "arm";
+    if (target == OTA_TARGET_DSP) return "dsp";
+    if (target == OTA_TARGET_BMS) return "bms";
+    return "esp";
 }
 
 const char* ota_source_name(OtaSource source)
@@ -111,8 +159,10 @@ const char* ota_result_code(OtaResult result)
         "HASH_MISMATCH", "HTTP_ERROR", "TIMEOUT", "READ_FAILED",
         "FLASH_WRITE_FAILED", "ARM_TRANSFER_FAILED", "PERSIST_FAILED",
         "OTA_NOT_CANCELLABLE", "TASK_CREATE_FAILED", "INTERNAL_ERROR",
+        "TARGET_UNSUPPORTED",
+        "INSUFFICIENT_STORAGE",
     };
-    return result <= OTA_RESULT_INTERNAL ? codes[result] : "INTERNAL_ERROR";
+    return result <= OTA_RESULT_INSUFFICIENT_STORAGE ? codes[result] : "INTERNAL_ERROR";
 }
 
 bool ota_service_init(void)
@@ -192,10 +242,22 @@ void ota_service_set_observer(OtaStatusObserver observer)
 {
     OtaSnapshot copy;
     bool replay = false;
-    if (!g_lock || xSemaphoreTake(g_lock, portMAX_DELAY) != pdTRUE) return;
-    g_observer = observer;
+    if (!observer || !g_lock || xSemaphoreTake(g_lock, portMAX_DELAY) != pdTRUE) return;
+    bool already = false;
+    for (size_t i = 0; i < g_observer_count; ++i) {
+        if (g_observers[i] == observer) { already = true; break; }
+    }
+    if (!already) {
+        if (g_observer_count >= OTA_MAX_OBSERVERS) {
+            xSemaphoreGive(g_lock);
+            return;
+        }
+        g_observers[g_observer_count++] = observer;
+    }
     copy = g_snapshot;
-    replay = observer && copy.state != OTA_STATE_IDLE;
+    /* 重放当前状态: 适配器注册得比 OTA 启动晚时(开机即处于 boot-validation),
+     * 需要立刻知道进行中的任务, 否则这一次的状态变更会被漏掉。 */
+    replay = copy.state != OTA_STATE_IDLE;
     xSemaphoreGive(g_lock);
     if (replay) observer(&copy);
 }
@@ -252,8 +314,8 @@ bool ota_service_start_boot_health_check(void)
      * succeeded, 而 mqtt_publish 在栈上有 2KB 的整包缓冲。原来给 4096 会栈溢出
      * panic 重启 —— 表现为"升级成功但云端永远收不到成功状态", 且重启时刻正好在
      * 开机 +10s (OTA_HEALTH_DELAY_MS)。 */
-    return xTaskCreate(boot_health_task, "ota_health", OTA_TASK_STACK_SIZE, NULL,
-                       OTA_TASK_PRIORITY, NULL) == pdPASS;
+    return create_ota_task_with_retry(boot_health_task, "ota_health",
+                                      OTA_TASK_STACK_SIZE, NULL, NULL);
 }
 
 static bool valid_ascii_token(const char* value, size_t max_length)
@@ -375,13 +437,23 @@ static OtaResult validate_manifest_cheap(const OtaManifest* manifest)
 {
     if (!manifest || !valid_ascii_token(manifest->task_id, 63) ||
         !valid_ascii_token(manifest->version, 31) ||
-        !valid_sha256(manifest->sha256) || manifest->file_size == 0 ||
+        manifest->file_size == 0 ||
         manifest->timeout_seconds < 60 ||
         manifest->timeout_seconds > 3600) {
         return OTA_RESULT_INVALID_PARAMS;
     }
-    if (manifest->target != OTA_TARGET_ESP && manifest->target != OTA_TARGET_ARM) {
+    /* 2026-09-21 sha256 改为可选：提供时必须为 64 位小写十六进制 */
+    if (manifest->sha256[0] && !valid_sha256(manifest->sha256)) {
+        return OTA_RESULT_INVALID_PARAMS;
+    }
+    if (manifest->target != OTA_TARGET_ESP && manifest->target != OTA_TARGET_ARM &&
+        manifest->target != OTA_TARGET_DSP && manifest->target != OTA_TARGET_BMS) {
         return OTA_RESULT_INVALID_TARGET;
+    }
+    /* BMS 与 ARM/DSP 走同一采集器 PULL 通道 (IAP param1=3), 由 ARM boot
+     * 中转到 BMS 线协议; 链路速率 9600 baud, 全程按进度回报续命云端超时。 */
+    if (manifest->target == OTA_TARGET_BMS && manifest->file_size > OTA_BMS_MAX_SIZE) {
+        return OTA_RESULT_FILE_TOO_LARGE;
     }
     /* 本地开发时允许 HTTP + 无签名（生产环境应强制 HTTPS + 签名） */
     if (manifest->source == OTA_SOURCE_MQTT && manifest->url[0]) {
@@ -394,6 +466,9 @@ static OtaResult validate_manifest_cheap(const OtaManifest* manifest)
     /* if (!manifest->signature[0]) return OTA_RESULT_SIGNATURE_REQUIRED; */
 
     if (manifest->target == OTA_TARGET_ARM && manifest->file_size > OTA_ARM_MAX_SIZE) {
+        return OTA_RESULT_FILE_TOO_LARGE;
+    }
+    if (manifest->target == OTA_TARGET_DSP && manifest->file_size > OTA_DSP_MAX_SIZE) {
         return OTA_RESULT_FILE_TOO_LARGE;
     }
     if (manifest->target == OTA_TARGET_ESP) {
@@ -419,24 +494,26 @@ static OtaResult check_available(const OtaManifest* manifest)
 
 static OtaResult authenticate_manifest(const OtaManifest* manifest)
 {
-    /* 签名为空时跳过校验（本地开发/测试）；非空时必须验证 */
-    if (manifest->signature[0]) {
-        if (!ota_verify_release_signature(
-                ota_target_name(manifest->target), manifest->version,
-                manifest->file_size, manifest->sha256,
-                manifest->security_version, manifest->signature)) {
-            return OTA_RESULT_SIGNATURE_INVALID;
-        }
+    /* 2026-09-21 产品决策：取消强制签名与强制安全版本（本地/云端一致）——
+     * 服务端固件记录可能未签名。签名非空时仍执行 Ed25519 验证；
+     * security_version>0 时仍执行防回滚检查；缺省时按未签名固件放行。 */
+    if (manifest->signature[0] &&
+        !ota_verify_release_signature(
+            ota_target_name(manifest->target), manifest->version,
+            manifest->file_size, manifest->sha256,
+            manifest->security_version, manifest->signature)) {
+        return OTA_RESULT_SIGNATURE_INVALID;
     }
 
-    uint32_t installed = 0;
-    if (!storage_get_ota_security_version_for_target(
-            ota_target_name(manifest->target), &installed)) {
-        return OTA_RESULT_SECURITY_READ_FAILED;
-    }
-    /* security_version=0 时跳过回滚检查（本地测试） */
-    if (manifest->security_version > 0 && manifest->security_version <= installed) {
-        return OTA_RESULT_ROLLBACK_REJECTED;
+    if (manifest->security_version > 0) {
+        uint32_t installed = 0;
+        if (!storage_get_ota_security_version_for_target(
+                ota_target_name(manifest->target), &installed)) {
+            return OTA_RESULT_SECURITY_READ_FAILED;
+        }
+        if (manifest->security_version <= installed) {
+            return OTA_RESULT_ROLLBACK_REJECTED;
+        }
     }
 
     return OTA_RESULT_OK;
@@ -516,13 +593,24 @@ static void hash_to_hex(const uint8_t hash[32], char hex[65])
     hex[64] = '\0';
 }
 
-static OtaResult read_and_stage(const OtaManifest* manifest,
-                                OtaStreamReader reader, void* context,
-                                esp_ota_handle_t* esp_handle)
+/* 断点续传钩子: 远端下载(https/http)在读流中断后, 重新建连并请求 Range:
+ * bytes=<already_received>- 继续。设备侧 WiFi/BLE 共存下长下载被打断是常态
+ * (2026-09-22 实测: 下到 410112/1270688 时 READ_FAILED, 期间 MQTT 断连重连),
+ * 一次抖动就废掉整包升级不划算。本地(BLE)通道传 NULL, 行为不变。 */
+typedef bool (*OtaResumeFn)(void* context, uint32_t already_received);
+
+static OtaResult read_and_stage_buffered(const OtaManifest* manifest,
+                                         OtaStreamReader reader, void* context,
+                                         esp_ota_handle_t* esp_handle,
+                                         OtaResumeFn resume, unsigned max_resumes,
+                                         uint8_t* transfer_buffer,
+                                         size_t transfer_capacity)
 {
     uint32_t received = 0;
     uint8_t last_progress = 0;
+    int64_t last_idle_trace_ms = 0;
     const int64_t started_ms = esp_timer_get_time() / 1000;
+    int64_t last_data_ms = started_ms;
     mbedtls_sha256_context sha;
     mbedtls_sha256_init(&sha);
     if (mbedtls_sha256_starts(&sha, 0) != 0) {
@@ -542,10 +630,25 @@ static OtaResult read_and_stage(const OtaManifest* manifest,
         }
 
         const size_t remaining = manifest->file_size - received;
-        const size_t capacity = remaining < sizeof(g_transfer_buffer)
-            ? remaining : sizeof(g_transfer_buffer);
-        const int read_count = reader(context, g_transfer_buffer, capacity);
+        const size_t capacity = remaining < transfer_capacity
+            ? remaining : transfer_capacity;
+        const int read_count = reader(context, transfer_buffer, capacity);
         if (read_count < 0 || (size_t)read_count > capacity) {
+            if ((size_t)read_count <= capacity && resume && max_resumes > 0 &&
+                !cancel_requested()) {
+                /* 读流中断 → 续传一次(最多 max_resumes 次), 从 received 继续 */
+                char line[96];
+                snprintf(line, sizeof(line), "read failed at %u/%u, resuming",
+                         (unsigned)received, (unsigned)manifest->file_size);
+                mqtt_publish_ota_trace("http-resume", line);
+                ESP_LOGW("OTA", "%s", line);
+                if (resume(context, received)) {
+                    --max_resumes;
+                    last_idle_trace_ms = 0;
+                    last_data_ms = esp_timer_get_time() / 1000;
+                    continue;
+                }
+            }
             mbedtls_sha256_free(&sha);
             return OTA_RESULT_READ_FAILED;
         }
@@ -557,31 +660,50 @@ static OtaResult read_and_stage(const OtaManifest* manifest,
                     (esp_http_client_handle_t)context)) {
                 break;
             }
+            /* 仅真实连续 5s 无数据才记 idle；本地 BLE 与 HTTP 分开标记。
+             * 过去用 started_ms 报告的 "no data 569s" 其实是总耗时，
+             * 即使当前仍在收数据也会不断误报 http-idle。 */
+            const int64_t idle_now_ms = esp_timer_get_time() / 1000;
+            if (idle_now_ms - last_data_ms >= 5000 &&
+                idle_now_ms - last_idle_trace_ms >= 5000) {
+                last_idle_trace_ms = idle_now_ms;
+                char line[80];
+                snprintf(line, sizeof(line), "no data %ds, at %u/%u (%s)",
+                         (int)((idle_now_ms - last_data_ms) / 1000),
+                         (unsigned)received, (unsigned)manifest->file_size,
+                         manifest->source == OTA_SOURCE_LOCAL ? "local BLE" : "HTTP upstream");
+                mqtt_publish_ota_trace(manifest->source == OTA_SOURCE_LOCAL
+                                           ? "ble-idle" : "http-idle", line);
+            }
             vTaskDelay(pdMS_TO_TICKS(OTA_READ_IDLE_MS));
             continue;
         }
 
-        if (mbedtls_sha256_update(&sha, g_transfer_buffer, (size_t)read_count) != 0) {
+        if (mbedtls_sha256_update(&sha, transfer_buffer, (size_t)read_count) != 0) {
             mbedtls_sha256_free(&sha);
             return OTA_RESULT_INTERNAL;
         }
         if (manifest->target == OTA_TARGET_ESP) {
-            if (esp_ota_write(*esp_handle, g_transfer_buffer, (size_t)read_count) != ESP_OK) {
+            if (esp_ota_write(*esp_handle, transfer_buffer, (size_t)read_count) != ESP_OK) {
                 mbedtls_sha256_free(&sha);
                 return OTA_RESULT_FLASH_WRITE_FAILED;
             }
-        } else if (!arm_ota_feed(g_transfer_buffer, (size_t)read_count)) {
+        } else if (!arm_ota_feed(transfer_buffer, (size_t)read_count)) {
             mbedtls_sha256_free(&sha);
             return OTA_RESULT_ARM_TRANSFER_FAILED;
         }
 
         received += (uint32_t)read_count;
+        last_data_ms = esp_timer_get_time() / 1000;
+        /* 进度上报: 每 1% 一条 (用户指定取消节流)。8KB 缓冲下 1.27MB 自升级
+         * 仅 ~156 条 (1KB 缓冲时代是 624 条), 风暴风险已大幅降低。 */
         const uint8_t progress = (uint8_t)(((uint64_t)received * 100U) / manifest->file_size);
         if (progress != last_progress) {
             last_progress = progress;
             update_snapshot(manifest->source == OTA_SOURCE_MQTT ? OTA_STATE_DOWNLOADING : OTA_STATE_RECEIVING,
                             progress, received, OTA_RESULT_OK, "Receiving firmware");
         }
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
 
     uint8_t digest[32];
@@ -595,15 +717,49 @@ static OtaResult read_and_stage(const OtaManifest* manifest,
     mbedtls_sha256_free(&sha);
     if (hash_result != 0) return OTA_RESULT_INTERNAL;
     hash_to_hex(digest, digest_hex);
-    if (strcmp(digest_hex, manifest->sha256) != 0) return OTA_RESULT_HASH_MISMATCH;
+    /* manifest 未提供 sha256 时跳过比对（此时仅依赖传输层完整性） */
+    if (manifest->sha256[0] &&
+        strcmp(digest_hex, manifest->sha256) != 0) return OTA_RESULT_HASH_MISMATCH;
     return OTA_RESULT_OK;
 }
 
-static OtaResult install_esp(const OtaManifest* manifest,
-                             OtaStreamReader reader, void* context)
+static OtaResult read_and_stage(const OtaManifest* manifest,
+                                OtaStreamReader reader, void* context,
+                                esp_ota_handle_t* esp_handle,
+                                OtaResumeFn resume, unsigned max_resumes)
 {
+    const size_t transfer_capacity = ota_transfer_policy(manifest).buffer_size;
+    uint8_t* transfer_buffer = NULL;
+    for (unsigned attempt = 1; attempt <= OTA_ALLOC_ATTEMPTS; ++attempt) {
+        transfer_buffer = malloc(transfer_capacity);
+        if (transfer_buffer) break;
+        ESP_LOGW("OTA", "transfer buffer allocation failed (%u/%u), size=%u free=%u largest=%u",
+                 attempt, OTA_ALLOC_ATTEMPTS, (unsigned)transfer_capacity,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        if (attempt < OTA_ALLOC_ATTEMPTS)
+            vTaskDelay(pdMS_TO_TICKS(OTA_ALLOC_RETRY_MS));
+    }
+    if (!transfer_buffer) return OTA_RESULT_INTERNAL;
+
+    const OtaResult result = read_and_stage_buffered(
+        manifest, reader, context, esp_handle, resume, max_resumes,
+        transfer_buffer, transfer_capacity);
+    free(transfer_buffer);
+    return result;
+}
+
+static OtaResult install_esp(const OtaManifest* manifest,
+                             OtaStreamReader reader, void* context,
+                             OtaResumeFn resume, unsigned max_resumes)
+{
+    /* 远程 ESP 的静默窗口已在 HTTP/TLS 建连前开启；本地 BLE 没有 remote_worker，
+     * 在这里自行管理，避免重复 begin/end。 */
+    const bool owns_quiet_window = manifest->source != OTA_SOURCE_MQTT;
+    if (owns_quiet_window) ota_quiet_begin();
     const esp_partition_t* update_partition = esp_ota_get_next_update_partition(NULL);
     if (!update_partition || manifest->file_size > update_partition->size) {
+        if (owns_quiet_window) ota_quiet_end();
         return OTA_RESULT_FILE_TOO_LARGE;
     }
     {
@@ -611,20 +767,29 @@ static OtaResult install_esp(const OtaManifest* manifest,
         snprintf(line, sizeof(line), "ESP 写入开始 size=%u part=%s",
                  (unsigned)manifest->file_size,
                  update_partition ? update_partition->label : "?");
-        mqtt_publish_ota_trace("esp-install", line);
+        if (manifest->source == OTA_SOURCE_MQTT)
+            mqtt_publish_ota_trace("esp-install", line);
+        else
+            ESP_LOGI("OTA", "%s", line);
     }
 
     esp_ota_handle_t handle = 0;
-    if (esp_ota_begin(update_partition, manifest->file_size, &handle) != ESP_OK) {
+    const size_t erase_hint = ota_transfer_policy(manifest).sequential_erase
+        ? OTA_WITH_SEQUENTIAL_WRITES : manifest->file_size;
+    if (esp_ota_begin(update_partition, erase_hint, &handle) != ESP_OK) {
+        if (owns_quiet_window) ota_quiet_end();
         return OTA_RESULT_FLASH_WRITE_FAILED;
     }
 
-    OtaResult result = read_and_stage(manifest, reader, context, &handle);
+    OtaResult result = read_and_stage(manifest, reader, context, &handle,
+                                      resume, max_resumes);
     if (result != OTA_RESULT_OK || cancel_requested()) {
         esp_ota_abort(handle);
+        if (owns_quiet_window) ota_quiet_end();
         return cancel_requested() ? OTA_RESULT_OK : result;
     }
 
+    if (owns_quiet_window) ota_quiet_end();
     update_snapshot(OTA_STATE_VERIFYING, 100, manifest->file_size,
                     OTA_RESULT_OK, "Verifying ESP image");
     if (esp_ota_end(handle) != ESP_OK) return OTA_RESULT_FLASH_WRITE_FAILED;
@@ -649,7 +814,11 @@ static OtaResult install_esp(const OtaManifest* manifest,
 
 static void arm_progress(ArmOtaState state, int percent, const char* message)
 {
-    if (!ota_service_is_busy() || g_manifest.target != OTA_TARGET_ARM) return;
+    if (!ota_service_is_busy()) return;
+    if (g_manifest.target != OTA_TARGET_ARM && g_manifest.target != OTA_TARGET_DSP &&
+        g_manifest.target != OTA_TARGET_BMS) {
+        return;
+    }
     if (state == ARM_OTA_SENDING || state == ARM_OTA_WAIT_ACK || state == ARM_OTA_VERIFYING) {
         const uint8_t progress = (uint8_t)(70 + (percent * 29) / 100);
         update_snapshot(OTA_STATE_INSTALLING, progress, g_manifest.file_size,
@@ -667,17 +836,34 @@ static void set_arm_failure_detail(const char* stage)
     }
 }
 
-static OtaResult install_arm(const OtaManifest* manifest,
-                             OtaStreamReader reader, void* context)
+static OtaResult install_collector_iap_session(const OtaManifest* manifest,
+                                               OtaStreamReader reader,
+                                               void* context,
+                                               bool* source_closed)
 {
+    IapTarget iap;
+    switch (manifest->target) {
+        case OTA_TARGET_DSP: iap = IAP_TARGET_DSP; break;
+        case OTA_TARGET_BMS: iap = IAP_TARGET_BMS; break;
+        default:             iap = IAP_TARGET_ARM; break;
+    }
+    const char* tname = ota_target_name(manifest->target);
     g_arm_failure_detail[0] = '\0';
-    if (!arm_ota_start_streaming(manifest->file_size)) {
+    if (!arm_ota_start_streaming_for(iap, manifest->file_size)) {
         set_arm_failure_detail("staging");
-        return OTA_RESULT_ARM_TRANSFER_FAILED;
+        return arm_ota_last_error_is_storage()
+            ? OTA_RESULT_INSUFFICIENT_STORAGE : OTA_RESULT_ARM_TRANSFER_FAILED;
     }
 
     esp_ota_handle_t unused = 0;
-    OtaResult result = read_and_stage(manifest, reader, context, &unused);
+    OtaResult result = read_and_stage(manifest, reader, context, &unused, NULL, 0);
+    /* 远程 ARM/DSP/BMS 已完整暂存到 SPIFFS，后续只走 UART。立刻关闭 HTTP/TLS
+     * 连接释放其大块堆，再申请 IAP 工作区，避免 TLS、4.5KB 传输块和约 20KB
+     * IAP 工作区三者叠加。client 对象稍后仍由 remote_worker cleanup。 */
+    if (manifest->source == OTA_SOURCE_MQTT && context) {
+        esp_http_client_close((esp_http_client_handle_t)context);
+        if (source_closed) *source_closed = true;
+    }
     if (result != OTA_RESULT_OK || cancel_requested()) {
         set_arm_failure_detail("staging stream");
         arm_ota_cancel();
@@ -685,10 +871,10 @@ static OtaResult install_arm(const OtaManifest* manifest,
     }
 
     update_snapshot(OTA_STATE_INSTALLING, 70, manifest->file_size,
-                    OTA_RESULT_OK, "Installing ARM image");
+                    OTA_RESULT_OK, "Installing collector IAP image");
     arm_ota_set_callback(arm_progress);
     arm_ota_set_cancel_check(cancel_requested);
-    const bool transfer_started = arm_ota_end_streaming();
+    const bool transfer_started = arm_ota_end_streaming_for(iap, NULL);
     arm_ota_set_cancel_check(NULL);
     if (!transfer_started) {
         arm_ota_set_callback(NULL);
@@ -718,13 +904,13 @@ static OtaResult install_arm(const OtaManifest* manifest,
              * PERSIST_FAILED, 云端永远收不到成功。 */
             if (manifest->security_version != 0 &&
                 !storage_set_ota_security_version_for_target(
-                    "arm", manifest->security_version)) {
+                    tname, manifest->security_version)) {
                 arm_ota_reset();
                 restore_wifi_ps();
                 return OTA_RESULT_PERSIST_FAILED;
             }
             update_snapshot(OTA_STATE_SUCCEEDED, 100, manifest->file_size,
-                            OTA_RESULT_OK, "ARM OTA completed");
+                            OTA_RESULT_OK, "Collector IAP OTA completed");
             restore_wifi_ps();
             release_active();
             arm_ota_reset();   /* 回 IDLE, 让串口 RX 路由恢复 CS 轮询 */
@@ -739,19 +925,65 @@ static OtaResult install_arm(const OtaManifest* manifest,
     return OTA_RESULT_ARM_TRANSFER_FAILED;
 }
 
+static OtaResult install_collector_iap(const OtaManifest* manifest,
+                                       OtaStreamReader reader, void* context,
+                                       bool* source_closed)
+{
+    const OtaResult result = install_collector_iap_session(
+        manifest, reader, context, source_closed);
+    /* session 函数的所有终点都已 cancel/reset 回 IDLE；统一出口释放可避免以后
+     * 新增 return 分支时遗漏，使 ARM/DSP/BMS 的约 20KB 工作区不跨会话常驻。 */
+    arm_ota_workspace_release();
+    return result;
+}
+
 static OtaResult install_stream(const OtaManifest* manifest,
-                                OtaStreamReader reader, void* context)
+                                OtaStreamReader reader, void* context,
+                                OtaResumeFn resume, unsigned max_resumes,
+                                bool* source_closed)
 {
     if (!reader) return OTA_RESULT_INVALID_PARAMS;
     return manifest->target == OTA_TARGET_ESP
-        ? install_esp(manifest, reader, context)
-        : install_arm(manifest, reader, context);
+        ? install_esp(manifest, reader, context, resume, max_resumes)
+        : install_collector_iap(manifest, reader, context, source_closed);
 }
 
 static int http_stream_read(void* context, uint8_t* buffer, size_t capacity)
 {
     return esp_http_client_read((esp_http_client_handle_t)context,
                                 (char*)buffer, (int)capacity);
+}
+
+/* 断点续传: 复用同一个 client, 带 Range 头重连, 只接受"从 received 起的剩余量"
+ * (206 + Content-Length 精确匹配), 其余情况一律放弃(避免把错位数据写进分区)。
+ * 返回 true 表示已就绪, 可继续 read。 */
+static bool http_stream_resume(void* context, uint32_t already_received)
+{
+    esp_http_client_handle_t client = (esp_http_client_handle_t)context;
+    char range[40];
+    char line[96];
+    snprintf(range, sizeof(range), "bytes=%lu-", (unsigned long)already_received);
+    esp_http_client_close(client);
+    if (esp_http_client_set_header(client, "Range", range) != ESP_OK) return false;
+    if (esp_http_client_open(client, 0) != ESP_OK) {
+        ESP_LOGW("OTA", "resume: open failed");
+        return false;
+    }
+    const int64_t len = esp_http_client_fetch_headers(client);
+    const int status = esp_http_client_get_status_code(client);
+    const uint32_t expect = g_manifest.file_size - already_received;
+    if (status != 206 || len < 0 || (uint64_t)len != expect) {
+        snprintf(line, sizeof(line), "resume refused: status=%d len=%lld expect=%lu",
+                 status, (long long)len, (unsigned long)expect);
+        ESP_LOGW("OTA", "%s", line);
+        mqtt_publish_ota_trace("http-resume", line);
+        esp_http_client_close(client);
+        return false;
+    }
+    snprintf(line, sizeof(line), "resumed at %lu (206 len=%lld)",
+             (unsigned long)already_received, (long long)len);
+    ESP_LOGW("OTA", "%s", line);
+    return true;
 }
 
 static OtaResult prepare_http_download(esp_http_client_handle_t client,
@@ -795,13 +1027,9 @@ static OtaResult prepare_http_download(esp_http_client_handle_t client,
                      status, (long long)content_length);
             return OTA_RESULT_HTTP_ERROR;
         }
-        if (content_length < 0 && !chunked) {
-            /* chunked 响应没有 Content-Length: 放行, 由 read_and_stage 按
-             * "数据完整到达 + SHA-256 + 总长核对" 兜底, 任何 CDN/网关都可用 */
-            snprintf(detail, detail_size, "HTTP headers failed: status=%d len=%lld",
-                     status, (long long)content_length);
-            return OTA_RESULT_HTTP_ERROR;
-        }
+        /* chunked/无 Content-Length = CDN 冷缓存回源流: 允许下载 (用户要求
+         * 无缓存也能升级), 由 read_and_stage 的 300s 超时 + SHA-256 + 总长
+         * 核对兜底。回源慢时 read idle 每 5s 发一条 http-idle trace 可见。 */
         if (!chunked && (uint64_t)content_length != expected_size) {
             snprintf(detail, detail_size,
                      "SIZE_MISMATCH status=%d len=%lld expected=%lu",
@@ -815,39 +1043,119 @@ static OtaResult prepare_http_download(esp_http_client_handle_t client,
     return OTA_RESULT_HTTP_ERROR;
 }
 
+/* 把堆余量追加到 detail 尾部: esp_http_client_init 要连做 11 次 calloc 再
+ * malloc(接收缓冲), 任一步失败就返回 NULL(串口分别打 "Error allocate memory" /
+ * "Allocation failed"), 但 OTA 失败报文原本只有一句 "HTTP client init failed",
+ * 从云端看不出是不是内存问题。带上 free/largest 让下一次失败自带证据。 */
+/* OTA 静默窗口 (2026-09-22, 用户授权): ESP 自升级期间停掉 ARM 轮询、周期心跳与
+ * 离线补传 —— 下载/写入是内存与 CPU 最紧的一段。online(带堆与进度曲线)与
+ * ota/status 保持不动, 进度必须实时可见。
+ * 只在 ESP 目标开: ARM/DSP/BMS 升级的传输通道正是那条 UART, 停了就没法升级。 */
+static void ota_quiet_begin(void)
+{
+    arm_poll_set_quiet(true);
+    telemetry_set_quiet(true);
+    offline_cache_set_quiet(true);
+    ESP_LOGI("OTA", "quiet window ON (arm poll / heartbeat / cache flush paused)");
+}
+
+static void ota_quiet_end(void)
+{
+    arm_poll_set_quiet(false);
+    telemetry_set_quiet(false);
+    offline_cache_set_quiet(false);
+}
+
+static void detail_append_heap(char *detail, size_t detail_size)
+{
+    const size_t used = strlen(detail);
+    if (used + 1 >= detail_size) return;
+    snprintf(detail + used, detail_size - used, " free=%u max=%u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+/* esp_http_client_init 的接收缓冲按 OTA_BUFFER_SIZE(8KB) 一次性 malloc; 长开机后
+ * 堆碎片化时这一步会失败, 而它失败 = OTA 连下载都起不来(2026-09-22 实测: 开机 2h
+ * 后连续三次推送全部 HTTP client init failed)。按 8KB→4KB→2KB→1KB→默认(512B)
+ * 逐级退让, 退让结果由 ota/debug 的 http 信标(rx=)与串口日志留痕。 */
+static esp_http_client_handle_t http_client_init_with_fallback(
+        const OtaManifest *manifest, int *buffer_size_out)
+{
+    static const int sizes[] = { (int)OTA_BUFFER_SIZE, 4096, 2048, 1024, 0 };
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        esp_http_client_config_t config = {
+            .url = manifest->url,
+            .timeout_ms = (int)manifest->timeout_seconds * 1000,
+            /* 自有固定服务器: 不配置 CA, 配合 CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY 跳过证书验证 (固件有 Ed25519 签名兜底) */
+            .keep_alive_enable = true,
+            .buffer_size = sizes[i],
+            .skip_cert_common_name_check = true,
+            .max_redirection_count = OTA_HTTP_MAX_REDIRECTS,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (client) {
+            *buffer_size_out = sizes[i] ? sizes[i] : 512;   /* 0 = IDF 默认 */
+            if (sizes[i] != (int)OTA_BUFFER_SIZE) {
+                ESP_LOGW("OTA", "http client init fell back to rx=%d", *buffer_size_out);
+            }
+            return client;
+        }
+        ESP_LOGW("OTA", "http client init failed at rx=%d free=%u max=%u",
+                 sizes[i], (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    }
+    return NULL;
+}
+
+/* 把"还差什么"写进失败 message。2026-09-22 实测: 堆不够时 esp_http_client_open
+ * 只回一个笼统的 ESP_ERR_HTTP_CONNECT (当时 free=6656/max=4608), 白查了一轮。
+ * 另: 本固件 SSL_IN_CONTENT_LEN=4096 (省 ~12KB 堆)。两条约束都报出来, 供运维
+ * 判断下载源与本机内存是否匹配。 */
+static void detail_append_tls_hint(const char *url, char *detail, size_t detail_size)
+{
+    if (!url || strncmp(url, "https://", 8) != 0) return;
+    const size_t used = strlen(detail);
+    if (used + 1 >= detail_size) return;
+    snprintf(detail + used, detail_size - used,
+             " | https needs TLS ctx heap; source records must be <=4KB");
+}
+
 static void remote_worker(void* parameter)
 {
     OtaManifest manifest = *(const OtaManifest*)parameter;
-    esp_http_client_config_t config = {
-        .url = manifest.url,
-        .timeout_ms = (int)manifest.timeout_seconds * 1000,
-        /* 自有固定服务器: 不配置 CA, 配合 CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY 跳过证书验证 (固件有 Ed25519 签名兜底) */
-        .keep_alive_enable = true,
-        .buffer_size = OTA_BUFFER_SIZE,
-        .skip_cert_common_name_check = true,
-        .max_redirection_count = OTA_HTTP_MAX_REDIRECTS,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+    const bool owns_quiet_window = manifest.target == OTA_TARGET_ESP;
+    /* 在 HTTP client/TLS 分配之前就停掉非必要后台工作，覆盖真正的内存峰值。 */
+    if (owns_quiet_window) ota_quiet_begin();
+    int rx_buffer = (int)OTA_BUFFER_SIZE;
+    esp_http_client_handle_t client = http_client_init_with_fallback(&manifest, &rx_buffer);
     OtaResult result = OTA_RESULT_HTTP_ERROR;
+    bool client_closed = false;
     int status = -1;
     int64_t content_length = -1;
-    char detail[96] = "HTTP client init failed";
+    char detail[128];
     g_arm_failure_detail[0] = '\0';
+    snprintf(detail, sizeof(detail), "HTTP client init failed");
+    detail_append_heap(detail, sizeof(detail));
 
     if (client) {
         result = prepare_http_download(client, manifest.file_size,
                                        &status, &content_length,
                                        detail, sizeof(detail));
         {
-            /* 下载侧上下文也留痕: 直接看出 CDN/源站握手是否成功、长度对不对 */
+            /* 下载侧上下文也留痕: 直接看出 CDN/源站握手是否成功、长度对不对;
+             * 附上实际用的接收缓冲与堆余量, 退让和碎片化一眼可见 */
             char line[96];
-            snprintf(line, sizeof(line), "target=%s status=%d len=%lld",
+            snprintf(line, sizeof(line), "target=%s status=%d len=%lld rx=%d",
                      ota_target_name(manifest.target), status,
-                     (long long)content_length);
+                     (long long)content_length, rx_buffer);
+            detail_append_heap(line, sizeof(line));
             mqtt_publish_ota_trace("http", line);
         }
         if (result == OTA_RESULT_OK) {
-            result = install_stream(&manifest, http_stream_read, client);
+            result = install_stream(&manifest, http_stream_read, client,
+                                    http_stream_resume, OTA_MAX_RESUMES,
+                                    &client_closed);
             if (result != OTA_RESULT_OK) {
                 if (g_arm_failure_detail[0]) {
                     /* ARM 阶段的真实原因比 HTTP 上下文有用: 错误码已在 code 字段,
@@ -857,19 +1165,23 @@ static void remote_worker(void* parameter)
                     snprintf(detail, sizeof(detail), "%s status=%d len=%lld",
                              ota_result_code(result), status,
                              (long long)content_length);
+                    detail_append_heap(detail, sizeof(detail));
                 }
                 ESP_LOGE("OTA", "%s", detail);
                 mqtt_publish_ota_trace("result", detail);
             }
         } else {
-            /* HTTP 阶段就失败 (含 TLS 握手): detail 里有具体原因 */
+            /* HTTP 阶段就失败 (含 TLS 握手): detail 里有具体原因, 再补堆余量与 https 提示 */
+            detail_append_heap(detail, sizeof(detail));
+            detail_append_tls_hint(manifest.url, detail, sizeof(detail));
             mqtt_publish_ota_trace("http-fail", detail);
         }
     }
     if (client) {
-        esp_http_client_close(client);
+        if (!client_closed) esp_http_client_close(client);
         esp_http_client_cleanup(client);
     }
+    if (owns_quiet_window) ota_quiet_end();
 
     if (cancel_requested()) {
         finish_failure(OTA_RESULT_OK, "OTA cancelled");
@@ -897,8 +1209,14 @@ OtaResult ota_service_start_remote(const OtaManifest* manifest)
     result = reserve_manifest(manifest);
     if (result != OTA_RESULT_OK) return result;
 
-    if (xTaskCreate(remote_worker, "ota_remote", OTA_TASK_STACK_SIZE,
-                    &g_manifest, OTA_TASK_PRIORITY, &g_remote_task) != pdPASS) {
+    /* ESP 自升级用不到 ARM IAP 工作区 (~20KB): 先归还给堆, 让任务栈/接收缓冲/
+     * (https 时的)TLS 上下文有机会拿到连续块。此刻 g_active 已置位, 不可能有
+     * ARM 会话在跑, 释放是可证明安全的。 */
+    if (manifest->target == OTA_TARGET_ESP) arm_ota_workspace_release();
+
+    if (!create_ota_task_with_retry(remote_worker, "ota_remote",
+                                    OTA_TASK_STACK_SIZE, &g_manifest,
+                                    &g_remote_task)) {
         finish_failure(OTA_RESULT_TASK_CREATE_FAILED, "Unable to create OTA worker");
         return OTA_RESULT_TASK_CREATE_FAILED;
     }
@@ -917,7 +1235,10 @@ OtaResult ota_service_start_local(const OtaManifest* manifest,
     result = reserve_manifest(manifest);
     if (result != OTA_RESULT_OK) return result;
 
-    result = install_stream(manifest, reader, reader_context);
+    /* BLE 本地 ESP 升级同理: 先归还 ARM IAP 工作区 (~20KB) */
+    if (manifest->target == OTA_TARGET_ESP) arm_ota_workspace_release();
+
+    result = install_stream(manifest, reader, reader_context, NULL, 0, NULL);
     if (cancel_requested()) {
         finish_failure(OTA_RESULT_OK, "OTA cancelled");
         return OTA_RESULT_OK;
@@ -994,6 +1315,6 @@ static void reboot_task(void* parameter)
 
 bool ota_service_schedule_reboot(uint32_t delay_ms)
 {
-    return xTaskCreate(reboot_task, "ota_reboot", 2048,
-                       (void*)(uintptr_t)delay_ms, OTA_TASK_PRIORITY, NULL) == pdPASS;
+    return create_ota_task_with_retry(reboot_task, "ota_reboot", 2048,
+                                      (void*)(uintptr_t)delay_ms, NULL);
 }

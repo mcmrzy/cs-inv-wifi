@@ -24,7 +24,9 @@
 #include "ble_ct.h"
 #include "ble_ct_cmd.h"
 #include "ota_service.h"
+#include "ble_ota.h"
 #include "arm_ota.h"
+#include "debug_log.h"
 #include "ota_mqtt_adapter.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
@@ -117,10 +119,18 @@ static void prov_connect_task(void *arg)
     if (wifi_sta_wait_connected(PROV_WIFI_TIMEOUT_MS)) {
         /* 成功: 保存凭据并反馈; 不重启, 主状态机检测到 IP 后自动走 MQTT.
            断开自动重连是 esp_wifi 默认行为, 无需显式开启 */
-        storage_set_wifi(s_prov_ssid, s_prov_pass);
-        ble_prov_notify_status("connected");
-        ESP_LOGI(TAG, "Provision OK: SSID=%s saved to NVS (pass_len=%d)",
-                 s_prov_ssid, (int)strlen(s_prov_pass));
+        /* 返回值必须检查: 写失败(典型是 NVS 分区满/碎片)时若仍回 connected,
+         * App 会以为配网成功, 而设备重启后就"忘"了凭据 —— 现场表现为
+         * "每次重启配网都丢"。失败时回 failed (App 认识的既有状态), 并打日志。 */
+        if (!storage_set_wifi(s_prov_ssid, s_prov_pass)) {
+            ESP_LOGE(TAG, "Provision connect OK but NVS save FAILED (SSID=%s);"
+                     " credentials will be lost on reboot", s_prov_ssid);
+            ble_prov_notify_status("failed");
+        } else {
+            ble_prov_notify_status("connected");
+            ESP_LOGI(TAG, "Provision OK: SSID=%s saved to NVS (pass_len=%d)",
+                     s_prov_ssid, (int)strlen(s_prov_pass));
+        }
     } else {
         /* 失败: 主动断开 (esp_wifi_disconnect 为 ASSOC_LEAVE, 内部不自动重连),
            按原因反馈; 不保存 NVS, BLE 继续广播等重试 */
@@ -247,6 +257,7 @@ static void main_loop_task(void *arg)
         /* 周期任务 (ARM 轮询始终运行, 与 MQTT 状态无关) */
         arm_poll_tick();
         telemetry_tick();
+        debug_log_tick();      /* 调试模式生效时把串口日志批量上行 */
         sntp_sync_tick();
         offline_cache_process();
 
@@ -288,6 +299,7 @@ void app_main(void)
     esp_log_level_set("*", ESP_LOG_INFO);
     /* BLE 配对诊断: 放开 NimBLE 协议栈日志 (需 CONFIG_BT_NIMBLE_LOG_LEVEL=DEBUG 编译) */
     esp_log_level_set("NimBLE", ESP_LOG_DEBUG);
+    debug_log_init();   /* 尽早装钩子, 让后续启动日志也进调试缓冲 */
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, " CS-L10-6K2 Collector (ESP-IDF %s)", FIRMWARE_VERSION);
     ESP_LOGI(TAG, " ESP32-C3 + CS Protocol(UART1) + MQTT");
@@ -325,6 +337,9 @@ void app_main(void)
     }
     /* 注入 BLE COMMAND 执行器：复用 cmd_handler 命令映射（设备控制 + 参数调整） */
     ble_ct_cmd_set_executors(ble_exec_write_param, ble_exec_read_param);
+    if (!ble_ota_init()) {
+        ESP_LOGE(TAG, "BLE OTA adapter init failed");
+    }
 
     /* 配网: BLE 常驻 (无论有无配置) */
     ble_prov_set_callback(on_provision_done);

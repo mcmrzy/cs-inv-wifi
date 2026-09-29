@@ -10,6 +10,11 @@ int ble_ct_cmd_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg);
 void ble_ct_cmd_notify_result(const char *json, uint16_t len);
 
+/* ARM 写应答/参数回读闭环。仅完成当前等待中的 BLE 写命令。 */
+void ble_ct_cmd_on_write_ack(const char *param_id, int err);
+void ble_ct_cmd_on_write_readback(const char *param_id, double actual,
+                                  uint32_t parameter_revision);
+
 /*
  * 命令执行回调（由 main 层注入，解耦 ble_ct 与 main/cmd_handler 的编译依赖）
  * 返回值对应下列 BLE_CMD_* 结果码。

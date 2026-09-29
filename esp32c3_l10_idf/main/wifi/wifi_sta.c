@@ -22,6 +22,70 @@ static uint8_t s_last_disconnect_reason = 0;
 static int s_disconnect_count = 0;
 #define WIFI_RESET_AFTER_FAILS  5
 
+static esp_err_t set_dns_server(esp_netif_t *netif, esp_netif_dns_type_t type,
+                                uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    esp_netif_dns_info_t dns = {0};
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = ESP_IP4TOADDR(a, b, c, d);
+    return esp_netif_set_dns_info(netif, type, &dns);
+}
+
+static void configure_dns_servers(esp_netif_t *netif)
+{
+    esp_netif_dns_info_t dhcp_dns = {0};
+    esp_err_t err = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN,
+                                           &dhcp_dns);
+
+    /* Preserve the DHCP-provided resolver as the final fallback. The field
+     * installation routers used on site advertise their gateway here, but
+     * that gateway returned getaddrinfo(EAI_FAIL) for the MQTT hostname. */
+    if (err == ESP_OK && dhcp_dns.ip.type == ESP_IPADDR_TYPE_V4 &&
+        dhcp_dns.ip.u_addr.ip4.addr != 0) {
+        err = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_FALLBACK,
+                                     &dhcp_dns);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Preserve DHCP DNS as fallback failed: %s",
+                     esp_err_to_name(err));
+        }
+    }
+
+    /* Use two independent public resolvers before marking WiFi connected, so
+     * the MQTT task never starts with only an unusable gateway resolver. */
+    err = set_dns_server(netif, ESP_NETIF_DNS_MAIN, 223, 5, 5, 5);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Set primary DNS failed: %s", esp_err_to_name(err));
+    }
+    err = set_dns_server(netif, ESP_NETIF_DNS_BACKUP, 119, 29, 29, 29);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Set backup DNS failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void log_dns_servers(esp_netif_t *netif)
+{
+    static const struct {
+        esp_netif_dns_type_t type;
+        const char *name;
+    } servers[] = {
+        {ESP_NETIF_DNS_MAIN, "main"},
+        {ESP_NETIF_DNS_BACKUP, "backup"},
+        {ESP_NETIF_DNS_FALLBACK, "fallback"},
+    };
+
+    for (size_t i = 0; i < sizeof(servers) / sizeof(servers[0]); ++i) {
+        esp_netif_dns_info_t dns = {0};
+        esp_err_t err = esp_netif_get_dns_info(netif, servers[i].type, &dns);
+        if (err == ESP_OK && dns.ip.type == ESP_IPADDR_TYPE_V4) {
+            ESP_LOGI(TAG, "DNS %s: " IPSTR, servers[i].name,
+                     IP2STR(&dns.ip.u_addr.ip4));
+        } else {
+            ESP_LOGW(TAG, "DNS %s unavailable: %s", servers[i].name,
+                     esp_err_to_name(err));
+        }
+    }
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -58,6 +122,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         const ip_event_got_ip_t *evt = event_data;
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&evt->ip_info.ip));
         ESP_LOGI(TAG, "Got IP: %s", s_ip_str);
+        ESP_LOGI(TAG, "Netif: %s", esp_netif_get_desc(evt->esp_netif));
+        configure_dns_servers(evt->esp_netif);
+        log_dns_servers(evt->esp_netif);
         s_disconnect_count = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }

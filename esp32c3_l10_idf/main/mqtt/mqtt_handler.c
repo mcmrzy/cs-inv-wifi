@@ -7,6 +7,8 @@
  *  - 离线缓存补传 (QoS1 + PUBACK 等待)
  */
 #include "mqtt_handler.h"
+#include "mqtt_broker_route.h"
+#include "mqtt_envelope.h"
 #include "config.h"
 #include "nvs_storage.h"
 #include "offline_cache.h"
@@ -22,6 +24,9 @@
 #include <stdatomic.h>
 #include <time.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
+#include "esp_tls_errors.h"
 #include "esp_timer.h"
 #include "mqtt_client.h"
 #include "freertos/FreeRTOS.h"
@@ -43,6 +48,9 @@ static char g_lwt_payload[MQTT_PAYLOAD_MAX] = {0};
 
 static atomic_bool g_mqtt_connected;
 static atomic_bool g_mqtt_started;
+static atomic_bool g_broker_fallback_allowed;
+static atomic_bool g_use_broker_ip_fallback;
+static atomic_bool g_broker_fallback_pending;
 static int64_t g_disconnect_start_ms = 0;  /* 断线开始时刻, 用于检测卡住 */
 static int g_force_restart_count = 0;      /* 连续强制重启次数, 动态延长超时 */
 static int64_t g_last_cache_flush = 0;
@@ -159,6 +167,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
         atomic_store(&g_mqtt_connected, true);
         atomic_store(&g_mqtt_started, true);
+        atomic_store(&g_broker_fallback_pending, false);
         g_disconnect_start_ms = 0;
         g_force_restart_count = 0;
 
@@ -174,7 +183,6 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 wifi_sta_get_rssi(), ip);
             esp_mqtt_client_publish(g_mqtt_client, g_status_topic,
                                     online_payload, 0, 1, 1);
-            telemetry_reset_heartbeat_timer();
         }
 
         /* 订阅云端命令 */
@@ -275,7 +283,37 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         break;
 
     case MQTT_EVENT_ERROR:
-        ESP_LOGE(TAG, "MQTT_EVENT_ERROR");
+        if (event->error_handle) {
+            const esp_mqtt_error_codes_t *err = event->error_handle;
+            ESP_LOGE(TAG,
+                     "MQTT_EVENT_ERROR type=%d tls_esp=0x%x(%s) "
+                     "tls_stack=0x%x cert_flags=0x%x sock_errno=%d(%s) "
+                     "connect_rc=%d",
+                     (int)err->error_type,
+                     (unsigned)err->esp_tls_last_esp_err,
+                     esp_err_to_name(err->esp_tls_last_esp_err),
+                     (unsigned)err->esp_tls_stack_err,
+                     (unsigned)err->esp_tls_cert_verify_flags,
+                     err->esp_transport_sock_errno,
+                     strerror(err->esp_transport_sock_errno),
+                     (int)err->connect_return_code);
+            const bool cannot_resolve =
+                err->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT &&
+                err->esp_tls_last_esp_err ==
+                    ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME;
+            if (mqtt_broker_route_should_activate(
+                    atomic_load(&g_broker_fallback_allowed), cannot_resolve,
+                    atomic_load(&g_use_broker_ip_fallback))) {
+                atomic_store(&g_use_broker_ip_fallback, true);
+                atomic_store(&g_broker_fallback_pending, true);
+                ESP_LOGW(TAG,
+                         "DNS resolution failed; scheduling default broker "
+                         "fallback to %s",
+                         MQTT_DEFAULT_FALLBACK_IP);
+            }
+        } else {
+            ESP_LOGE(TAG, "MQTT_EVENT_ERROR (no error handle)");
+        }
         break;
 
     default:
@@ -320,9 +358,17 @@ bool mqtt_init(MQTTMessageHandler msg_handler)
     char broker_host[64] = MQTT_DEFAULT_HOST;
     uint16_t broker_port = MQTT_DEFAULT_PORT;
     storage_get_mqtt(broker_host, sizeof(broker_host), &broker_port);
+    const bool fallback_allowed = strcmp(broker_host, MQTT_DEFAULT_HOST) == 0;
+    atomic_store(&g_broker_fallback_allowed, fallback_allowed);
+    const char *connect_host = mqtt_broker_route_select(
+        broker_host, MQTT_DEFAULT_HOST, MQTT_DEFAULT_FALLBACK_IP,
+        atomic_load(&g_use_broker_ip_fallback));
     snprintf(g_mqtt_uri, sizeof(g_mqtt_uri), "mqtts://%s:%u",
-             broker_host, broker_port);
+             connect_host, broker_port);
     ESP_LOGI(TAG, "Broker: %s", g_mqtt_uri);
+    if (connect_host != broker_host) {
+        ESP_LOGW(TAG, "Using default broker IP fallback for this boot");
+    }
 
     snprintf(g_status_topic, sizeof(g_status_topic), PROTO_TOPIC_FMT,
              g_device_sn, PROTO_TOPIC_STATUS);
@@ -394,44 +440,104 @@ void mqtt_disconnect(void)
     atomic_store(&g_mqtt_started, false);
 }
 
-int mqtt_publish(const char *sub_topic, const char *data, int len, int qos,
-                 int retain)
+/* 发布核心: 拼接主题前缀 + 信封。
+ * allow_cache=false → 只实时发, 断连即丢 (调试日志之类补传无价值的上行,
+ * 不该挤占离线缓存里遥测的补传槽位)。
+ * 注意: 这里不碰遥测计时器 —— 心跳周期只由 telemetry_tick 管理; 曾经"任何上行
+ * 都重置心跳计时器"会让 90s 在线上报不断推后 180s 心跳, 正常周期下心跳永不发出。 */
+static int publish_core(const char *sub_topic, const char *data, int qos,
+                        int retain, bool allow_cache, uint16_t version)
 {
-    if (!sub_topic || !data || len < 0) {
+    if (!sub_topic || !data) {
         return -2;
     }
 
     char full_topic[128];
-    int n = snprintf(full_topic, sizeof(full_topic), PROTO_TOPIC_FMT,
+    int n = snprintf(full_topic, sizeof(full_topic), "cs_inv/%s/%s",
                      g_device_sn, sub_topic);
     if (n < 0 || n >= (int)sizeof(full_topic)) {
         return -3;
     }
 
     if (!g_mqtt_client || !atomic_load(&g_mqtt_connected)) {
+        if (!allow_cache) {
+            return -1;
+        }
         bool stored = offline_cache_add(sub_topic, data, 0);
         ESP_LOGW(TAG, "Not connected, cache %s: topic=%s",
                  stored ? "stored" : "failed", sub_topic);
         return stored ? 1 : -1;
     }
 
-    char full_payload[2048];
     uint32_t timestamp = (uint32_t)time(NULL);
-    int payload_len = snprintf(full_payload, sizeof(full_payload),
-        "{\"t\":%" PRIu32 ",\"v\":%d,\"data\":%s}",
-        timestamp, PROTO_ENVELOPE_VERSION, data);
-    if (payload_len <= 0 || payload_len >= (int)sizeof(full_payload)) {
-        ESP_LOGE(TAG, "Payload too large");
-        return -5;
+    char *full_payload = NULL;
+    size_t payload_len = 0;
+    const int format_result = mqtt_envelope_build(data, timestamp, version,
+                                                   &full_payload, &payload_len);
+    if (format_result != 0) {
+        ESP_LOGE(TAG, "MQTT envelope build failed: code=%d free=%u max=%u",
+                 format_result, (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        return format_result;
     }
 
     int msg_id = esp_mqtt_client_publish(g_mqtt_client, full_topic,
-                                         full_payload, payload_len, qos, retain);
+                                         full_payload, (int)payload_len, qos, retain);
+    free(full_payload);
     if (msg_id >= 0) {
-        telemetry_reset_heartbeat_timer();
         return 0;
     }
+    if (!allow_cache) {
+        return -4;
+    }
     return offline_cache_add(sub_topic, data, timestamp) ? 1 : -4;
+}
+
+/* 清掉指定 SN 的 retained status (空载荷 + retain=1 = 让 broker 删除该保留消息)。
+ * 用途: SN 从 MAC 派生值换成 ARM 真实值后, 旧主题上的 retained 会变成"幽灵设备"
+ * 永久挂在设备列表里 (2026-08-15 那批 L10<MAC> 主题就是这么留下的);
+ * 换 SN 前先把旧的清掉, 一次到位。 */
+void mqtt_clear_retained_status(const char *sn)
+{
+    if (!sn || !sn[0] || !g_mqtt_client || !atomic_load(&g_mqtt_connected)) {
+        return;
+    }
+    char topic[128];
+    int n = snprintf(topic, sizeof(topic), PROTO_TOPIC_FMT, sn, PROTO_TOPIC_STATUS);
+    if (n <= 0 || n >= (int)sizeof(topic)) return;
+    esp_mqtt_client_publish(g_mqtt_client, topic, "", 0, 1, 1);
+    ESP_LOGW(TAG, "cleared retained status of old SN: %s", sn);
+}
+
+int mqtt_publish(const char *sub_topic, const char *data, int len, int qos,
+                 int retain)
+{
+    if (len < 0) {
+        return -2;
+    }
+    return publish_core(sub_topic, data, qos, retain, true, PROTO_ENVELOPE_VERSION);
+}
+
+int mqtt_publish_volatile(const char *sub_topic, const char *data, int len,
+                          int qos)
+{
+    if (len < 0) {
+        return -2;
+    }
+    return publish_core(sub_topic, data, qos, 0, false, PROTO_ENVELOPE_VERSION);
+}
+
+/* heartbeat v3: ARM 运行参数原样转发专用 (信封版本 3, 不走离线缓存)。
+ * 不缓存的理由: ① 心跳是周期状态快照, 补传过期快照价值低;
+ * ② 离线缓存项 payload 上限 512B, 87 值结构体 payload ≈530B 会被拒;
+ * ③ 缓存补传固定按 v2 重组信封, 会把 v3 内容包成 v2 导致服务端按错版本解析。 */
+int mqtt_publish_heartbeat_raw(const char *sub_topic, const char *data, int len)
+{
+    if (len < 0) {
+        return -2;
+    }
+    return publish_core(sub_topic, data, 0, 0, false,
+                        PROTO_HEARTBEAT_ENVELOPE_VERSION);
 }
 
 void mqtt_publish_ota_trace(const char *stage, const char *detail)
@@ -468,7 +574,7 @@ void mqtt_publish_ota_trace(const char *stage, const char *detail)
     if (n + 3 >= sizeof(buf)) return;
 
     n += (size_t)snprintf(buf + n, sizeof(buf) - n, "\"}");
-    mqtt_publish(PROTO_TOPIC_OTA_DEBUG, buf, (int)n, 0, 0);
+    mqtt_publish_volatile(PROTO_TOPIC_OTA_DEBUG, buf, (int)n, 0);
 }
 
 int mqtt_subscribe(const char *sub_topic, int qos)
@@ -532,6 +638,7 @@ void mqtt_flush_offline_cache(void)
 bool mqtt_is_stuck(int64_t timeout_ms)
 {
     if (atomic_load(&g_mqtt_connected)) return false;
+    if (atomic_load(&g_broker_fallback_pending)) return true;
     if (g_disconnect_start_ms == 0) return false;
     /* 连续重启次数越多, 超时越长 (上限 10 分钟) */
     int64_t effective = timeout_ms * (1 + g_force_restart_count);
@@ -542,8 +649,13 @@ bool mqtt_is_stuck(int64_t timeout_ms)
 
 void mqtt_force_restart(void)
 {
+    const bool broker_fallback =
+        atomic_exchange(&g_broker_fallback_pending, false);
     g_force_restart_count++;
-    ESP_LOGW(TAG, "Force restarting MQTT client (count=%d)", g_force_restart_count);
+    ESP_LOGW(TAG, "Force restarting MQTT client (count=%d, broker_fallback=%d)",
+             g_force_restart_count, broker_fallback);
     mqtt_disconnect();
-    mqtt_init(g_msg_handler_saved);
+    if (!mqtt_init(g_msg_handler_saved)) {
+        ESP_LOGE(TAG, "MQTT client reinitialization failed");
+    }
 }

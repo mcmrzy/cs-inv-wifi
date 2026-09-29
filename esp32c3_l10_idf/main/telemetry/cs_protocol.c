@@ -156,6 +156,35 @@ size_t cs_ppp_pack(uint8_t *dst, const uint8_t *src, size_t len)
     return c;
 }
 
+/* buf 前 len 字节已是加密原始帧，输出缓冲按 cs_ppp_pack_len(len) 预留。
+ * 从尾到头转义，写指针始终位于尚未读取的数据之后，因此无需 4.3KB 常驻
+ * scratch，也不会覆盖待处理字节。 */
+static size_t cs_ppp_pack_in_place(uint8_t *buf, size_t len)
+{
+    size_t packed_len = len + 2;
+    for (size_t i = 0; i < len; ++i) {
+        if (buf[i] == CS_PPP_ESC_7E || buf[i] == CS_PPP_ESC_7D) packed_len++;
+    }
+
+    size_t src = len;
+    size_t dst = packed_len - 1;
+    buf[dst] = CS_PPP_ESC_7E;
+    while (src > 0) {
+        const uint8_t value = buf[--src];
+        if (value == CS_PPP_ESC_7E) {
+            buf[--dst] = CS_PPP_ESC_5E;
+            buf[--dst] = CS_PPP_ESC_7D;
+        } else if (value == CS_PPP_ESC_7D) {
+            buf[--dst] = CS_PPP_ESC_5D;
+            buf[--dst] = CS_PPP_ESC_7D;
+        } else {
+            buf[--dst] = value;
+        }
+    }
+    buf[0] = CS_PPP_ESC_7E;
+    return packed_len;
+}
+
 /* ------------------------------------------------------------------ */
 /* PPP 接收状态机 (ComProtocol.c PPPFrameCmdReceive)                  */
 /* ------------------------------------------------------------------ */
@@ -262,27 +291,28 @@ size_t cs_frame_send(uint8_t *out, uint8_t cmd, uint16_t param1,
     size_t total = enclen + 8;
     uint32_t crc;
     uint32_t tmpk[4];
-    static uint8_t raw[CS_FRAME_MAX];   /* 单任务调用, 静态暂存 */
 
-    if (total > sizeof(raw)) {
+    if (!out || total > CS_FRAME_TX_MAX) {
         return 0;
     }
 
-    memset(raw, 0, total);
+    /* 先在 out 头部原地构建/加密，再倒序扩展为 PPP 帧。调用方本来就必须按
+     * cs_frame_send_len() 提供最坏 2x 容量，故不再需要静态 raw[]。 */
+    memset(out, 0, total);
 
     /* 帧头 (CollectorCmdDef, pack(1)) */
-    raw[CS_OFF_HEADER] = CS_HEADER;
-    wr_le16(raw + CS_OFF_CMDLEN, (uint16_t)cmdlen);
-    raw[CS_OFF_CMD] = cmd;
-    wr_le16(raw + CS_OFF_PARAM1, param1);
-    wr_le16(raw + CS_OFF_PARAM2, param2);
+    out[CS_OFF_HEADER] = CS_HEADER;
+    wr_le16(out + CS_OFF_CMDLEN, (uint16_t)cmdlen);
+    out[CS_OFF_CMD] = cmd;
+    wr_le16(out + CS_OFF_PARAM1, param1);
+    wr_le16(out + CS_OFF_PARAM2, param2);
     if (data != NULL && param2 > 0) {
-        memcpy(raw + CS_OFF_DATA, data, param2);
+        memcpy(out + CS_OFF_DATA, data, param2);
     }
 
     /* CRC32 存于帧偏移 CmdLen 处 (帧外 4 字节) */
-    crc = cs_crc32_words(raw, cmdlen >> 2);
-    wr_le32(raw + cmdlen, crc);
+    crc = cs_crc32_words(out, cmdlen >> 2);
+    wr_le32(out + cmdlen, crc);
 
     /* TempKey = FrameKey[0..1] + {~rand, rand} (ARM: TempKey[3]=SysTick->VAL, [2]=~[3]) */
     tmpk[0] = cs_frame_key[0];
@@ -291,13 +321,13 @@ size_t cs_frame_send(uint8_t *out, uint8_t cmd, uint16_t param1,
     tmpk[3] = rand;
 
     /* 第一层: TempKey CBC 加密 enclen 字节 */
-    cs_encrypt_cbc(raw, tmpk, enclen);
+    cs_encrypt_cbc(out, tmpk, enclen);
     /* 帧尾附 TempKey[2..3] 8 字节 (不参与第一层加密) */
-    memcpy(raw + enclen, &tmpk[2], 8);
+    memcpy(out + enclen, &tmpk[2], 8);
     /* 第二层: FrameKey CBC 加密全帧 */
-    cs_encrypt_cbc(raw, cs_frame_key, total);
+    cs_encrypt_cbc(out, cs_frame_key, total);
 
-    return cs_ppp_pack(out, raw, total);
+    return cs_ppp_pack_in_place(out, total);
 }
 
 /* ------------------------------------------------------------------ */

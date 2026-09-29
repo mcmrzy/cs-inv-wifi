@@ -1,9 +1,9 @@
 #include "ble_ct.h"
-#include "ble_ct_auth.h"
 #include "ble_ct_telemetry.h"
 #include "ble_ct_cmd.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_random.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "host/ble_store.h"
@@ -17,14 +17,12 @@ static const char *TAG = "ble_ct";
 /* SN 和固件版本（由 ble_ct_start 传入） */
 static const char *s_device_sn = "";
 static const char *s_fw_version = "";
+static char s_session_id[33] = "";
 
 /* CSIV-CT Service UUID: 43534956-4354-1000-8000-00805f9b34fb */
 static const ble_uuid128_t s_ct_svc_uuid = BLE_UUID128_INIT(
     0xfb,0x34,0x9b,0x5f,0x80,0x00,0x00,0x80,
     0x00,0x10,0x54,0x43,0x56,0x49,0x53,0x43);
-static const ble_uuid128_t s_auth_uuid = BLE_UUID128_INIT(
-    0xfb,0x34,0x9b,0x5f,0x80,0x00,0x00,0x80,
-    0x00,0x10,0x55,0x41,0x56,0x49,0x53,0x43);
 static const ble_uuid128_t s_telemetry_uuid = BLE_UUID128_INIT(
     0xfb,0x34,0x9b,0x5f,0x80,0x00,0x00,0x80,
     0x00,0x10,0x4c,0x54,0x56,0x49,0x53,0x43);
@@ -38,7 +36,6 @@ static const ble_uuid128_t s_info_uuid = BLE_UUID128_INIT(
     0xfb,0x34,0x9b,0x5f,0x80,0x00,0x00,0x80,
     0x00,0x10,0x4e,0x49,0x56,0x49,0x53,0x43);
 
-static uint16_t s_auth_handle;
 static uint16_t s_telemetry_handle;
 static uint16_t s_cmd_handle;
 static uint16_t s_result_handle;
@@ -49,43 +46,53 @@ static BleCtState s_state = BLE_CT_IDLE;
 static bool s_services_registered = false;
 static bool s_telemetry_subscribed = false;
 static bool s_result_subscribed = false;
-static bool s_auth_subscribed = false;
 
 /* g_device_sn 和 FIRMWARE_VERSION 通过 config.h / mqtt_handler.h 引入 */
 
 /* ---- 句柄导出 ---- */
 uint16_t ble_ct_get_telemetry_handle(void) { return s_telemetry_handle; }
 uint16_t ble_ct_get_result_handle(void) { return s_result_handle; }
-uint16_t ble_ct_get_auth_handle(void) { return s_auth_handle; }
 bool ble_ct_is_telemetry_subscribed(void) { return s_telemetry_subscribed; }
 bool ble_ct_is_result_subscribed(void) { return s_result_subscribed; }
 uint16_t ble_ct_get_conn_handle(void) { return s_conn_handle; }
 BleCtState ble_ct_get_state(void) { return s_state; }
 const char *ble_ct_get_sn(void) { return s_device_sn; }
+const char *ble_ct_get_session_id(void) { return s_session_id; }
+
+static void new_session_id(void) {
+    uint8_t random_bytes[16];
+    esp_fill_random(random_bytes, sizeof(random_bytes));
+    for (size_t i = 0; i < sizeof(random_bytes); ++i)
+        snprintf(s_session_id + i * 2, 3, "%02x", random_bytes[i]);
+}
 
 /* ---- INFO 特征 ---- */
 static int info_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                            struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_UNLIKELY;
 
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_BT);
-    char buf[256];
+    char buf[512];
     int n = snprintf(buf, sizeof(buf),
-        "{\"sn\":\"%s\",\"model\":\"CS-L10-6K2\",\"firmware\":\"%s\","
-        "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"bound\":%s,\"proto_ver\":1}",
-        s_device_sn, s_fw_version,
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-        ble_ct_auth_is_bound() ? "true" : "false");
-    os_mbuf_append(ctxt->om, buf, n);
+        "{\"v\":2,\"type\":\"info\",\"message_id\":\"info-current\",\"session_id\":\"%s\",\"body\":{"
+        "\"device_sn\":\"%s\",\"proto_version\":2,\"model\":\"CS-L10-6K2\","
+        "\"hardware_version\":\"TBD_GATE\",\"firmware_version\":\"%s\","
+        "\"parameter_schema_version\":\"TBD_GATE\","
+        "\"capabilities\":[\"info\",\"telemetry\",\"control\",\"ota\",\"ota_binary_v1\"],"
+        "\"supported_upgrade_modules\":[\"communication_module\",\"system_controller\","
+        "\"dsp_controller\",\"bms\"],"
+        "\"max_report_bytes\":512,"
+        /* bound: 2026-09-22 起设备端不再有绑定/鉴权协议(App 侧 checkPin 已无调用点),
+         * 这里恒为 true —— "无绑定限制"。字段保留是为了不动 App 的 INFO(§8)契约。 */
+        "\"bound\":true,\"production_approved\":false}}",
+        s_session_id, s_device_sn, s_fw_version);
+    if (n <= 0 || n >= (int)sizeof(buf)) return BLE_ATT_ERR_UNLIKELY;
+    os_mbuf_append(ctxt->om, buf, (uint16_t)n);
     return 0;
 }
 
 /* ---- GATT 访问回调 ---- */
 static int ct_gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (attr_handle == s_auth_handle)
-        return ble_ct_auth_access_cb(conn_handle, attr_handle, ctxt, arg);
     if (attr_handle == s_info_handle)
         return info_access_cb(conn_handle, attr_handle, ctxt, arg);
     if (attr_handle == s_cmd_handle)
@@ -101,9 +108,8 @@ static const struct ble_gatt_svc_def s_ct_gatt_svcs[] = {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &s_ct_svc_uuid.u,
         .characteristics = (struct ble_gatt_chr_def[]){
-            { .uuid = &s_auth_uuid.u, .access_cb = ct_gatt_access_cb,
-              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
-              .val_handle = &s_auth_handle },
+            /* AUTH 特征已随鉴权协议一并移除 (2026-09-22, 省内存): App 侧 checkPin/
+             * verifyPin 已无调用点, 旧 App 写该 UUID 会得到 Attribute Not Found。 */
             { .uuid = &s_telemetry_uuid.u, .access_cb = ct_gatt_access_cb,
               .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
               .val_handle = &s_telemetry_handle },
@@ -154,6 +160,7 @@ int ble_ct_on_gap_event(struct ble_gap_event *event, void *arg) {
                 ESP_LOGW(TAG, "New conn=%d while old conn=%d tracked; accepting new",
                          event->connect.conn_handle, s_conn_handle);
             }
+            new_session_id();
             s_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "CT connected (conn=%d)", s_conn_handle);
             /* 不主动发起安全请求（参考 Arduino 版本）：
@@ -174,10 +181,9 @@ int ble_ct_on_gap_event(struct ble_gap_event *event, void *arg) {
         if (event->disconnect.conn.conn_handle == s_conn_handle) {
             ESP_LOGI(TAG, "CT disconnected");
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            s_session_id[0] = '\0';
             s_telemetry_subscribed = false;
             s_result_subscribed = false;
-            s_auth_subscribed = false;
-            ble_ct_auth_reset_session();
         }
         break;
 
@@ -186,8 +192,6 @@ int ble_ct_on_gap_event(struct ble_gap_event *event, void *arg) {
             s_telemetry_subscribed = event->subscribe.cur_notify;
         else if (event->subscribe.attr_handle == s_result_handle)
             s_result_subscribed = event->subscribe.cur_notify;
-        else if (event->subscribe.attr_handle == s_auth_handle)
-            s_auth_subscribed = event->subscribe.cur_notify;
         break;
 
     case BLE_GAP_EVENT_MTU:
@@ -229,7 +233,6 @@ bool ble_ct_start(const char *device_sn, const char *fw_version) {
 
     ESP_LOGI(TAG, "CSIV-CT init (SN=%s)", s_device_sn);
 
-    ble_ct_auth_init();
     s_state = BLE_CT_RUNNING;
     return true;
 }

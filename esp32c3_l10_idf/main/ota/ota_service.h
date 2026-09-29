@@ -13,6 +13,8 @@ typedef enum {
 typedef enum {
     OTA_TARGET_ESP = 0,
     OTA_TARGET_ARM = 1,
+    OTA_TARGET_DSP = 2,
+    OTA_TARGET_BMS = 3,
 } OtaTarget;
 
 typedef enum {
@@ -53,6 +55,8 @@ typedef enum {
     OTA_RESULT_NOT_CANCELLABLE,
     OTA_RESULT_TASK_CREATE_FAILED,
     OTA_RESULT_INTERNAL,
+    OTA_RESULT_TARGET_UNSUPPORTED,
+    OTA_RESULT_INSUFFICIENT_STORAGE,
 } OtaResult;
 
 typedef struct {
@@ -79,12 +83,17 @@ typedef struct {
     uint32_t total;
     char version[32];
     char error_code[32];
-    char message[96];
+    /* 128: 失败 message 现在带堆余量 + https 提示(见 ota_service.c detail_append_*) */
+    char message[128];
 } OtaSnapshot;
 
 /* Return bytes read, 0 for temporarily no data, or a negative value on error. */
 typedef int (*OtaStreamReader)(void* context, uint8_t* buffer, size_t capacity);
 typedef void (*OtaStatusObserver)(const OtaSnapshot* snapshot);
+
+/* 状态订阅者上限: 现有 MQTT 上报 + BLE 本地两个适配器, 留出余量。
+ * set_observer 是追加语义(不是替换), 重复注册同一函数会被忽略。 */
+#define OTA_MAX_OBSERVERS 4
 
 bool ota_service_init(void);
 void ota_service_set_observer(OtaStatusObserver observer);

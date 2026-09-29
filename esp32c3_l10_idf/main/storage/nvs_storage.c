@@ -10,6 +10,8 @@ static const char *TAG = "storage";
 #define OTA_NAMESPACE       "ota_sec"
 #define OTA_KEY_SEC_ESP     "ota_sec_esp"
 #define OTA_KEY_SEC_ARM     "ota_sec_arm"
+#define OTA_KEY_SEC_DSP     "ota_sec_dsp"
+#define OTA_KEY_SEC_BMS     "ota_sec_bms"
 #define OTA_KEY_PENDING     "ota_pending"
 #define OTA_PENDING_MAGIC   0x4f544150UL
 
@@ -118,6 +120,8 @@ static const char *ota_security_key(const char *target)
 {
     if (target && strcmp(target, "esp") == 0) return OTA_KEY_SEC_ESP;
     if (target && strcmp(target, "arm") == 0) return OTA_KEY_SEC_ARM;
+    if (target && strcmp(target, "dsp") == 0) return OTA_KEY_SEC_DSP;
+    if (target && strcmp(target, "bms") == 0) return OTA_KEY_SEC_BMS;
     return NULL;
 }
 

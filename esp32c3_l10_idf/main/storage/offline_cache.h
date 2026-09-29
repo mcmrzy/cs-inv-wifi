@@ -13,6 +13,8 @@ typedef struct {
 } OfflineCacheItem;
 
 void offline_cache_init(void);
+/* OTA 静默窗口: true 期间暂停周期补传 */
+void offline_cache_set_quiet(bool quiet);
 
 bool offline_cache_add(const char* topic, const char* payload, uint32_t timestamp);
 

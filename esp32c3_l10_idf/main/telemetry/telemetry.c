@@ -45,14 +45,77 @@ extern bool     mqtt_is_connected(void);
 extern int64_t  esp_timer_get_time(void);
 extern uint32_t ble_ct_now(void);
 extern void     ble_ct_telemetry_notify(const char *json, uint16_t len);
+static const char *reset_reason_name(void) { return "UNKNOWN"; }
+static uint32_t nvs_free_entries(void) { return 0; }
+static uint32_t heap_free_bytes(void) { return 0; }
+static uint32_t heap_max_block(void) { return 0; }
+static uint32_t heap_alloc_blocks(void) { return 0; }
+static uint32_t heap_min_free(void) { return 0; }
 #else
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
+#include "esp_heap_caps.h"
+#include "nvs_flash.h"
 #include "config.h"
 #include "cs_protocol_defs.h"
 #include "mqtt_handler.h"
 #include "ble_ct_telemetry.h"
 #include "ble_ct_clock.h"
+
+/* ---- 复位原因名 (online 上报携带): 远程即可判复位根因。
+ * 下载/传输中曾出现间歇性猝死, 此字段直接区分 BROWNOUT(欠压) /
+ * PANIC(软件崩溃) / TASK_WDT(看门狗) / POWERON(掉电)。PANIC 的 backtrace
+ * 用 USB-Serial/JTAG 现场抓 (idf.py monitor), 不做 coredump-to-flash。 ---- */
+static const char *reset_reason_name(void)
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "POWERON";
+    case ESP_RST_SW:        return "SW";
+    case ESP_RST_PANIC:     return "PANIC";
+    case ESP_RST_INT_WDT:   return "INT_WDT";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT";
+    case ESP_RST_WDT:       return "WDT";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    case ESP_RST_PWR_GLITCH:return "PWR_GLITCH";
+    default:                return "UNKNOWN";
+    }
+}
+
+/* ---- 堆余量 (online 上报携带) ----
+ * 云端 OTA 下载要一块 ~20KB 的 TLS 上下文, 设备侧原先只在失败报文里能看到
+ * 那一刻的 free/max, 分不清"天生就这么小"还是"随 uptime 被吃掉的"。90s 一条
+ * 的曲线把两者分开: 重启后立刻看第一条, 再对比几小时后。 */
+static uint32_t heap_free_bytes(void) { return (uint32_t)esp_get_free_heap_size(); }
+static uint32_t heap_max_block(void)
+{
+    return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+}
+/* 定位"堆随 uptime 流失": 已分配块数单调上涨 = 真泄漏; 块数平稳而 free 下降 =
+ * 大块被占/合并受阻。minimum_free_bytes 是开机以来最低水位, 比瞬时值更能说明
+ * "最紧的时候还剩多少"。 */
+static uint32_t heap_alloc_blocks(void)
+{
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+    return (uint32_t)info.allocated_blocks;
+}
+static uint32_t heap_min_free(void)
+{
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_8BIT);
+    return (uint32_t)info.minimum_free_bytes;
+}
+/* NVS 剩余条目: 写满会让配网凭据/SN/密钥的保存**静默失败**(写失败的路径见
+ * app_main 配网处 / arm_poll SN 同步处), 现场表现得像"重启就丢配置"。
+ * 24KB 的 nvs 分区、几百条上限, 这个数贴近 0 就是病灶。 */
+static uint32_t nvs_free_entries(void)
+{
+    nvs_stats_t st;
+    if (nvs_get_stats(NULL, &st) != ESP_OK) return 0;
+    return (uint32_t)st.free_entries;
+}
 #endif
 
 static const char *TAG = "TELE";
@@ -62,37 +125,6 @@ static const char *TAG = "TELE";
 #define TOPIC_INFO       PROTO_TOPIC_INFO
 #define TOPIC_ALARM      PROTO_TOPIC_ALARM
 #define TOPIC_CONFIG     PROTO_TOPIC_CONFIG
-
-/* ============ heartbeat 量纲策略 (按现场 ARM 固件版本自动选择) ============
- * 现场同一型号多批 ARM 固件混装: 旧固件按厂家原始换算输出 (ESP 侧需补偿), 厂家
- * 修正后的新固件直接输出契约量纲 (直传)。模式完全由 ARM 只读区 0x190 的
- * ARMFirmwareVersion (u16: 高字节主版本 / 低字节次版本, 见 fmt_ver) 决定,
- * 无需为不同批次分别出固件。 */
-
-/* 厂家 ARM 从该版本起输出契约量纲 (0xFFFF = 尚未发布 → 永远走补偿)。
-   *** 厂家修好后只需把下面改成实际版本号 (如 0x0102 表示 V1.2), 其余代码不动 *** */
-#define ARM_FW_CONTRACT_UNITS_FROM  0xFFFFu
-
-/* 厂家实现未赋值字段 (InvCurr/PvTemp/TransformerTemp/并机 socket) 后置 1,
-   相应槽位改为发布实际值; 与上面的量纲修正相互独立 (0 = 继续发布 null) */
-#define ARM_UNSUPPORTED_FIELDS_IMPLEMENTED  0
-
-/* 量纲模式 */
-typedef enum {
-    HB_UNITS_COMPENSATE = 0,   /* 旧 ARM: ESP 侧补偿换算 (当前默认) */
-    HB_UNITS_CONTRACT   = 1,   /* 新 ARM: 契约量纲直传 */
-} hb_units_t;
-
-/* ARM 固件是否已输出契约量纲: 版本 >= 阈值 → true; 版本读不到 (0) → false
- * (保持补偿, 安全默认: 版本未知时宁可多补一次, 也不把已放大的值直传云端) */
-static bool arm_units_are_contract(void)
-{
-    uint16_t ver = g_only_read.ARMFirmwareVersion;
-    if (ver == 0) {
-        return false;
-    }
-    return ver >= ARM_FW_CONTRACT_UNITS_FROM;
-}
 
 static uint32_t s_now_ms;
 static uint32_t s_last_hb_ms;        /* V2 heartbeat 上次发布时刻 (30s) */
@@ -107,7 +139,16 @@ static uint32_t s_last_fault;
 static uint16_t s_last_bms;
 static uint32_t s_arm_fail_count;    /* ARM 连续无应答计数 (心跳周期) */
 static bool     s_fault_reported;    /* 故障已上报, 恢复前不重复触发 */
-static int      s_units_logged = -1; /* 已打印过的量纲模式 (-1=未打印过一次) */
+
+/* OTA 静默窗口 (2026-09-22, 用户授权): ESP 自升级期间停掉周期心跳与 ARM 侧
+ * 派生上报 —— 下载/写入是内存与 CPU 最紧的一段, 后台活动只会抢资源。
+ * online(90s, 带 heap 曲线) 不受影响: 进度与存活必须实时可见。 */
+static volatile bool s_quiet = false;
+
+void telemetry_set_quiet(bool quiet)
+{
+    s_quiet = quiet;
+}
 
 /* ---- 单设备调试模式 (云端 set_debug_telemetry) ----
  * 临时切换 heartbeat 周期; 到期/关闭/重启自动恢复默认 TELEMETRY_PERIOD_MS。
@@ -132,9 +173,14 @@ static void fmt_ver(char *buf, size_t len, uint16_t ver)
 static void publish_online(void)
 {
     if (!mqtt_is_connected()) return;
-    char buf[128];
+    char buf[224];
     int n = snprintf(buf, sizeof(buf),
-        "{\"uptime\":%lu}", (unsigned long)(s_now_ms / 1000));
+        "{\"uptime\":%lu,\"reset_reason\":\"%s\",\"heap\":%lu,\"heap_max\":%lu,"
+        "\"blk\":%lu,\"heap_min\":%lu,\"nvs\":%lu}",
+        (unsigned long)(s_now_ms / 1000), reset_reason_name(),
+        (unsigned long)heap_free_bytes(), (unsigned long)heap_max_block(),
+        (unsigned long)heap_alloc_blocks(), (unsigned long)heap_min_free(),
+        (unsigned long)nvs_free_entries());
     if (n > 0 && n < (int)sizeof(buf)) {
         mqtt_publish("online", buf, 0, 0, 0);
     }
@@ -158,240 +204,43 @@ static void hb_append(char *buf, size_t cap, size_t *pos, const char *fmt, ...)
     }
 }
 
-/* heartbeat 数值拼接 + 量程护栏: 界限与服务器 heartbeat_v2.go 的 bounded() 一一
- * 对应 (固件 raw 值 = 服务器工程单位上限 × 缩放, 如 ACOutputVolt 2500 raw =
- * 250V@0.1V), 越界发布字面量 null (服务器落 NULL), 合法值原样发布、数值不变。 */
-static void hb_num(char *buf, size_t cap, size_t *pos,
-                   unsigned long v, unsigned long vmax)
+/* s16 负值钳 0 (2026-09-22 对照表契约: 市电/负载/充电功率与电流 <0 视为测量
+ * 毛刺; App(10) ReadRunParam 本身不钳位, 钳位在 ESP 侧补齐)。
+ * 注: heartbeat 的数值量程护栏已随 v3 原样转发一并移交服务端
+ * (heartbeat_v3.go bounded()), 固件侧不再保留 hb_num/hb_num1/hb_num_i;
+ * 本函数仅 BLE 近场遥测 (App 期望工程单位) 使用。 */
+static uint32_t hb_clamp0(int32_t v)
 {
-    if (v <= vmax) {
-        hb_append(buf, cap, pos, ",%lu", v);
-    } else {
-        hb_append(buf, cap, pos, ",null");
-    }
+    return (v < 0) ? 0u : (uint32_t)v;
 }
 
-/* 组内首个数值 (紧跟 opener 的 '[', 无前导逗号), 量程规则同 hb_num */
-static void hb_num1(char *buf, size_t cap, size_t *pos,
-                    unsigned long v, unsigned long vmax)
-{
-    if (v <= vmax) {
-        hb_append(buf, cap, pos, "%lu", v);
-    } else {
-        hb_append(buf, cap, pos, "null");
-    }
-}
-
-/* 带符号版本 (bat_curr: 服务器界 -150..150A@0.1A → raw -1500..1500) */
-static void hb_num_i(char *buf, size_t cap, size_t *pos,
-                     int32_t v, int32_t vmin, int32_t vmax)
-{
-    if (v >= vmin && v <= vmax) {
-        hb_append(buf, cap, pos, ",%" PRId32, v);
-    } else {
-        hb_append(buf, cap, pos, ",null");
-    }
-}
-
-/* ×10 缩放助手 (1V/1W/1VA/1% → 契约 0.1V/0.1W/0.1VA/0.1%): u32 中间量防 u16
- * 溢出; u32 源超过 UINT32_MAX/10 时 ×10 会回绕, 钳为 UINT32_MAX 交给量程护栏
- * 判 null */
-static uint32_t hb_scale10(uint32_t v)
-{
-    return (v > UINT32_MAX / 10) ? UINT32_MAX : v * 10;
-}
-
-/* ---- 量纲变换 (补偿模式换算 / 契约模式直传) ----
- * 契约模式下 ARM 源值即契约量纲, 原样返回; 补偿模式沿用旧换算。
- * 量程护栏不在这里, 由 hb_num/hb_num1/hb_num_i 按契约界限判定 (两模式一致)。 */
-static uint32_t hb_units_x10(hb_units_t m, uint32_t v)
-{
-    return (m == HB_UNITS_CONTRACT) ? v : hb_scale10(v);
-}
-
-static uint32_t hb_units_div(hb_units_t m, uint32_t v, uint32_t div)
-{
-    return (m == HB_UNITS_CONTRACT) ? v : v / div;
-}
-
-/* ---- heartbeat 策略选择 (版本自适应, 见上方"量纲策略"与函数头 ⚠ 清单) ----
- * 每次发布重新判定 (现场换 ARM / ARM 升级后无需重启 ESP); 策略首次生效或发生
- * 变化时打印一次, 便于现场/云端日志判断该设备走的是哪套换算。 */
-static void hb_build(const RunParamDef *p, hb_units_t units);   /* 实现见下 */
-
+/* ---- heartbeat: ARM 运行参数原样转发 (v3, ESP 零解析) ----
+ * 2026-09-22 起 ESP 不再做任何字段映射与量纲换算: ARM App(10) ReadRunParam
+ * 直传的 RunParamDef (87 个 u16, pack(1)) 按字序原样发布为 {"run":[...]},
+ * 服务端按同一份结构体定义做字段映射/量纲换算/界限判定
+ * (device-communication/internal/telemetry/heartbeat_v3.go)。
+ * 动机: 量纲知识集中到服务端一处 —— DSP/ARM 量纲调整只改服务端, 固件不再
+ * 承担换算风险 (09-21/09-22 两次 ESP 侧换算结论错误均源于此)。
+ * 信封版本 3 且不走离线缓存 (原因见 mqtt_publish_heartbeat_raw 注释)。 */
 static void publish_heartbeat(const RunParamDef *p)
 {
-    hb_units_t units = arm_units_are_contract() ? HB_UNITS_CONTRACT
-                                                : HB_UNITS_COMPENSATE;
-    if (s_units_logged != (int)units) {
-        s_units_logged = (int)units;
-        ESP_LOGI(TAG, "ARM fw=0x%04X → units=%s",
-                 (unsigned)g_only_read.ARMFirmwareVersion,
-                 (units == HB_UNITS_CONTRACT) ? "contract" : "compensate");
-    }
-    hb_build(p, units);
-}
-
-/* ---- heartbeat 组包 (57 值, 量纲按 units 二选一) ---- */
-static void hb_build(const RunParamDef *p, hb_units_t units)
-{
-
-    /* 带符号电池电流: 旧版 ARM BatChgCurr/BatDischgCurr 为 0.01A (Ibat 0.1A×10,
-     * 偏大 10×); bit2=Charge → +BatChgCurr; bit3=Discharging → -BatDischgCurr;
-     * 补偿模式 ÷10 → 契约 0.1A (实测 -13340 → -1334), 契约模式直传 */
-    int32_t bat_curr = 0;
-    if (p->SysStatus & 0x04) {
-        bat_curr = (int32_t)hb_units_div(units, p->BatChgCurr, 10);
-    } else if (p->SysStatus & 0x08) {
-        bat_curr = -(int32_t)hb_units_div(units, p->BatDischgCurr, 10);
-    }
-
-    /* 原始量纲整数 (含 0.1/0.01 缩放), 服务器按字段定义还原;
-       Warning 仅低 16 位有效: 新版 ARM bit16~31 未初始化随机、bit32~63 恒 0,
-       发布前屏蔽高位, 防止垃圾位进入云端告警位图 (两种量纲模式下都保留该屏蔽);
-       sys[6]/sys[7] (变压器/PV 温度)、diag[0] InvCurr、sock 3 值均属 ARM 未赋值/
-       未实现字段 (读数为未初始化内存, 实测 0xDEAD、25108 等垃圾值) → 除非
-       ARM_UNSUPPORTED_FIELDS_IMPLEMENTED 置 1, 否则一律发布 null;
-       量程护栏与服务器 heartbeat_v2.go bounded() 一一对应 (契约量纲界限), 越界 →
-       null (见 hb_num); 补偿值与契约值界限相同, 故两种模式共用同一组界限;
-       57 值: sys[11]/pv[5]/ac[11]/chr[3]/bat[5]/eng[14]/fan[2]/diag[3]/sock[3]
-
-       ⚠ 量纲表（2026-09-21 依厂家提供的 ARM 源码 App(8)
-       source/Collector/Collector.c ReadRunParam 逐字段重校，并以实机
-       H1ZZX00139000038 线上解密 dump + ARM 屏幕显示缩放交叉验证；下列换算
-       **仅在补偿模式执行** (hb_units_x10 / hb_units_div 内二选一)，契约模式
-       全部直传）：
-         ×10: Vpv1/Vpv2 (DSP 1V, 屏幕 "%uV" 原值显示实证) Ppv (DSP 1W)
-              OutputWatt/OutputVA (Pload/Sload 1W/1VA, ParamForm 原值显示实证)
-              BatChrWatt/BatDisChrWatt (Pbat 1W)
-         直传 (线上已是契约量纲):
-              ACOutputVolt — VloadA 直传, 实机 2310=231.0V (与 49.70Hz 互证;
-                按 DSP 注释 1V 再 ×10 会得 2310V 触界变 null, 已改正)
-              LoadPercent — SysParam(0.1%) 被 ARM ×10, 线上 0.1% 直传配服务器
-                sys[9] scale=0.1 即还原百分比 (旧注释按 1% 批次 ×10 系双倍放大)
-              ACChrCurr — IgridA(0.01A)×10 → 线上 0.1A (旧 ÷100 系误算)
-              BusVolt(0.01V, 服务器 sys[8] scale=0.01 一致) BatVolt(0.01V)
-              GridVolt(0.1V) GridFreq/ACOutputFreq(0.01Hz) ACInWatt/VA
-              ACChrWatt/VA ACDisChrWatt/VA eng(0.1kWh) 温度(0.1℃) SOC(1%)
-              风扇(1%) ParaChgCurr(1A) WorkTimeTotal(1s)
-         ÷10: bat 电流（ARM =Ibat×10，Ibat 0.1A → 线上 0.01A）
-         ÷1000: Buck1/2Curr、OutputCurr（ARM =Ipv×100、=IloadA×100，DSP
-              0.01A → 线上为安培×100）——注意 ARM 侧 ×100 写入 u16 会在
-              >6.55A 时回绕（实测满载 27.07A → 回绕存成 8556），回绕值无法
-              在此还原，需厂家把 ARM 改为 ×10（见交付说明）
-         恒 null: TransformerTemp/PvTemp/InvCurr/sock 3 值 — App(8)
-              ReadRunParam 对这些字段无赋值语句, 发布即 malloc 堆垃圾
-              (实测 0xDEAD/25108 等); 厂家补实现后置
-              ARM_UNSUPPORTED_FIELDS_IMPLEMENTED=1 再放行
-
-       *** 补偿模式与契约模式的切换由 ARM_FW_CONTRACT_UNITS_FROM 决定
-       (arm_units_are_contract)：厂家修好后只需改该常量，本函数拼接代码不动 *** */
-    char buf[768];
+    const uint16_t *w = (const uint16_t *)p;
+    static char buf[640];   /* 87 值 × 最多 6B ≈ 530B; 静态缓冲避免任务栈压力 */
     size_t pos = 0;
-    /* sys[11]: SysStatus/FaultValue/Warning/BmsWarning/BatOverCharge 不设限;
-       InvertTemp≤1000 BoostTemp≤1200 BusVolt≤50000 LoadPercent≤1200 (raw);
-       LoadPercent 直传: ARM 对 SysParam(0.1%, 屏幕按整数+小数拼显) 又 ×10,
-       线上恰为 0.1% 契约量纲, 与服务器 sys[9] scale=0.1 直连还原百分比 */
-    hb_append(buf, sizeof(buf), &pos,
-              "{\"sys\":[%u,%lu,%" PRIu64 ",%u",
-              (unsigned)p->SysStatus, (unsigned long)p->FaultValue,
-              p->Warning & 0xFFFF, (unsigned)p->BmsWarning);
-    hb_num(buf, sizeof(buf), &pos, p->InvertTemp, 1000);
-    hb_num(buf, sizeof(buf), &pos, p->BoostTemp, 1200);
-#if ARM_UNSUPPORTED_FIELDS_IMPLEMENTED
-    hb_num(buf, sizeof(buf), &pos, p->TransformerTemp, 1200);   /* 0.1℃ 界 120.0 */
-    hb_num(buf, sizeof(buf), &pos, p->PvTemp, 1200);            /* 0.1℃ 界 120.0 */
-#else
-    hb_append(buf, sizeof(buf), &pos, ",null,null");            /* ARM 未赋值 */
-#endif
-    hb_num(buf, sizeof(buf), &pos, p->BusVolt, 50000);
-    hb_num(buf, sizeof(buf), &pos, p->LoadPercent, 1200);
-    hb_append(buf, sizeof(buf), &pos, ",%u", (unsigned)p->BatOverCharge);
-    /* pv[5]: Vpv 1V ×10→0.1V 界 5000 (500V; 旧界 1500=150V 低于实机 PV
-       常见 200~450V 工作电压, 把正常值全部打成 null); Buck = Ipv×100 且 DSP Ipv1=10mA
-       (UsartDsp.c:306) → ARM 值 0.0001A, ÷1000 → 0.1A 界 300; Ppv 1W ×10→0.1W
-       (×10/÷1000 仅补偿模式, 契约模式直传; 界限两模式相同) */
-    hb_append(buf, sizeof(buf), &pos, "],\"pv\":[");
-    hb_num1(buf, sizeof(buf), &pos, hb_units_x10(units, p->Vpv1), 5000);
-    hb_num(buf, sizeof(buf), &pos, hb_units_div(units, p->Buck1Curr, 1000), 300);
-    hb_num(buf, sizeof(buf), &pos, hb_units_x10(units, p->Vpv2), 5000);
-    hb_num(buf, sizeof(buf), &pos, hb_units_div(units, p->Buck2Curr, 1000), 300);
-    hb_num(buf, sizeof(buf), &pos, hb_units_x10(units, p->Ppv), 75000);
-    /* ac[11]: 输出电压线上即 0.1V 直传 (见 ⚠ 量纲表); 有功/视在 1W/1VA
-       ×10 (补偿模式); OutputCurr =
-       IloadA×100 且 DSP IloadA=0.01A (UsartDsp.c:291) → ARM 值 0.0001A,
-       ÷1000 → 0.1A (补偿模式); ACOutputFreq/GridVolt/GridFreq/ACInWatt/
-       ACInVA/ACDisChr* 均为契约量纲直传 (两模式相同) */
-    hb_append(buf, sizeof(buf), &pos, "],\"ac\":[");
-    hb_num1(buf, sizeof(buf), &pos, p->ACOutputVolt, 2500);
-    hb_num(buf, sizeof(buf), &pos, p->ACOutputFreq, 5500);
-    hb_num(buf, sizeof(buf), &pos, hb_units_x10(units, p->OutputWatt), 75000);
-    hb_num(buf, sizeof(buf), &pos, hb_units_x10(units, p->OutputVA), 75000);
-    hb_num(buf, sizeof(buf), &pos, hb_units_div(units, p->OutputCurr, 1000), 1000);
-    hb_num(buf, sizeof(buf), &pos, p->GridVolt, 3000);
-    hb_num(buf, sizeof(buf), &pos, p->GridFreq, 5500);
-    hb_num(buf, sizeof(buf), &pos, p->ACInWatt, 75000);
-    hb_num(buf, sizeof(buf), &pos, p->ACInVA, 75000);
-    hb_num(buf, sizeof(buf), &pos, p->ACDisChrWatt, 75000);
-    hb_num(buf, sizeof(buf), &pos, p->ACDisChrVA, 75000);
-    /* chr[3]: ACChrWatt/ACChrVA 已 0.1 直传; ACChrCurr = IgridA(0.01A)×10
-       → 线上即 0.1A 契约量纲, 直传 (旧 ÷100 为误算, 输出缩小 100 倍) */
-    hb_append(buf, sizeof(buf), &pos, "],\"chr\":[");
-    hb_num1(buf, sizeof(buf), &pos, p->ACChrWatt, 75000);
-    hb_num(buf, sizeof(buf), &pos, p->ACChrVA, 75000);
-    hb_num(buf, sizeof(buf), &pos, p->ACChrCurr, 1500);
-    /* bat[5]: 电压≤7000 (0.01V) SOC≤100 电流±1500 (0.1A; 旧 ARM 0.01A 补偿
-       模式 ÷10); 充/放功率 1W ×10→0.1W 界 75000 (补偿模式) */
-    hb_append(buf, sizeof(buf), &pos, "],\"bat\":[");
-    hb_num1(buf, sizeof(buf), &pos, p->BatVolt, 7000);
-    hb_num(buf, sizeof(buf), &pos, p->BatterySOC, 100);
-    hb_num_i(buf, sizeof(buf), &pos, bat_curr, -1500, 1500);
-    hb_num(buf, sizeof(buf), &pos, hb_units_x10(units, p->BatChrWatt), 75000);
-    hb_num(buf, sizeof(buf), &pos, hb_units_x10(units, p->BatDisChrWatt), 75000);
-    /* eng[14]: 能量统计 (0.1kWh) 暂不设限, 固件侧透传 */
-    hb_append(buf, sizeof(buf), &pos,
-              "],\"eng\":[%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
-              (unsigned long)p->EGen_today, (unsigned long)p->EGen_total,
-              (unsigned long)p->Epv_today, (unsigned long)p->Epv_total,
-              (unsigned long)p->Eac_chrToday, (unsigned long)p->Eac_chrTotal,
-              (unsigned long)p->Ebat_dischrToday, (unsigned long)p->Ebat_dischrTotal,
-              (unsigned long)p->Ebat_chrToday, (unsigned long)p->Ebat_chrTotal,
-              (unsigned long)p->Eac_dischrToday, (unsigned long)p->Eac_dischrTotal,
-              (unsigned long)p->Eop_dischrToday, (unsigned long)p->Eop_dischrTotal);
-    /* fan[2]: 转速 ≤100 (新版 ARM 两字段固定 0; 之前看到的 90/100 是错位的
-       LoadPercent) */
-    hb_append(buf, sizeof(buf), &pos, "],\"fan\":[");
-    hb_num1(buf, sizeof(buf), &pos, p->MpptFanSpeed, 100);
-    hb_num(buf, sizeof(buf), &pos, p->InvFanSpeed, 100);
-    /* diag[3]: InvCurr ARM 未赋值 (随机) → null; ParaChgCurr≤600 (raw);
-       WorkTimeTotal u32 全域不设限 */
-    hb_append(buf, sizeof(buf), &pos, "],\"diag\":[");
-#if ARM_UNSUPPORTED_FIELDS_IMPLEMENTED
-    /* 量纲未见说明, 按 ARM 原值发布 (界 = 服务器 0-100A @0.1A), 待厂家确认 */
-    hb_num1(buf, sizeof(buf), &pos, p->InvCurr, 1000);
-#else
-    hb_append(buf, sizeof(buf), &pos, "null");
-#endif
-    hb_num(buf, sizeof(buf), &pos, p->ParaChgCurr, 600);
-    hb_append(buf, sizeof(buf), &pos, ",%lu", (unsigned long)p->WorkTimeTotal);
-    /* sock[3]: ARM 未实现并机/插座, 读数为未初始化内存 → null (见函数头注释);
-       实现后按位掩码直传 (u16 全域, 服务器 ranged 0-2^16, 无需量程护栏) */
-    hb_append(buf, sizeof(buf), &pos, "],\"sock\":[");
-#if ARM_UNSUPPORTED_FIELDS_IMPLEMENTED
-    hb_append(buf, sizeof(buf), &pos, "%u,%u,%u]}",
-              (unsigned)p->PairedSocket, (unsigned)p->OnlineSocket,
-              (unsigned)p->OnSocket);
-#else
-    hb_append(buf, sizeof(buf), &pos, "null,null,null]}");
-#endif
+
+    hb_append(buf, sizeof(buf), &pos, "{\"run\":[");
+    for (int i = 0; i < RUN_PARAM_WORDS; i++) {
+        hb_append(buf, sizeof(buf), &pos, i ? ",%u" : "%u", (unsigned)w[i]);
+    }
+    hb_append(buf, sizeof(buf), &pos, "]}");
 
     if (pos >= sizeof(buf)) {
         ESP_LOGE(TAG, "heartbeat payload too large (%u)", (unsigned)pos);
         return;
     }
     buf[pos] = '\0';
-    mqtt_publish(TOPIC_HEARTBEAT, buf, 0, 1, 0);
-    ESP_LOGI(TAG, "heartbeat published (%d bytes)", (int)pos);
+    mqtt_publish_heartbeat_raw(TOPIC_HEARTBEAT, buf, (int)pos);
+    ESP_LOGI(TAG, "heartbeat published (%d bytes, raw run struct)", (int)pos);
 }
 
 /* ---- BLE 通道遥测（核心子集, 对齐协议 §6.1 + App InverterRealtime.fromJson） ---- */
@@ -412,15 +261,25 @@ static void publish_ble_telemetry(const RunParamDef *p)
         snprintf(updated_at, sizeof(updated_at), "1970-01-01T00:00:00Z");
     }
 
-    /* 带符号电池电流 (0.01A, 新版 ARM 偏大 10×): bit3=Discharge → 负 */
+    /* 带符号电池电流 (struct 0.1A 直传; 下方显示层 ×10 转 0.01A 基准):
+       bit3=Discharge → 负 */
     int bat_curr = (p->SysStatus & 0x08)
                        ? -(int)p->BatDischgCurr
                        : (p->SysStatus & 0x04) ? (int)p->BatChgCurr : 0;
-    /* PV 电流 (0.1A) = Ppv(1W) ×10 / Vpv1(1V)；Vpv1==0 时置 0 */
-    unsigned pv_curr = (p->Vpv1 > 0) ? (unsigned)((uint32_t)p->Ppv * 10 / p->Vpv1) : 0;
-    /* 负载电流 0.1A: ARM OutputCurr = IloadA×100, 与 heartbeat ac[4] 同按
-       ÷1000 → 0.1A */
-    unsigned out_curr_a10 = (unsigned)(p->OutputCurr / 1000);
+    /* PV 电压 <60V 视为无输入（残压）归 0, 与服务端 pvVoltageNormalized 一致:
+       无 PV 接入时 ARM 上送 ~11V 感应电压, 直接展示会被误读为"有 PV 输入" */
+    unsigned pv_v = (p->Vpv1 < 60U) ? 0U : (unsigned)p->Vpv1;
+    /* PV 电流 (0.1A) = Ppv(1W) ×10 / Vpv1(1V)；归零后置 0 */
+    unsigned pv_curr = (pv_v > 0) ? (unsigned)((uint32_t)p->Ppv * 10 / pv_v) : 0;
+    /* 负载电流 0.1A: ARM OutputCurr 0.01A ÷10 (与 heartbeat ac[4] 同系数) */
+    unsigned out_curr_a10 = (unsigned)(hb_clamp0(p->OutputCurr) / 10);
+    /* App(10) 结构体原值 → 显示基准: 负载百分比已是 0.1% (DSP PloadPercent×10);
+       AC 频率 0.1Hz ×10→0.01Hz (printf 两位小数); 电池电压 0.1V×10→0.01V;
+       电池电流 0.1A×10→0.01A (printf 保持历史显示分辨率) */
+    unsigned load_pct_a10   = (unsigned)p->LoadPercent;
+    unsigned ac_freq_cHz    = (unsigned)p->ACOutputFreq * 10;
+    unsigned bat_v_centi    = (unsigned)p->BatVolt * 10;
+    int      bat_curr_centi = bat_curr * 10;
 
     char buf[600];
     int n = snprintf(buf, sizeof(buf),
@@ -437,21 +296,21 @@ static void publish_ble_telemetry(const RunParamDef *p)
         "\"daily_load\":%u.%u,\"total_load\":%u.%u,\"runtime_hours\":0}}",
         g_device_sn, updated_at,
         (unsigned long)p->OutputWatt,
-        (unsigned)(p->ACOutputVolt / 10), (unsigned)(p->ACOutputVolt % 10),
+        (unsigned)p->ACOutputVolt, 0U,   /* VloadA 为 1V 单位 (UsartDsp.c:290 "单位1V") */
         out_curr_a10 / 10, out_curr_a10 % 10,
         (unsigned long)p->OutputWatt,
-        (unsigned)(p->ACOutputFreq / 100), (unsigned)(p->ACOutputFreq % 100),
-        (unsigned)(p->LoadPercent / 10), (unsigned)(p->LoadPercent % 10),
+        (unsigned)(ac_freq_cHz / 100), (unsigned)(ac_freq_cHz % 100),
+        (load_pct_a10 / 10), (load_pct_a10 % 10),
         (unsigned)p->BatterySOC,
-        (unsigned)(p->BatVolt / 100), (unsigned)(p->BatVolt % 100),
-        (int)(bat_curr / 100),
-        (int)(((bat_curr < 0 ? -bat_curr : bat_curr) / 10) % 10),
+        (unsigned)(bat_v_centi / 100), (unsigned)(bat_v_centi % 100),
+        (int)(bat_curr_centi / 100),
+        (int)(((bat_curr_centi < 0 ? -bat_curr_centi : bat_curr_centi) / 10) % 10),
         (long)((p->SysStatus & 0x08) ? -(long)p->BatDisChrWatt
                                      : (long)p->BatChrWatt),
         (p->SysStatus & 0x02) ? "fault"
             : (p->SysStatus & 0x08) ? "discharging"
             : (p->SysStatus & 0x04) ? "charging" : "standby",
-        (unsigned)p->Vpv1, 0U,
+        (unsigned)pv_v, 0U,
         (unsigned)(pv_curr / 10), (unsigned)(pv_curr % 10),
         (unsigned long)p->Ppv,
         "offgrid", (unsigned long)p->FaultValue,
@@ -656,11 +515,12 @@ typedef struct {
 
 static void check_alarm(const RunParamDef *p)
 {
-    /* 告警位量程护栏: L10 告警/故障码为低位位掩码。新版 ARM Warning 为 u64,
-     * 但 bit16~31 未初始化随机、bit32~63 恒 0, 仅 bit0~15 有效 → 高 48 位非全 0
-     * 视为未初始化内存垃圾, 跳过该项判断且不刷新基线, 防止垃圾值触发误告警
-     * (与 heartbeat 发布 &0xFFFF 屏蔽一致); FaultValue 仅低 16 位有效, 判断不变;
-     * 合法值行为与原来完全一致。BmsWarning 为 u16 全域, 不设护栏。 */
+    /* 告警位量程护栏: L10 告警/故障码为低位位掩码。App(10) Warning 为 u64,
+     * bit0~15 = warningCode1 (bit0 合并风扇告警), bit16+ 已由 ARM memset 恒 0;
+     * 高 48 位非全 0 仍视为异常值, 跳过该项判断且不刷新基线, 防止垃圾位触发
+     * 误告警 (与 heartbeat 发布 &0xFFFF 屏蔽一致, 作兜底保留); FaultValue 仅
+     * 低 16 位有效, 判断不变; 合法值行为与原来完全一致。BmsWarning 为 u16
+     * 全域, 不设护栏。 */
     bool fault_ok = (p->FaultValue >> 16) == 0;
     bool warn_ok  = (p->Warning >> 16) == 0;
 
@@ -753,7 +613,6 @@ void telemetry_init(void)
     s_last_bms = 0;
     s_arm_fail_count = 0;
     s_fault_reported = false;
-    s_units_logged = -1;   /* 下次发布重新打印量纲策略 */
     ESP_LOGI(TAG, "init done");
 }
 
@@ -773,7 +632,7 @@ void telemetry_on_mqtt_connected(void)
                 s_fault_reported = false;
                 publish_arm_recovery_alarm();
             }
-            publish_heartbeat(&g_run_param);
+            if (!s_quiet) publish_heartbeat(&g_run_param);
             s_last_hb_ms = now;
             s_arm_fail_count = 0;
         }
@@ -902,7 +761,7 @@ void telemetry_tick(void)
             }
         }
         if (arm_ok) {
-            publish_heartbeat(&rp);
+            if (!s_quiet) publish_heartbeat(&rp);
             publish_ble_telemetry(&rp);   /* BLE 通道遥测推送（核心子集） */
         } else if (!arm_reachable) {
             s_arm_fail_count++;
