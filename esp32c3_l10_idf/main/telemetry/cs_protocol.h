@@ -28,7 +28,11 @@ extern "C" {
 #define CS_CMD_WRITE_R_W_DATA   0x05
 #define CS_CMD_READ_R_DATA      0x06
 #define CS_CMD_CTRLCMD          0x07
+#define CS_CMD_READ_BATTSUM     0x08
 #define CS_CMD_READ_TEST_RUNPARAM 0x14
+
+#define CS_BATTSUM_LAYOUT       0
+#define CS_BATTSUM_DATA_SIZE    100
 
 /* ---- 帧常量 (ComProtocol.h) ---- */
 #define CS_HEADER           0xAA
@@ -107,6 +111,10 @@ size_t cs_frame_send(uint8_t *out, uint8_t cmd, uint16_t param1,
 int cs_frame_parse(const uint8_t *buf, size_t len,
                    uint8_t *cmd, uint16_t *param1, uint16_t *param2,
                    const uint8_t **data);
+
+/* Validate a decrypted layout-0 response, including its exact payload size. */
+int cs_frame_parse_bms_summary(const uint8_t *buf, size_t len,
+                              const uint8_t **data);
 
 /* 接收解密: 两次 CBC 解密 (FrameKey → 尾部 8B 重建 TempKey → TempKey), 返回 0=成功 */
 int cs_decrypt_rx(uint8_t *buf, size_t len);

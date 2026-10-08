@@ -41,6 +41,8 @@
 extern char     g_device_sn[SN_MAX_LEN];
 extern int      mqtt_publish(const char *sub_topic, const char *data, int len,
                              int qos, int retain);
+extern int      mqtt_publish_heartbeat_raw(const char *sub_topic,
+                                          const char *data, int len);
 extern bool     mqtt_is_connected(void);
 extern int64_t  esp_timer_get_time(void);
 extern uint32_t ble_ct_now(void);
@@ -51,6 +53,12 @@ static uint32_t heap_free_bytes(void) { return 0; }
 static uint32_t heap_max_block(void) { return 0; }
 static uint32_t heap_alloc_blocks(void) { return 0; }
 static uint32_t heap_min_free(void) { return 0; }
+#ifdef _WIN32
+static struct tm *gmtime_r(const time_t *timer, struct tm *result)
+{
+    return gmtime_s(result, timer) == 0 ? result : NULL;
+}
+#endif
 #else
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -162,6 +170,14 @@ static uint32_t now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+/* Read alongside the run snapshot while holding the parameter mutex. */
+static bool run_is_fresh(void)
+{
+    uint64_t now = (uint64_t)(esp_timer_get_time() / 1000);
+    return g_arm_stat.poll_count > 0 &&
+           (now - g_arm_stat.last_run_ms) < 240000U;
+}
+
 /* ---- 版本号格式化: u16 0x0102 → "V1.2" ---- */
 static void fmt_ver(char *buf, size_t len, uint16_t ver)
 {
@@ -222,17 +238,31 @@ static uint32_t hb_clamp0(int32_t v)
  * 动机: 量纲知识集中到服务端一处 —— DSP/ARM 量纲调整只改服务端, 固件不再
  * 承担换算风险 (09-21/09-22 两次 ESP 侧换算结论错误均源于此)。
  * 信封版本 3 且不走离线缓存 (原因见 mqtt_publish_heartbeat_raw 注释)。 */
-static void publish_heartbeat(const RunParamDef *p)
+static void publish_heartbeat(const RunParamDef *p, const arm_bms_summary_t *bms)
 {
     const uint16_t *w = (const uint16_t *)p;
-    static char buf[640];   /* 87 值 × 最多 6B ≈ 530B; 静态缓冲避免任务栈压力 */
+    static char buf[1024]; /* run <= 531B; BMS bytes/metadata <= 460B. */
     size_t pos = 0;
 
     hb_append(buf, sizeof(buf), &pos, "{\"run\":[");
     for (int i = 0; i < RUN_PARAM_WORDS; i++) {
         hb_append(buf, sizeof(buf), &pos, i ? ",%u" : "%u", (unsigned)w[i]);
     }
-    hb_append(buf, sizeof(buf), &pos, "]}");
+    hb_append(buf, sizeof(buf), &pos, "]");
+    if (bms->acquired) {
+        uint64_t age = (uint64_t)(esp_timer_get_time() / 1000) - bms->received_ms;
+        /* A stale snapshot must never become fresh after the 32-bit uptime wraps. */
+        uint32_t age_ms = age > UINT32_MAX ? UINT32_MAX : (uint32_t)age;
+        hb_append(buf, sizeof(buf), &pos,
+                  ",\"bms_summary\":{\"layout\":%u,\"bytes\":[",
+                  (unsigned)CS_BATTSUM_LAYOUT);
+        for (int i = 0; i < CS_BATTSUM_DATA_SIZE; i++) {
+            hb_append(buf, sizeof(buf), &pos, i ? ",%u" : "%u",
+                      (unsigned)bms->bytes[i]);
+        }
+        hb_append(buf, sizeof(buf), &pos, "],\"age_ms\":%" PRIu32 "}", age_ms);
+    }
+    hb_append(buf, sizeof(buf), &pos, "}");
 
     if (pos >= sizeof(buf)) {
         ESP_LOGE(TAG, "heartbeat payload too large (%u)", (unsigned)pos);
@@ -627,12 +657,12 @@ void telemetry_on_mqtt_connected(void)
         if (g_arm_stat.last_info_ms != 0) {
             publish_info(&g_only_read);
         }
-        if (g_arm_stat.poll_count > 0) {
+        if (run_is_fresh()) {
             if (s_fault_reported) {
                 s_fault_reported = false;
                 publish_arm_recovery_alarm();
             }
-            if (!s_quiet) publish_heartbeat(&g_run_param);
+            if (!s_quiet) publish_heartbeat(&g_run_param, &g_bms_summary);
             s_last_hb_ms = now;
             s_arm_fail_count = 0;
         }
@@ -704,6 +734,7 @@ void telemetry_tick(void)
     s_now_ms = now_ms();
 
     RunParamDef rp;
+    arm_bms_summary_t bms = {0};
     bool have_run = false;
 
     if (arm_poll_take_param()) {
@@ -719,8 +750,9 @@ void telemetry_tick(void)
             s_config_requested = false;
             publish_config(g_ctrl_param, g_read_write.CtrlParamAlterTime);
         }
-        if (g_arm_stat.poll_count > 0) {
+        if (run_is_fresh()) {
             rp = g_run_param;
+            bms = g_bms_summary;
             have_run = true;
         }
         arm_poll_give_param();
@@ -735,7 +767,7 @@ void telemetry_tick(void)
     /* ARM 连通判定: 最近一次应答在 240s 内 (2×120s 断线超时) */
     bool arm_reachable = g_arm_stat.last_rx_ms != 0 &&
                          (s_now_ms - g_arm_stat.last_rx_ms) < 240000;
-    /* 有 RUNPARAM 数据 + ARM 可达 → 可上报 heartbeat */
+    /* Only fresh 0x03 data can supply run readings; other replies keep the link alive. */
     bool arm_ok = have_run && arm_reachable;
 
     /* 调试模式到期: 自动恢复默认周期 (重启同样恢复默认, 调试开关不持久化) */
@@ -761,7 +793,7 @@ void telemetry_tick(void)
             }
         }
         if (arm_ok) {
-            if (!s_quiet) publish_heartbeat(&rp);
+            if (!s_quiet) publish_heartbeat(&rp, &bms);
             publish_ble_telemetry(&rp);   /* BLE 通道遥测推送（核心子集） */
         } else if (!arm_reachable) {
             s_arm_fail_count++;

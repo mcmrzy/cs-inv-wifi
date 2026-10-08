@@ -384,3 +384,26 @@ int cs_frame_parse(const uint8_t *buf, size_t len,
     if (data)     *data = buf + CS_OFF_DATA;
     return 0;
 }
+
+int cs_frame_parse_bms_summary(const uint8_t *buf, size_t len,
+                              const uint8_t **data)
+{
+    uint8_t cmd;
+    uint16_t param1, param2;
+    const uint16_t expected_cmdlen = CS_OFF_DATA + CS_BATTSUM_DATA_SIZE;
+    const size_t expected_len = expected_cmdlen + 4 + 8; /* CRC + key tail */
+    if (len != expected_len) {
+        return -1;
+    }
+    int result = cs_frame_parse(buf, len, &cmd, &param1, &param2, data);
+    if (result != 0) {
+        return result;
+    }
+    uint16_t cmdlen = (uint16_t)(buf[CS_OFF_CMDLEN] |
+                                (buf[CS_OFF_CMDLEN + 1] << 8));
+    if (cmd != CS_CMD_READ_BATTSUM || param1 != CS_BATTSUM_LAYOUT ||
+        param2 != CS_BATTSUM_DATA_SIZE || cmdlen != expected_cmdlen) {
+        return -1;
+    }
+    return 0;
+}

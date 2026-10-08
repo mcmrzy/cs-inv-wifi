@@ -11,6 +11,9 @@
  *   - 接收线程完成 PPP 解封装 → 双重解密 → 帧解析 → 数据分发
  */
 #include <string.h>
+#ifdef HOST_TEST
+#include "arm_poll_platform.h"
+#else
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -18,12 +21,13 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_log.h"
-#include "arm_poll.h"
-#include "cs_protocol.h"
 #include "config.h"
 #include "mqtt_handler.h"
 #include "nvs_storage.h"
 #include "arm_ota.h"
+#endif
+#include "arm_poll.h"
+#include "cs_protocol.h"
 
 static const char *TAG = "ARMPOLL";
 
@@ -40,6 +44,7 @@ static const char *TAG = "ARMPOLL";
 
 /* ---- 全局共享参数 (rx 任务写入, 主循环读取, mutex 保护) ---- */
 RunParamDef g_run_param;
+arm_bms_summary_t g_bms_summary;
 OnlyReadDataDef g_only_read;
 ReadWiteDataDef g_read_write;
 uint16_t g_ctrl_param[CTRL_PARAM_COUNT];
@@ -72,6 +77,7 @@ static uint16_t s_wait_param2;
 static uint32_t s_wait_start_ms;
 static uint32_t s_last_info_req_ms;     /* 0x06 只读信息上次发出时刻 */
 static uint32_t s_last_run_req_ms;      /* 0x03 运行参数上次发出时刻 */
+static uint32_t s_last_bms_req_ms;
 static uint32_t s_last_utc_ms;         /* 最近成功校时时刻 */
 static uint32_t s_now_ms;
 
@@ -260,7 +266,8 @@ static void handle_frame(uint8_t *raw, size_t len)
     uint8_t cmd;
     uint16_t param1, param2;
     const uint8_t *data;
-    uint32_t now = now_ms();
+    uint64_t received_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    uint32_t now = (uint32_t)received_ms;
 
     if (cs_decrypt_rx(raw, len) != 0) {
         g_arm_stat.err_count++;
@@ -268,7 +275,9 @@ static void handle_frame(uint8_t *raw, size_t len)
         ESP_LOG_BUFFER_HEX(TAG, raw, len);
         return;
     }
-    if (cs_frame_parse(raw, len, &cmd, &param1, &param2, &data) != 0) {
+    if (cs_frame_parse(raw, len, &cmd, &param1, &param2, &data) != 0 ||
+        (cmd == CS_CMD_READ_BATTSUM &&
+         cs_frame_parse_bms_summary(raw, len, &data) != 0)) {
         g_arm_stat.err_count++;
         ESP_LOGW(TAG, "rx parse fail len=%u, decrypted:", len);
         ESP_LOG_BUFFER_HEX(TAG, raw, len);
@@ -288,6 +297,7 @@ static void handle_frame(uint8_t *raw, size_t len)
     case CS_CMD_READ_RUNPARAM:            /* 0x03 运行参数应答 */
         if (param2 == RUN_PARAM_SIZE && len >= 8 + RUN_PARAM_SIZE) {
             memcpy(&g_run_param, data, RUN_PARAM_SIZE);
+            g_arm_stat.last_run_ms = received_ms;
             dump_fields("RUNPARAM", RUN_PARAM_START_INDEX,
                         (const uint8_t *)&g_run_param, s_runparam_fields,
                         (int)(sizeof(s_runparam_fields) / sizeof(s_runparam_fields[0])));
@@ -300,6 +310,14 @@ static void handle_frame(uint8_t *raw, size_t len)
             ESP_LOGW(TAG, "RUNPARAM rejected: param2=%u(expected %u) len=%u(need %u)",
                      param2, (unsigned)RUN_PARAM_SIZE, (unsigned)len,
                      (unsigned)(8 + RUN_PARAM_SIZE));
+        }
+        break;
+    case CS_CMD_READ_BATTSUM:
+        memcpy(g_bms_summary.bytes, data, CS_BATTSUM_DATA_SIZE);
+        g_bms_summary.received_ms = received_ms;
+        g_bms_summary.acquired = true;
+        if (s_wait_resp && s_wait_cmd == cmd) {
+            s_wait_resp = false;
         }
         break;
     case CS_CMD_READ_R_DATA:              /* 0x06 只读信息应答 */
@@ -410,6 +428,7 @@ void arm_poll_init(void)
     cs_ppp_rx_init(&s_ppp_rx);
     arm_ota_rx_reset();
     memset(&g_run_param, 0, sizeof(g_run_param));
+    memset(&g_bms_summary, 0, sizeof(g_bms_summary));
     memset(&g_only_read, 0, sizeof(g_only_read));
     memset(&g_read_write, 0, sizeof(g_read_write));
     memset(&g_arm_stat, 0, sizeof(g_arm_stat));
@@ -418,6 +437,7 @@ void arm_poll_init(void)
     s_wait_resp = false;
     s_last_info_req_ms = 0;
     s_last_run_req_ms = 0;
+    s_last_bms_req_ms = 0;
     s_last_utc_ms = 0;
     s_rx_active = false;
     s_write_pending.active = false;
@@ -612,6 +632,9 @@ void arm_poll_tick(void)
             s_last_run_req_ms = s_now_ms;
             send_frame_cmd(CS_CMD_READ_RUNPARAM, RUN_PARAM_START_INDEX,
                            RUN_PARAM_SIZE, NULL);
+        } else if ((s_now_ms - s_last_bms_req_ms) >= ARM_POLL_INTERVAL_MS) {
+            s_last_bms_req_ms = s_now_ms;
+            send_frame_cmd(CS_CMD_READ_BATTSUM, 0, 0, NULL);
         }
     }
 }

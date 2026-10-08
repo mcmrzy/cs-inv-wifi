@@ -86,6 +86,31 @@ if(MSVC)
 endif()
 add_test(NAME cs_protocol_frame COMMAND test_cs_protocol_frame)
 
+add_executable(test_telemetry_bms test_telemetry_bms.c
+  ../../main/telemetry/telemetry.c ../../main/mqtt/mqtt_envelope.c
+  "${CJSON_DIR}/cJSON.c")
+target_include_directories(test_telemetry_bms PRIVATE
+  ../../main/telemetry ../../main/app ../../main/mqtt "${CJSON_DIR}")
+target_compile_features(test_telemetry_bms PRIVATE c_std_11)
+target_compile_definitions(test_telemetry_bms PRIVATE HOST_TEST)
+if(MSVC)
+  target_compile_options(test_telemetry_bms PRIVATE /utf-8)
+else()
+  target_link_libraries(test_telemetry_bms PRIVATE m)
+endif()
+add_test(NAME telemetry_bms COMMAND test_telemetry_bms)
+
+add_executable(test_arm_bms_poll test_arm_bms_poll.c
+  ../../main/telemetry/cs_protocol.c)
+target_include_directories(test_arm_bms_poll PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}" ../../main/telemetry)
+target_compile_features(test_arm_bms_poll PRIVATE c_std_11)
+target_compile_definitions(test_arm_bms_poll PRIVATE HOST_TEST)
+if(MSVC)
+  target_compile_options(test_arm_bms_poll PRIVATE /utf-8)
+endif()
+add_test(NAME arm_bms_poll COMMAND test_arm_bms_poll)
+
 add_executable(test_arm_ota_workspace_memory test_arm_ota_workspace_memory.c)
 target_compile_definitions(test_arm_ota_workspace_memory PRIVATE
   ARM_OTA_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../../main/ota/arm_ota.c"

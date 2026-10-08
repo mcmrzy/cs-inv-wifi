@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "arm_param.h"
+#include "cs_protocol.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,15 @@ extern "C" {
 
 /* 最近一次运行参数 (解析后, 主循环共享) */
 extern RunParamDef g_run_param;
+
+typedef struct {
+    uint8_t bytes[CS_BATTSUM_DATA_SIZE];
+    uint64_t received_ms; /* Monotonic uptime; independent of ARM/run freshness. */
+    bool acquired;
+} arm_bms_summary_t;
+
+/* Raw BMS snapshot, protected by the same parameter mutex. */
+extern arm_bms_summary_t g_bms_summary;
 
 /* 最近一次只读信息 */
 extern OnlyReadDataDef g_only_read;
@@ -40,6 +50,7 @@ extern uint16_t g_ctrl_param[CTRL_PARAM_COUNT];
 typedef struct {
     bool    connected;      /* 最近 120s 内有有效应答 */
     uint32_t last_rx_ms;    /* 最近一次收到有效帧的时刻 */
+    uint64_t last_run_ms;   /* Monotonic receipt time of accepted 0x03 data only. */
     uint32_t poll_count;    /* 成功轮询次数 */
     uint32_t err_count;     /* 连续失败次数 */
     uint32_t ctrl_err;      /* 写命令 err!=0 次数 */
