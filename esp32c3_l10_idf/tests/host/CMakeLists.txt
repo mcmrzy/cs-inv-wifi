@@ -141,3 +141,7 @@ add_executable(test_ota_transfer_policy test_ota_transfer_policy.c
   ../../main/ota/ota_transfer_policy.c)
 target_include_directories(test_ota_transfer_policy PRIVATE ../../main/ota)
 add_test(NAME ota_transfer_policy COMMAND test_ota_transfer_policy)
+
+add_executable(test_ota_stage_progress test_ota_stage_progress.c)
+target_include_directories(test_ota_stage_progress PRIVATE ../../main/ota)
+add_test(NAME ota_stage_progress COMMAND test_ota_stage_progress)

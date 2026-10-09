@@ -28,6 +28,8 @@ static char g_request_version[32];
 static char g_request_target[8];
 static OtaState g_last_published_state = OTA_STATE_IDLE;
 static uint8_t g_last_published_progress;
+static char g_last_published_stage[16];
+static char g_last_published_task[64];
 
 /* ---- 命令结构 (与云端协议一致) ---- */
 typedef struct {
@@ -227,6 +229,9 @@ static void publish_snapshot_json(const OtaSnapshot *snapshot,
     json_str("source", ota_source_name(snapshot->source));
     json_str("state", ota_state_name(snapshot->state));
     json_num("progress", (int)snapshot->progress);
+    json_str("stage", snapshot->stage);
+    json_num("stage_progress", (int)snapshot->stage_progress);
+    json_num("overall_progress", (int)snapshot->overall_progress);
     json_num("received", (int)snapshot->received);
     json_num("total", (int)snapshot->total);
     json_str("code", snapshot->error_code);
@@ -250,11 +255,15 @@ static void ota_status_observer(const OtaSnapshot *snapshot)
     /* 节流状态与构建缓冲同属一个临界区: 并发进入时"先比较后写入"会让同一条
      * 状态被重复发布, 或让该发的状态变化被漏掉(例如 downloading@1 被吞)。 */
     if (!json_lock()) return;
-    const bool state_changed = snapshot->state != g_last_published_state;
-    const bool progress_due = snapshot->progress >= g_last_published_progress + 5;
-    if (state_changed || progress_due || snapshot->progress == 100) {
+    const bool state_changed = snapshot->state != g_last_published_state ||
+        strcmp(snapshot->stage, g_last_published_stage) != 0 ||
+        strcmp(snapshot->task_id, g_last_published_task) != 0;
+    const bool progress_due = snapshot->stage_progress != g_last_published_progress;
+    if (state_changed || progress_due) {
         g_last_published_state = snapshot->state;
-        g_last_published_progress = snapshot->progress;
+        g_last_published_progress = snapshot->stage_progress;
+        strlcpy(g_last_published_stage, snapshot->stage, sizeof(g_last_published_stage));
+        strlcpy(g_last_published_task, snapshot->task_id, sizeof(g_last_published_task));
         publish_snapshot_json(snapshot, NULL);
     }
     json_unlock();
@@ -267,6 +276,8 @@ void mqtt_ota_init(void)
     g_request_target[0] = '\0';
     g_last_published_state = OTA_STATE_IDLE;
     g_last_published_progress = 0;
+    g_last_published_stage[0] = '\0';
+    g_last_published_task[0] = '\0';
     if (!s_json_lock) {
         s_json_lock = xSemaphoreCreateMutex();
         if (!s_json_lock) {

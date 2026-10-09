@@ -1,4 +1,5 @@
 #include "ota_service.h"
+#include "ota_progress.h"
 #include "ota_transfer_policy.h"
 #include "offline_cache.h"
 #include "telemetry.h"
@@ -104,20 +105,29 @@ static void notify_snapshot(const OtaSnapshot* snapshot)
     }
 }
 
-static void update_snapshot(OtaState state, uint8_t progress,
+static void update_snapshot_stage(OtaState state, uint8_t progress,
+                            const char* stage, uint8_t stage_progress,
                             uint32_t received, OtaResult result,
                             const char* message)
 {
     OtaSnapshot copy;
     if (!g_lock || xSemaphoreTake(g_lock, portMAX_DELAY) != pdTRUE) return;
     g_snapshot.state = state;
-    g_snapshot.progress = progress > 100 ? 100 : progress;
+    ota_snapshot_progress(&g_snapshot, stage, stage_progress, progress);
     g_snapshot.received = received;
     strlcpy(g_snapshot.error_code, ota_result_code(result), sizeof(g_snapshot.error_code));
     strlcpy(g_snapshot.message, message ? message : "", sizeof(g_snapshot.message));
     copy = g_snapshot;
     xSemaphoreGive(g_lock);
     notify_snapshot(&copy);
+}
+
+static void update_snapshot(OtaState state, uint8_t progress,
+                            uint32_t received, OtaResult result,
+                            const char* message)
+{
+    const char* stage = state == OTA_STATE_RECEIVING ? "transferring" : ota_state_name(state);
+    update_snapshot_stage(state, progress, stage, progress, received, result, message);
 }
 
 static void release_active(void)
@@ -235,6 +245,8 @@ bool ota_service_init(void)
                     sizeof(g_snapshot.message));
         }
     }
+    ota_snapshot_progress(&g_snapshot, ota_state_name(g_snapshot.state),
+                          g_snapshot.progress, g_snapshot.progress);
     return true;
 }
 
@@ -557,6 +569,7 @@ static OtaResult reserve_manifest(const OtaManifest* manifest)
     g_snapshot.source = manifest->source;
     g_snapshot.target = manifest->target;
     g_snapshot.state = OTA_STATE_ACCEPTED;
+    ota_snapshot_progress(&g_snapshot, "accepted", 0, 0);
     g_snapshot.total = manifest->file_size;
     strlcpy(g_snapshot.error_code, "OK", sizeof(g_snapshot.error_code));
     atomic_store(&g_cancel_requested, false);
@@ -608,6 +621,8 @@ static OtaResult read_and_stage_buffered(const OtaManifest* manifest,
 {
     uint32_t received = 0;
     uint8_t last_progress = 0;
+    update_snapshot(manifest->source == OTA_SOURCE_MQTT ? OTA_STATE_DOWNLOADING : OTA_STATE_RECEIVING,
+                    0, 0, OTA_RESULT_OK, "Receiving firmware");
     int64_t last_idle_trace_ms = 0;
     const int64_t started_ms = esp_timer_get_time() / 1000;
     int64_t last_data_ms = started_ms;
@@ -700,7 +715,9 @@ static OtaResult read_and_stage_buffered(const OtaManifest* manifest,
         const uint8_t progress = (uint8_t)(((uint64_t)received * 100U) / manifest->file_size);
         if (progress != last_progress) {
             last_progress = progress;
-            update_snapshot(manifest->source == OTA_SOURCE_MQTT ? OTA_STATE_DOWNLOADING : OTA_STATE_RECEIVING,
+            update_snapshot_stage(manifest->source == OTA_SOURCE_MQTT ? OTA_STATE_DOWNLOADING : OTA_STATE_RECEIVING,
+                            ota_receiving_overall_progress(manifest->target, progress),
+                            manifest->source == OTA_SOURCE_MQTT ? "downloading" : "transferring",
                             progress, received, OTA_RESULT_OK, "Receiving firmware");
         }
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -713,6 +730,8 @@ static OtaResult read_and_stage_buffered(const OtaManifest* manifest,
         mbedtls_sha256_free(&sha);
         return OTA_RESULT_SIZE_MISMATCH;
     }
+    update_snapshot_stage(OTA_STATE_VERIFYING, ota_receiving_overall_progress(manifest->target, 100), "verifying", 0, received,
+                          OTA_RESULT_OK, "Verifying firmware hash");
     const int hash_result = mbedtls_sha256_finish(&sha, digest);
     mbedtls_sha256_free(&sha);
     if (hash_result != 0) return OTA_RESULT_INTERNAL;
@@ -720,6 +739,8 @@ static OtaResult read_and_stage_buffered(const OtaManifest* manifest,
     /* manifest 未提供 sha256 时跳过比对（此时仅依赖传输层完整性） */
     if (manifest->sha256[0] &&
         strcmp(digest_hex, manifest->sha256) != 0) return OTA_RESULT_HASH_MISMATCH;
+    update_snapshot_stage(OTA_STATE_VERIFYING, ota_receiving_overall_progress(manifest->target, 100), "verifying", 100, received,
+                          OTA_RESULT_OK, "Firmware hash verified");
     return OTA_RESULT_OK;
 }
 
@@ -790,9 +811,13 @@ static OtaResult install_esp(const OtaManifest* manifest,
     }
 
     if (owns_quiet_window) ota_quiet_end();
-    update_snapshot(OTA_STATE_VERIFYING, 100, manifest->file_size,
+    update_snapshot_stage(OTA_STATE_VERIFYING, 96, "verifying", 0, manifest->file_size,
                     OTA_RESULT_OK, "Verifying ESP image");
     if (esp_ota_end(handle) != ESP_OK) return OTA_RESULT_FLASH_WRITE_FAILED;
+    update_snapshot_stage(OTA_STATE_VERIFYING, 97, "verifying", 100, manifest->file_size,
+                          OTA_RESULT_OK, "ESP image verified");
+    update_snapshot_stage(OTA_STATE_INSTALLING, 98, "installing", 0, manifest->file_size,
+                          OTA_RESULT_OK, "Selecting ESP image");
 
     StorageOtaPending pending = {
         .security_version = manifest->security_version,
@@ -807,7 +832,9 @@ static OtaResult install_esp(const OtaManifest* manifest,
         storage_clear_ota_pending();
         return OTA_RESULT_FLASH_WRITE_FAILED;
     }
-    update_snapshot(OTA_STATE_REBOOTING, 100, manifest->file_size,
+    update_snapshot_stage(OTA_STATE_INSTALLING, 99, "installing", 100, manifest->file_size,
+                          OTA_RESULT_OK, "ESP image selected");
+    update_snapshot_stage(OTA_STATE_REBOOTING, 99, "rebooting", 0, manifest->file_size,
                     OTA_RESULT_OK, "ESP update ready; rebooting");
     return OTA_RESULT_OK;
 }
@@ -820,8 +847,11 @@ static void arm_progress(ArmOtaState state, int percent, const char* message)
         return;
     }
     if (state == ARM_OTA_SENDING || state == ARM_OTA_WAIT_ACK || state == ARM_OTA_VERIFYING) {
-        const uint8_t progress = (uint8_t)(70 + (percent * 29) / 100);
-        update_snapshot(OTA_STATE_INSTALLING, progress, g_manifest.file_size,
+        const uint8_t progress = state == ARM_OTA_VERIFYING
+            ? 99 : ota_collector_overall_progress(percent);
+        update_snapshot_stage(OTA_STATE_INSTALLING, progress,
+                        state == ARM_OTA_VERIFYING ? "verifying" : "transferring",
+                        ota_progress_clamp(percent), g_manifest.file_size,
                         OTA_RESULT_OK, message);
     }
 }
@@ -870,7 +900,7 @@ static OtaResult install_collector_iap_session(const OtaManifest* manifest,
         return cancel_requested() ? OTA_RESULT_OK : result;
     }
 
-    update_snapshot(OTA_STATE_INSTALLING, 70, manifest->file_size,
+    update_snapshot_stage(OTA_STATE_INSTALLING, 70, "installing", 0, manifest->file_size,
                     OTA_RESULT_OK, "Installing collector IAP image");
     arm_ota_set_callback(arm_progress);
     arm_ota_set_cancel_check(cancel_requested);
@@ -898,6 +928,8 @@ static OtaResult install_collector_iap_session(const OtaManifest* manifest,
         const ArmOtaState state = arm_ota_get_state();
         if (state == ARM_OTA_DONE) {
             arm_ota_set_callback(NULL);
+            update_snapshot_stage(OTA_STATE_INSTALLING, 99, "installing", 0, manifest->file_size,
+                                  OTA_RESULT_OK, "Confirming collector image");
             /* security_version==0 表示本次不含安全版本(我们推送的固件都是 0),
              * 此时 storage_* 会返回 false —— 那是"无需持久化", 不是失败。
              * 之前把它当失败, 导致传输/校验全部成功的 ARM 升级被上报成
@@ -909,6 +941,8 @@ static OtaResult install_collector_iap_session(const OtaManifest* manifest,
                 restore_wifi_ps();
                 return OTA_RESULT_PERSIST_FAILED;
             }
+            update_snapshot_stage(OTA_STATE_INSTALLING, 99, "installing", 100, manifest->file_size,
+                                  OTA_RESULT_OK, "Collector image confirmed");
             update_snapshot(OTA_STATE_SUCCEEDED, 100, manifest->file_size,
                             OTA_RESULT_OK, "Collector IAP OTA completed");
             restore_wifi_ps();

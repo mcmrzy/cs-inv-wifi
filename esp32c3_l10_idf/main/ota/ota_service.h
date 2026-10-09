@@ -79,6 +79,9 @@ typedef struct {
     OtaTarget target;
     OtaState state;
     uint8_t progress;
+    char stage[16];
+    uint8_t stage_progress;
+    uint8_t overall_progress;
     uint32_t received;
     uint32_t total;
     char version[32];
