@@ -8,6 +8,7 @@
 #include "arm_ota.h"
 #include "offline_cache.h"
 #include "ble_prov.h"
+#include "ble_ota.h"
 
 #include "nvs_flash.h"
 #include "esp_wifi.h"
@@ -242,6 +243,11 @@ void app_main(void)
     ble_prov_set_callback(on_ble_provision_done);
     if (ble_prov_start(g_device_sn, FIRMWARE_VERSION)) {
         ESP_LOGW(TAG, "BLE advertising started: %s", ble_prov_get_service_name());
+        if (ble_ota_init()) {
+            ble_prov_set_conn_callback(ble_ota_on_conn_change);
+        } else {
+            ESP_LOGE(TAG, "BLE OTA service init failed");
+        }
     } else {
         ESP_LOGE(TAG, "BLE advertising start failed");
     }

@@ -1,0 +1,36 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "state_machine.c"
+        "uart_protocol.c"
+        "mqtt_handler.c"
+        "ota_service.c"
+        "arm_ota.c"
+        "offline_cache.c"
+        "nvs_storage.c"
+        "ap_api_server.c"
+        "ble_ota.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_common
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_timer
+        efuse
+        spi_flash
+        mqtt
+        ble_prov
+        esp_driver_uart
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_http_client
+        esp_http_server
+        app_update
+        json
+        esp_https_ota
+        spiffs
+        mbedtls
+        monocypher
+)

@@ -1,6 +1,8 @@
 {
   "idf.currentSetup": "D:\\.espressif\\v5.5.4\\esp-idf",
-  "idf.portWin": "COM11",
+  "idf.portWin": "COM5",
+  "idf.flashBaudRate": "2000000",
+  "idf.monitorNoReset": true,
   "idf.openOcdConfigs": [
     "board/esp32c2-ftdi.cfg"
   ],

@@ -341,12 +341,18 @@ void offline_cache_init(void) {
         .base_path = SPIFFS_MOUNT,
         .partition_label = SPIFFS_PARTITION,
         .max_files = 5,
-        .format_if_mount_failed = true,
+        .format_if_mount_failed = false,
     };
     esp_err_t ret = esp_vfs_spiffs_register(&spiffs_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPIFFS mount failed: %s", esp_err_to_name(ret));
-        return;
+        ESP_LOGW(TAG, "SPIFFS mount failed (%s), formatting...",
+                 esp_err_to_name(ret));
+        esp_spiffs_format(SPIFFS_PARTITION);
+        ret = esp_vfs_spiffs_register(&spiffs_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS format+mount failed: %s", esp_err_to_name(ret));
+            return;
+        }
     }
 
     load_meta();

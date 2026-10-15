@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "arm_ota.h"
-#include "esp_crt_bundle.h"
+#include "mqtt_ca_cert.h"
 #include "esp_http_client.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -667,7 +667,7 @@ static void remote_worker(void* parameter)
     esp_http_client_config_t config = {
         .url = manifest.url,
         .timeout_ms = (int)manifest.timeout_seconds * 1000,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .cert_pem = MQTT_CA_CERT,
         .keep_alive_enable = true,
         .buffer_size = OTA_BUFFER_SIZE,
         .skip_cert_common_name_check = false,

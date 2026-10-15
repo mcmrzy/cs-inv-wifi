@@ -38,7 +38,7 @@ menu "CS_INV WiFi Module"
 
     config CS_INV_MQTT_PASSWORD
         string "MQTT password"
-        default ""
+        default "CSKJINVDEVICE6K2"
 
     config CS_INV_CACHE_MAX_ITEMS
         int "Offline cache max items"

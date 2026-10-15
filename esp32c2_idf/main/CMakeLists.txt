@@ -9,6 +9,7 @@ idf_component_register(
         "offline_cache.c"
         "nvs_storage.c"
         "ap_api_server.c"
+        "ble_ota.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

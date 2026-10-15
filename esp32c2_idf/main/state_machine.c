@@ -7,6 +7,7 @@
 #include "arm_ota.h"
 #include "offline_cache.h"
 #include "cs_protocol_defs.h"
+#include "ble_prov.h"
 
 
 #include "esp_wifi.h"
@@ -45,6 +46,7 @@ static int64_t g_last_uart_heartbeat = 0;
 static int64_t g_last_cache_flush = 0;
 static int64_t g_last_debug = 0;
 static volatile bool g_pending_mqtt_reconfigure = false;
+static bool g_ble_stopped = false;
 
 #define CMD_DEDUP_SLOTS 8
 static char g_recent_task_ids[CMD_DEDUP_SLOTS][64];
@@ -153,8 +155,6 @@ static int64_t now_ms(void)
 
 static void init_wifi_sta(void)
 {
-    char ap_ssid[32];
-    build_ap_ssid(ap_ssid, sizeof(ap_ssid));
     ESP_LOGI(TAG, "init_wifi_sta: ssid='%s', pass_len=%d", g_wifi_ssid, (int)strlen(g_wifi_pass));
 
     esp_wifi_disconnect();
@@ -162,8 +162,8 @@ static void init_wifi_sta(void)
 
     wifi_mode_t mode;
     esp_wifi_get_mode(&mode);
-    if (mode != WIFI_MODE_APSTA) {
-        esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (mode != WIFI_MODE_STA) {
+        esp_wifi_set_mode(WIFI_MODE_STA);
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
@@ -228,12 +228,9 @@ static void state_sta_connecting(void)
 {
     if (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) {
         esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-        esp_netif_ip_info_t sta_ip = {0}, ap_ip = {0};
+        esp_netif_ip_info_t sta_ip = {0};
         if (sta_netif) esp_netif_get_ip_info(sta_netif, &sta_ip);
-        if (ap_netif) esp_netif_get_ip_info(ap_netif, &ap_ip);
-        ESP_LOGI(TAG, "Connected! STA=" IPSTR " AP=" IPSTR,
-                 IP2STR(&sta_ip.ip), IP2STR(&ap_ip.ip));
+        ESP_LOGI(TAG, "Connected! STA=" IPSTR, IP2STR(&sta_ip.ip));
         g_wifi_reconnect_attempts = 0;
         g_wifi_reconnect_delay = 1000;
         g_wifi_retry_next = 0;
@@ -248,24 +245,9 @@ static void state_sta_connecting(void)
     if (g_wifi_retry_next == 0 && now - g_wifi_connect_start > 15000) {
         g_wifi_reconnect_attempts++;
         ESP_LOGI(TAG, "Retry %d", g_wifi_reconnect_attempts);
-        if (g_wifi_reconnect_attempts >= 10) {
-            ESP_LOGW(TAG, "Max retries -> AP mode");
-            esp_wifi_disconnect();
-            esp_wifi_set_mode(WIFI_MODE_APSTA);
-
-            char ap_ssid[32];
-            build_ap_ssid(ap_ssid, sizeof(ap_ssid));
-            wifi_config_t ap_cfg = {0};
-            strncpy((char *)ap_cfg.ap.ssid, ap_ssid, sizeof(ap_cfg.ap.ssid) - 1);
-            ap_cfg.ap.ssid_len = strlen(ap_ssid);
-            ap_cfg.ap.max_connection = 1;
-            ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
-            esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
-
-            g_sys_state = STATE_AP_PROVISION;
-            g_wifi_retry_next = 0;
-            return;
-        }
+        /* STA-only build: no AP fallback. Keep retrying with capped backoff so
+         * the device keeps trying to join while BLE stays available for
+         * re-provisioning (managed by manage_ble_advertising). */
         g_wifi_retry_next = now + g_wifi_reconnect_delay;
         ESP_LOGI(TAG, "Waiting %lld ms before retry...", g_wifi_reconnect_delay);
         g_wifi_reconnect_delay = (g_wifi_reconnect_delay * 2 < 60000) ? g_wifi_reconnect_delay * 2 : 60000;
@@ -361,6 +343,25 @@ void state_machine_init(void)
     g_last_cache_flush = now_ms();
 }
 
+/* BLE advertising policy: keep BLE available whenever the device is NOT fully
+ * online (WiFi connected AND MQTT connected). Pause advertising once fully
+ * online to release RF time; resume automatically if either link drops so the
+ * user can always re-provision over BLE. */
+static void manage_ble_advertising(void)
+{
+    bool fully_online = (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT)
+                        && mqtt_is_connected();
+    if (fully_online && !g_ble_stopped) {
+        ble_prov_stop();
+        g_ble_stopped = true;
+        ESP_LOGI(TAG, "BLE advertising paused (WiFi+MQTT online)");
+    } else if (!fully_online && g_ble_stopped) {
+        ble_prov_resume();
+        g_ble_stopped = false;
+        ESP_LOGI(TAG, "BLE advertising resumed (offline)");
+    }
+}
+
 void state_machine_run(void)
 {
     int64_t now = now_ms();
@@ -383,6 +384,8 @@ void state_machine_run(void)
         uart_send_frame(CMD_HEARTBEAT, NULL, 0);
         ESP_LOGI(TAG, "UART HEARTBEAT sent");
     }
+
+    manage_ble_advertising();
 
     switch (g_sys_state) {
     case STATE_INIT:
@@ -476,15 +479,7 @@ void on_uart_frame(uint8_t cmd, const uint8_t *data, uint16_t len)
                 ESP_LOGI(TAG, "SN updated via PUBLISH: %s", sn);
                 g_pending_mqtt_reconfigure = true;
                 if (g_sys_state == STATE_RUNNING) g_sys_state = STATE_MQTT_CONNECTING;
-
-                char ap_ssid[32];
-                build_ap_ssid(ap_ssid, sizeof(ap_ssid));
-                wifi_config_t ap_cfg = {0};
-                strncpy((char *)ap_cfg.ap.ssid, ap_ssid, sizeof(ap_cfg.ap.ssid) - 1);
-                ap_cfg.ap.ssid_len = strlen(ap_ssid);
-                ap_cfg.ap.max_connection = 1;
-                ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
-                esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+                /* STA-only build: no SoftAP SSID to refresh on SN change. */
             }
         }
 

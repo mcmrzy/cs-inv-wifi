@@ -287,7 +287,7 @@ bool mqtt_init(MQTTMessageHandler msg_handler) {
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = g_mqtt_uri,
         .credentials.username = MQTT_USERNAME,
-        .credentials.authentication.password = g_device_key,
+        .credentials.authentication.password = MQTT_PASSWORD,
         .credentials.client_id = g_device_sn,
         .session.last_will = {
             .topic = g_status_topic,

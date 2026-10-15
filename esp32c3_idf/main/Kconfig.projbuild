@@ -1,0 +1,51 @@
+menu "CS_INV WiFi Module"
+
+    config CS_INV_UART_TX_PIN
+        int "UART TX GPIO"
+        default 0
+
+    config CS_INV_UART_RX_PIN
+        int "UART RX GPIO"
+        default 1
+
+    config CS_INV_LED1_PIN
+        int "LED1 GPIO"
+        default 12
+
+    config CS_INV_LED2_PIN
+        int "LED2 GPIO (-1 to disable)"
+        default 13
+
+    config CS_INV_BTN_PIN
+        int "Button GPIO"
+        default 9
+
+    config CS_INV_UART_BAUD
+        int "UART baudrate"
+        default 115200
+
+    config CS_INV_MQTT_HOST
+        string "MQTT broker host"
+        default "jiuxiaoyw.online"
+
+    config CS_INV_MQTT_PORT
+        int "MQTT broker port"
+        default 8883
+
+    config CS_INV_MQTT_USERNAME
+        string "MQTT username"
+        default "CSKJ-INV-DEVICE-6K2"
+
+    config CS_INV_MQTT_PASSWORD
+        string "MQTT password"
+        default ""
+
+    config CS_INV_CACHE_MAX_ITEMS
+        int "Offline cache max items"
+        default 500
+
+    config CS_INV_CACHE_TTL_DAYS
+        int "Offline cache TTL days"
+        default 7
+
+endmenu
