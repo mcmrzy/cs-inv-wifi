@@ -38,16 +38,52 @@ class DeviceSim {
     this._pendingWeather = null; // 防止并发拉取 Open-Meteo
     this._realCity = null;
 
-    // --- 控制参数模型（可被命令修改） ---
+    // --- 控制参数模型（对齐协议 9.2 的 42 键，可被命令修改） ---
     this.ctrl = {
-      output_priority: 1,      // 0=SolarFirst 1=BatteryFirst 2=UTI
-      max_charge_current: 30,   // A
-      ac_charge_current: 0,    // A
-      output_voltage: 230,      // V
-      output_frequency: 50.0,   // Hz
-      soc_cutoff: 20,           // %
-      buzzer_en: 1,             // 0/1
-      power_on: true,           // 开机/关机
+      set_output_priority: 1,            // 0=SolarFirst 1=BatteryFirst 2=UTI
+      set_max_charge_current: 30,        // A (×0.1)
+      set_ac_volt_range: 0,              // 枚举 0-2
+      set_battery_capacity: 200,         // Ah
+      set_battery_type: 0,               // 枚举 0-2 (0=LiFePO4)
+      set_overload_restart: 1,           // bool
+      set_high_temp_restart: 1,          // bool
+      set_output_voltage: 230,           // V (×0.1)
+      set_output_frequency: 50,          // Hz (×0.01)
+      set_master_slave: 0,               // 枚举 0-1
+      set_ac_charge_current: 0,          // A (×0.1)
+      set_low_volt_return_utl: 48,       // V
+      set_high_volt_return_bat: 52,      // V
+      set_charge_priority: 0,            // 枚举 0-2
+      set_alarm_control: 0,              // 位掩码
+      set_backlight_ctrl: 2,             // 枚举 0-3
+      set_power_shutdown_alarm: 1,       // bool
+      set_overload_use_city_power: 0,    // bool
+      set_max_discharge_current: 30,     // A
+      set_max_chg_curr: 30,              // A
+      set_recover_threshold_volt: 50,    // V
+      set_solar_power_balance: 1,        // bool
+      set_ac_output_mode: 0,             // 枚举 0-2
+      set_li_bat_material: 0,            // 枚举 0-1
+      set_cell_serial_lifepo4: 16,       // 节
+      set_cell_serial_li_nmc: 16,        // 节
+      set_equalize_enable: 0,            // bool
+      set_equalize_voltage: 55,          // V
+      set_equalize_time: 60,             // min
+      set_equalize_timeout: 120,         // min
+      set_equalize_interval: 7,          // day
+      set_equalize_activate: 0,          // bool
+      set_charge_time: 0,                // min
+      set_close_charge_time: 0,          // min
+      set_gen_start_voltage: 44,         // V
+      set_gen_stop_voltage: 52,          // V
+      set_soc_back_utl: 30,              // %
+      set_soc_back_bat: 40,              // %
+      set_soc_back_gen: 50,              // %
+      set_soc_close_gen: 70,             // %
+      set_soc_cutoff: 20,                // %
+      set_buzzer: 1,                     // bool
+      // 内部非协议状态
+      power_on: true,                    // 开机/关机
     };
     this._ctrlRevision = 0;
 
@@ -83,50 +119,69 @@ class DeviceSim {
     const rev = this._ctrlRevision;
     let applied = null;
     let result = 'OK';
+    let err = 0;
+
+    // 42 键控制命令的范围定义：{key, min, max, scale}（value 为工程单位）
+    const RANGES = {
+      set_output_priority: [0, 2], set_max_charge_current: [0, 60],
+      set_ac_volt_range: [0, 2], set_battery_capacity: [0, 2000],
+      set_battery_type: [0, 2], set_overload_restart: [0, 1],
+      set_high_temp_restart: [0, 1], set_output_voltage: [200, 250],
+      set_output_frequency: [45, 55], set_master_slave: [0, 1],
+      set_ac_charge_current: [0, 150], set_low_volt_return_utl: [40, 60],
+      set_high_volt_return_bat: [40, 60], set_charge_priority: [0, 2],
+      set_alarm_control: [0, 255], set_backlight_ctrl: [0, 3],
+      set_power_shutdown_alarm: [0, 1], set_overload_use_city_power: [0, 1],
+      set_max_discharge_current: [0, 150], set_max_chg_curr: [0, 150],
+      set_recover_threshold_volt: [40, 60], set_solar_power_balance: [0, 1],
+      set_ac_output_mode: [0, 2], set_li_bat_material: [0, 1],
+      set_cell_serial_lifepo4: [4, 32], set_cell_serial_li_nmc: [4, 32],
+      set_equalize_enable: [0, 1], set_equalize_voltage: [40, 65],
+      set_equalize_time: [0, 720], set_equalize_timeout: [0, 1440],
+      set_equalize_interval: [0, 90], set_equalize_activate: [0, 1],
+      set_charge_time: [0, 1440], set_close_charge_time: [0, 1440],
+      set_gen_start_voltage: [40, 60], set_gen_stop_voltage: [40, 60],
+      set_soc_back_utl: [0, 100], set_soc_back_bat: [0, 100],
+      set_soc_back_gen: [0, 100], set_soc_close_gen: [0, 100],
+      set_soc_cutoff: [0, 100], set_buzzer: [0, 1],
+    };
+
+    // 处理 42 键控制命令
+    if (RANGES[action] != null) {
+      const [min, max] = RANGES[action];
+      let v = Number(value);
+      if (value == null || Number.isNaN(v)) {
+        result = 'INVALID_ARGS'; err = -2;
+      } else {
+        if (v < min || v > max) { result = 'INVALID_ARGS'; err = -2; }
+        else {
+          v = Math.round(v * 10) / 10; // 保留 0.1 精度
+          this.ctrl[action] = v;
+          applied = v;
+          // 特殊联动
+          if (action === 'set_soc_cutoff') this.battery.minSoc = v / 100;
+        }
+      }
+      // 记日志并返回
+      this._cmdLog.unshift({ ts: Date.now(), cmd: action, args: value != null ? value : null, result, applied_value: applied, revision: rev });
+      if (this._cmdLog.length > 50) this._cmdLog.pop();
+      return { result, applied_value: applied, revision: rev, err };
+    }
 
     switch (action) {
       case 'power_on':
-        this.ctrl.power_on = true;
-        applied = 1;
+        this.ctrl.power_on = true; applied = 1;
         break;
       case 'power_off':
-        this.ctrl.power_on = false;
-        applied = 0;
-        break;
-      case 'set_charge_limit':
-        applied = Math.max(10, Math.min(60, Math.round(value)));
-        this.ctrl.max_charge_current = applied;
-        break;
-      case 'set_ac_charge_current':
-        applied = Math.max(0, Math.min(30, Math.round(value)));
-        this.ctrl.ac_charge_current = applied;
-        break;
-      case 'set_output_voltage':
-        applied = Math.max(200, Math.min(240, Math.round(value)));
-        this.ctrl.output_voltage = applied;
-        break;
-      case 'set_output_frequency':
-        applied = value >= 50 ? 50.0 : 60.0;
-        this.ctrl.output_frequency = applied;
-        break;
-      case 'set_soc_cutoff':
-        applied = Math.max(5, Math.min(100, Math.round(value)));
-        this.ctrl.soc_cutoff = applied;
-        // 同步更新电池 minSoc
-        this.battery.minSoc = applied / 100;
-        break;
-      case 'buzzer_en':
-        applied = value ? 1 : 0;
-        this.ctrl.buzzer_en = applied;
+        this.ctrl.power_on = false; applied = 0;
         break;
       case 'query_telemetry':
       case 'query_config':
       case 'query_info':
-        applied = null;
+        applied = null; result = 'QUERY'; // 上层据此触发补报
         break;
       default:
-        result = 'NOT_SUPPORTED';
-        applied = null;
+        result = 'NOT_SUPPORTED'; err = -4; applied = null;
     }
 
     // 记录命令日志
@@ -140,7 +195,27 @@ class DeviceSim {
     });
     if (this._cmdLog.length > 50) this._cmdLog.pop();
 
-    return { result, applied_value: applied, revision: rev };
+    return { result, applied_value: applied, revision: rev, err };
+  }
+
+  /** 生成 config 上报体（协议 9.2 的 42 键 params + rev） */
+  getConfigReport() {
+    const params = {};
+    const KEYS = [
+      'set_output_priority','set_max_charge_current','set_ac_volt_range','set_battery_capacity',
+      'set_battery_type','set_overload_restart','set_high_temp_restart','set_output_voltage',
+      'set_output_frequency','set_master_slave','set_ac_charge_current','set_low_volt_return_utl',
+      'set_high_volt_return_bat','set_charge_priority','set_alarm_control','set_backlight_ctrl',
+      'set_power_shutdown_alarm','set_overload_use_city_power','set_max_discharge_current',
+      'set_max_chg_curr','set_recover_threshold_volt','set_solar_power_balance','set_ac_output_mode',
+      'set_li_bat_material','set_cell_serial_lifepo4','set_cell_serial_li_nmc','set_equalize_enable',
+      'set_equalize_voltage','set_equalize_time','set_equalize_timeout','set_equalize_interval',
+      'set_equalize_activate','set_charge_time','set_close_charge_time','set_gen_start_voltage',
+      'set_gen_stop_voltage','set_soc_back_utl','set_soc_back_bat','set_soc_back_gen',
+      'set_soc_close_gen','set_soc_cutoff','set_buzzer',
+    ];
+    for (const k of KEYS) if (this.ctrl[k] != null) params[k] = this.ctrl[k];
+    return { rev: Math.floor(Date.now() / 1000), params };
   }
 
   /** 生成当前完整状态（供 detail 页 API 使用） */
@@ -236,17 +311,32 @@ class DeviceSim {
       batVolt: bat.voltageV,
       busV: bat.voltageV,
       loadPercent: Math.min(100, (loadW / RATED_W) * 100),
-      curr: invOut / (this.ctrl.output_voltage || 230),
+      curr: invOut / (this.ctrl.set_output_voltage || 230),
+      powerOn: this.ctrl.power_on,
       // 扩展字段（直接来自模型）
       vPv1: pvW > 0 ? 350 + Math.random() * 30 : 0,
       vPv2: pvW > 0 ? 340 + Math.random() * 30 : 0,
       invOutW: invOut,
-      invCurr: invOut / (this.ctrl.output_voltage || 230),
+      invCurr: invOut / (this.ctrl.set_output_voltage || 230),
       boostTemp: 35 + (pvW / RATED_W) * 15 + Math.random() * 5,
       invTemp: 38 + (invOut / RATED_W) * 18 + Math.random() * 6,
       transformerTemp: 40 + (invOut / RATED_W) * 12 + Math.random() * 4,
+      pvTemp: 30 + (pvW / RATED_W) * 20 + Math.random() * 4,
       mpptFan: Math.round(pvW > 50 ? 40 + (pvW / RATED_W) * 50 + Math.random() * 10 : 0),
       invFan: Math.round(invOut > 50 ? 30 + (invOut / RATED_W) * 60 + Math.random() * 10 : 0),
+      // 交流侧（协议字段）
+      acOutV: this.ctrl.set_output_voltage,
+      acOutFreq: this.ctrl.set_output_frequency,
+      acChargeW: this.ctrl.set_ac_charge_current * this.ctrl.set_output_voltage,
+      acChgCurr: this.ctrl.set_ac_charge_current,
+      gridVolt: 220.5 + (Math.random() * 4 - 2),
+      gridFreq: 50 + (Math.random() * 0.2 - 0.1),
+      // 诊断
+      workTimeTotal: Math.floor(now.getTime() / 1000),
+      faultCode: this._alarms.find(a => a.level === 'error' && a.code === 9) ? 0x01 : 0,
+      warning: this._alarms.filter(a => a.level === 'error').reduce((v, a) => v | (1 << a.code), 0),
+      bmsWarning: this._alarms.find(a => a.code === 10) ? 1 : 0,
+      batOverCharge: bat.soc >= 0.99 ? 1 : 0,
     };
 
     const snap = buildSnapshot(st, this.eng, RATED_W);
@@ -273,8 +363,8 @@ class DeviceSim {
       OutputWatt: Math.round(st.invOutW * 10),
       OutputVA: Math.round(st.invOutW * 10),
       OutputCurr: Math.round(st.invCurr * 10),
-      ACOutputVolt: Math.round((this.ctrl.output_voltage + (Math.random() * 4 - 2)) * 10),
-      ACOutputFreq: Math.round((this.ctrl.output_frequency + (Math.random() * 0.4 - 0.2)) * 100),
+      ACOutputVolt: Math.round((this.ctrl.set_output_voltage + (Math.random() * 4 - 2)) * 10),
+      ACOutputFreq: Math.round((this.ctrl.set_output_frequency + (Math.random() * 0.4 - 0.2)) * 100),
       LoadPercent: Math.round(st.loadPercent * 10),
       // --- 逆变器温度 ---
       InvertTemp: Math.round(st.invTemp * 10),
@@ -292,9 +382,9 @@ class DeviceSim {
       // --- 交流侧 ---
       GridVolt: Math.round((220 + Math.random() * 6 - 3) * 10),
       GridFreq: Math.round((50 + Math.random() * 0.4 - 0.2) * 100),
-      ACChrWatt: Math.round(this.ctrl.ac_charge_current * this.ctrl.output_voltage * 10),
-      ACChrCurr: Math.round(this.ctrl.ac_charge_current * 10),
-      ACChrVA: Math.round(this.ctrl.ac_charge_current * this.ctrl.output_voltage * 10),
+      ACChrWatt: Math.round(this.ctrl.set_ac_charge_current * this.ctrl.set_output_voltage * 10),
+      ACChrCurr: Math.round(this.ctrl.set_ac_charge_current * 10),
+      ACChrVA: Math.round(this.ctrl.set_ac_charge_current * this.ctrl.set_output_voltage * 10),
       ACInWatt: Math.round(bat.gridImportW * 10),
       ACInVA: Math.round(bat.gridImportW * 10),
       ACDisChrWatt: Math.round(bat.gridExportW * 10),
@@ -323,12 +413,12 @@ class DeviceSim {
       BmsWarning: 0,
       FaultValue: 0,
       // --- 可调参数 ---
-      maxChargeCurrent: this.ctrl.max_charge_current,
-      acChargeCurrent: this.ctrl.ac_charge_current,
-      outputVoltage: this.ctrl.output_voltage,
-      outputFrequency: this.ctrl.output_frequency,
-      socCutoff: this.ctrl.soc_cutoff,
-      buzzerEn: this.ctrl.buzzer_en,
+      maxChargeCurrent: this.ctrl.set_max_charge_current,
+      acChargeCurrent: this.ctrl.set_ac_charge_current,
+      outputVoltage: this.ctrl.set_output_voltage,
+      outputFrequency: this.ctrl.set_output_frequency,
+      socCutoff: this.ctrl.set_soc_cutoff,
+      buzzerEn: this.ctrl.set_buzzer,
       powerOn: this.ctrl.power_on ? 1 : 0,
       // --- 天气 ---
       PvTemp: Math.round(st.boostTemp * 10),
@@ -393,7 +483,7 @@ class DeviceSim {
     if (st.batChargeW > 5) b |= 0x0004;  // bit2 Charge
     if (st.batDischargeW > 5) b |= 0x0008;  // bit3 Discharge
     if (st.pvW > 0 && st.batChargeW > 0) b |= 0x0010;  // bit4 PvCharge
-    if (this.ctrl.ac_charge_current > 0) b |= 0x0020;  // bit5 AcCharge
+    if (this.ctrl.set_ac_charge_current > 0) b |= 0x0020;  // bit5 AcCharge
     if (st.gridImportW > 5) b |= 0x0400;  // bit10 AcInput
     if (b === 0) b = 0x0001;
     return b;
@@ -455,3 +545,4 @@ function start(onHeartbeat) {
 }
 
 module.exports = { start, stepAll, ensureDevice, ensureDevice, removeDevice, getSnapshot, getSim, count, DeviceSim };
+

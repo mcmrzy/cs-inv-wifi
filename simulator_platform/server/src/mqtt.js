@@ -137,32 +137,57 @@ function publishHeartbeat(sn, hbBody) {
  * info 已经是含envelope的完整body
  */
 function publishInfo(sn, dev) {
+  // 对齐真实设备 info 格式（17 字段，无 sn/city——SN 在 topic 中，协议无 city 字段）
   const infoBody = {
-    sn: dev.sn,
     model: 'CS-L10-6K2',
     manufacturer: '辰烁科技',
     firmware_arm: 'V1.0',
     firmware_esp: 'V1.0.sim',
+    firmware_dsp: 'V1.0',
+    firmware_bms: null,
     device_type: 'off_grid_inverter',
     phase: 'single',
-    rated_power: 6200,
-    rated_voltage: '230.0',
-    rated_frequency: '50.00',
-    battery_nominal_voltage: '51.2',
+    rated_power: 6200,             // uint32，W
+    rated_voltage: 230,            // number，V
+    rated_frequency: 50,           // number，Hz
+    battery_nominal_voltage: 51.2, // number，V
     battery_type: 'LiFePO4',
-    city: dev.city_name,
+    cell_count: 0,                 // uint16
+    temp_sensor_count: 0,          // uint16
+    inverter_module: 'CS-L10-6K2',
+    hardware_version: 'V1.0',
+    bootloader_version: 'V1.0',
   };
   const env = JSON.stringify({ t: Math.floor(Date.now() / 1000), v: 2, data: infoBody });
   return publish(sn, ProtocolTopics.INFO, env);
 }
 
 /**
- * 发布 config
+ * 发布 config（42 键控制参数，协议 9.2）
  */
 function publishConfig(sn) {
-  const cfg = { rev: 0, params: {} };
+  const sim = simulation.getSim(sn);
+  const cfg = sim ? sim.getConfigReport() : { rev: 0, params: {} };
   return publish(sn, ProtocolTopics.CONFIG, JSON.stringify({ t: Math.floor(Date.now() / 1000), v: 2, data: cfg }));
 }
+
+// 42 键控制命令名（用于判断命令生效后触发 config 闭环）
+const RANGE_CMD = {
+  set_output_priority:1,set_max_charge_current:1,set_ac_volt_range:1,
+  set_battery_capacity:1,set_battery_type:1,set_overload_restart:1,
+  set_high_temp_restart:1,set_output_voltage:1,set_output_frequency:1,
+  set_master_slave:1,set_ac_charge_current:1,set_low_volt_return_utl:1,
+  set_high_volt_return_bat:1,set_charge_priority:1,set_alarm_control:1,
+  set_backlight_ctrl:1,set_power_shutdown_alarm:1,set_overload_use_city_power:1,
+  set_max_discharge_current:1,set_max_chg_curr:1,set_recover_threshold_volt:1,
+  set_solar_power_balance:1,set_ac_output_mode:1,set_li_bat_material:1,
+  set_cell_serial_lifepo4:1,set_cell_serial_li_nmc:1,set_equalize_enable:1,
+  set_equalize_voltage:1,set_equalize_time:1,set_equalize_timeout:1,
+  set_equalize_interval:1,set_equalize_activate:1,set_charge_time:1,
+  set_close_charge_time:1,set_gen_start_voltage:1,set_gen_stop_voltage:1,
+  set_soc_back_utl:1,set_soc_back_bat:1,set_soc_back_gen:1,set_soc_close_gen:1,
+  set_soc_cutoff:1,set_buzzer:1,
+};
 
 /**
  * 发布在线状态（90s一次，对齐固件 publish_online）
@@ -178,25 +203,41 @@ function publishOnline(sn) {
 }
 
 /**
- * 处理下行命令（对齐固件 cmd_handler）
+ * 处理下行命令（对齐协议 11.x 标准信封）
+ * 下行: {"v":2,"task_id":"..","t":..,"cmd":"set_max_charge_current","args":[50]}
+ * 兼容旧格式 {"cmd":"..","value":<number>} / {"cmd":"..","args":{value:..}}
  */
 function handleDownlink(sn, topic, payload) {
   let j;
   try { j = JSON.parse(payload); } catch { return; }
   const cmd = j.cmd || j.name || j.action;
-  const value = j.value != null ? j.value
-                   : (j.args && j.args.value != null ? j.args.value : null);
+  // 参数：标准格式 args 数组取 args[0]；兼容 value 及旧 args.value
+  let value = null;
+  if (j.value != null) value = j.value;
+  else if (Array.isArray(j.args)) value = j.args[0];
+  else if (j.args && j.args.value != null) value = j.args.value;
+  else if (j.param != null) value = j.param;
   const taskId = j.task_id || '';
 
   const sim = simulation.getSim(sn);
   let resp;
   if (sim) {
     const r = sim.applyCmd(cmd, value);
-    resp = { task_id: taskId, cmd, result: r.result, err: 0,
-             applied_value: r.applied_value, revision: r.revision };
+    const revNow = Math.floor(Date.now() / 1000);
+    // 标准响应格式（协议 11.4）
+    resp = {
+      task_id: taskId, cmd,
+      result: r.result, err: r.err || 0,
+      applied_args: r.applied_value != null ? [r.applied_value] : [],
+      reported_revision: revNow,
+    };
     console.log('[mqtt] ' + sn + ' cmd=' + cmd + ' value=' + value + ' -> result=' + r.result);
+    // query_config 后立即补报 config；控制参数生效后按协议 11.4 闭环补报 config
+    if (cmd === 'query_config' || (r.result === 'OK' && RANGE_CMD[cmd])) {
+      publishConfig(sn);
+    }
   } else {
-    resp = { task_id: taskId, cmd, result: 'OK', err: 0, applied_args: [value] };
+    resp = { task_id: taskId, cmd, result: 'OK', err: 0, applied_args: [value], reported_revision: Math.floor(Date.now() / 1000) };
   }
   const env = JSON.stringify({ t: Math.floor(Date.now() / 1000), v: 2, data: resp });
   publish(sn, ProtocolTopics.CMD_RESP, env, { qos: 1 });
