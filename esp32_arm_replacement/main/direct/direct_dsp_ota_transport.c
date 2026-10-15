@@ -20,7 +20,7 @@ static direct_iap_result_t transmit(const direct_iap_io_t *io,const uint8_t *byt
     return io->send(io->context,bytes,size)?DIRECT_IAP_OK:DIRECT_IAP_TX_FAILED;
 }
 /* 重试只重发, 不重新冲接收缓冲: HR 可能已经躺在里面, 一冲就丢(现场 rx=0 的一种
- * 可能来源)。只有一段会话的首帧才需要冲掉上一次业务留下的残帧。 */
+ * 可能来源)。每个 exchange 首发会清 RX，重试不清。 */
 static direct_iap_result_t transmit_raw(const direct_iap_io_t *io,const uint8_t *bytes,size_t size){
     if(cancelled(io))return DIRECT_IAP_CANCELLED;
     return io->send(io->context,bytes,size)?DIRECT_IAP_OK:DIRECT_IAP_TX_FAILED;
@@ -96,6 +96,8 @@ direct_iap_result_t direct_dsp_ota_flash(size_t size,const direct_iap_io_t *io){
     if(!valid_io(io))return DIRECT_IAP_INCOMPATIBLE;
     direct_iap_result_t result=direct_dsp_ota_validate(size,io);
     if(result!=DIRECT_IAP_OK)return result;
+    if(io->probe_packet0 && size<DIRECT_DSP_OTA_PACKET_SIZE)
+        return DIRECT_IAP_IMAGE_SIZE_INVALID;
     /* Dedicated DSP packet uses 1029 bytes; avoid the legacy shared 8KB BMS
      * workspace and avoid adding a 1KB array to the UART owner's call stack. */
     uint8_t *packet=malloc(DIRECT_DSP_OTA_PACKET_SIZE+5U);
@@ -128,6 +130,24 @@ direct_iap_result_t direct_dsp_ota_flash(size_t size,const direct_iap_io_t *io){
         packet[bytes+3U]=(uint8_t)(crc>>8);
         packet[bytes+4U]=(uint8_t)crc;
         if(io->phase)io->phase(io->context,DIRECT_IAP_PHASE_DATA_ACK);
+        if(io->probe_packet0){
+            result=transmit(io,packet,bytes+5U);
+            if(result!=DIRECT_IAP_OK)goto done;
+            uint32_t start=io->now_ms(io->context);
+            for(;;){
+                if(cancelled(io)){result=DIRECT_IAP_CANCELLED;goto done;}
+                unsigned elapsed=(uint32_t)(io->now_ms(io->context)-start);
+                if(elapsed>=2000U)break;
+                unsigned slice=2000U-elapsed;if(slice>25U)slice=25U;
+                uint8_t byte;
+                /* Capture in the UART owner's receive callback, including all
+                 * bytes AFTER a CR; this experiment never advances to pkt1. */
+                if(io->receive(io->context,&byte,1,slice)>1U){
+                    result=DIRECT_IAP_ACK_FAILED;goto done;
+                }
+            }
+            result=DIRECT_IAP_DIAGNOSTIC_COMPLETE;goto done;
+        }
         result=exchange(io,packet,bytes+5U,(const uint8_t *)"CR",2,3000,10);
         if(result!=DIRECT_IAP_OK)goto done;
         offset+=bytes;

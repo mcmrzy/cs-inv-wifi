@@ -502,6 +502,10 @@ void app_main(void)
 
     offline_cache_init();
     wifi_sta_init();
+    setup_wifi();
+    /* Allocate MQTT's full 8KB task stack before BLE fragments the heap.
+     * esp-mqtt owns transport reconnects while WiFi obtains its address. */
+    mqtt_connect();
 
     /* CSIV-CT 本地模式服务（GATT 服务通过 pre-host-start 回调注册） */
     if (ble_ct_start(g_device_sn, FIRMWARE_VERSION)) {
@@ -526,7 +530,6 @@ void app_main(void)
         ESP_LOGE(TAG, "BLE provisioning start failed");
     }
 
-    setup_wifi();
     sntp_sync_init();
 
     enter_state(STATE_INIT);

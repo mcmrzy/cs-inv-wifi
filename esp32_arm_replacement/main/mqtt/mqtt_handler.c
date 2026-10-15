@@ -40,6 +40,7 @@ static const char *TAG = "MQTT";
 #define MQTT_TOPIC_MAX   64
 #define MQTT_PAYLOAD_MAX 128
 #define MQTT_RX_MAX      2048
+#define MQTT_START_RETRY_MS 5000
 
 static esp_mqtt_client_handle_t g_mqtt_client = NULL;
 
@@ -54,6 +55,7 @@ static atomic_bool g_broker_fallback_allowed;
 static atomic_bool g_use_broker_ip_fallback;
 static atomic_bool g_broker_fallback_pending;
 static int64_t g_disconnect_start_ms = 0;  /* 断线开始时刻, 用于检测卡住 */
+static int64_t g_next_start_ms;
 static int g_force_restart_count = 0;      /* 连续强制重启次数, 动态延长超时 */
 static int64_t g_last_cache_flush = 0;
 
@@ -74,6 +76,7 @@ static char g_rx_topic[128];
 static char g_rx_payload[MQTT_RX_MAX + 1];
 static int g_rx_expected;
 static int g_rx_next_offset;
+static bool g_rx_retained;
 
 char g_device_sn[SN_MAX_LEN] = {0};
 char g_device_key[65] = {0};
@@ -92,6 +95,7 @@ static void mqtt_log_tls_memory(const char *phase)
 
 static void mqtt_rx_reset(void)
 {
+    g_rx_retained=false;
     g_rx_expected = 0;
     g_rx_next_offset = 0;
     g_rx_topic[0] = '\0';
@@ -258,6 +262,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             g_rx_topic[event->topic_len] = '\0';
             g_rx_expected = event->total_data_len;
             g_rx_next_offset = 0;
+            g_rx_retained = event->retain;
         }
         if (g_rx_expected != event->total_data_len ||
             event->current_data_offset != g_rx_next_offset) {
@@ -275,9 +280,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 cloud_binding_receive(g_rx_topic,g_rx_payload,(size_t)g_rx_expected);
             } else if (strstr(g_rx_topic, "/ota/cmd") != NULL) {
                 ESP_LOGI(TAG, "OTA cmd topic=%s len=%u", g_rx_topic, g_rx_expected);
-                mqtt_ota_handle_command(g_rx_topic,
+                mqtt_ota_handle_delivery(g_rx_topic,
                                         (const uint8_t *)g_rx_payload,
-                                        (unsigned int)g_rx_expected);
+                                        (unsigned int)g_rx_expected,g_rx_retained);
             } else if (g_msg_handler) {
                 g_msg_handler(g_rx_topic, g_rx_payload,
                               (unsigned int)g_rx_expected);
@@ -335,6 +340,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                      strerror(err->esp_transport_sock_errno),
                      (int)err->connect_return_code);
             const bool cannot_resolve =
+                wifi_sta_is_connected() &&
                 err->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT &&
                 err->esp_tls_last_esp_err ==
                     ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME;
@@ -364,6 +370,7 @@ bool mqtt_init(MQTTMessageHandler msg_handler)
     g_msg_handler_saved = msg_handler;
     mqtt_rx_reset();
     g_disconnect_start_ms = 0;
+    g_next_start_ms = 0;
 
     if (!g_offline_ack_queue) {
         g_offline_ack_queue = xQueueCreate(8, sizeof(int));
@@ -450,18 +457,24 @@ bool mqtt_connect(void)
     if (atomic_load(&g_mqtt_connected)) return true;
     if (atomic_load(&g_mqtt_started)) return true;
 
+    const int64_t now = esp_timer_get_time() / 1000;
+    if (now < g_next_start_ms) return false;
+    g_next_start_ms = now + MQTT_START_RETRY_MS;
+    if (g_disconnect_start_ms == 0) {
+        g_disconnect_start_ms = now ? now : 1;
+    }
     ESP_LOGI(TAG, "Starting MQTT client to %s", g_mqtt_uri);
+    mqtt_log_tls_memory("task_start");
 
     esp_err_t err = esp_mqtt_client_start(g_mqtt_client);
     if (err != ESP_OK) {
+        mqtt_log_tls_memory("task_start_failed");
         ESP_LOGE(TAG, "esp_mqtt_client_start failed: %s", esp_err_to_name(err));
         return false;
     }
 
     atomic_store(&g_mqtt_started, true);
-    if (g_disconnect_start_ms == 0) {
-        g_disconnect_start_ms = esp_timer_get_time() / 1000;
-    }
+    g_next_start_ms = 0;
     return true;
 }
 
@@ -477,6 +490,7 @@ void mqtt_disconnect(void)
     }
     atomic_store(&g_mqtt_connected, false);
     atomic_store(&g_mqtt_started, false);
+    g_next_start_ms = 0;
 }
 
 /* 发布核心: 拼接主题前缀 + 信封。

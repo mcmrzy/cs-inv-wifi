@@ -27,6 +27,8 @@ int main(void){
  }
  static const char *codes[]={"DUPLICATE","INVALID_PARAMS","INVALID_TARGET","TLS_REQUIRED","SIGNATURE_REQUIRED","SIGNATURE_INVALID","SECURITY_VERSION_READ_FAILED","ROLLBACK_REJECTED","OTA_BUSY","FILE_TOO_LARGE","SIZE_MISMATCH","HASH_MISMATCH","HTTP_ERROR","TIMEOUT","READ_FAILED","FLASH_WRITE_FAILED","TARGET_TRANSFER_FAILED","PERSIST_FAILED","OTA_NOT_CANCELLABLE","TASK_CREATE_FAILED","INTERNAL_ERROR","TARGET_UNSUPPORTED","INSUFFICIENT_STORAGE","DSP_TRANSFER_FAILED","BMS_TRANSFER_FAILED","IMAGE_FORMAT_INVALID","TARGET_NOT_READY","FUTURE_UNKNOWN_ERROR"};
  d.ota.state=OTA_STATE_FAILED;
+ strcpy(d.ota.error_code,"TASK_REPLAY_BLOCKED");direct_ui_build(&u,&d,&v);
+ assert(!strcmp(v.rows[4],"Upgrade already requested"));localized_fits(v.rows[4]);
  for(unsigned i=0;i<sizeof(codes)/sizeof(*codes);i++){
   strcpy(d.ota.error_code,codes[i]);strcpy(d.ota.message,"HTTP client init failed free=1234 max=5678 | https needs TLS heap");
   OtaSnapshot original=d.ota;direct_ui_build(&u,&d,&v);
@@ -34,11 +36,21 @@ int main(void){
   localized_fits(v.rows[4]);localized_fits(v.rows[6]);assert(!strstr(v.rows[6],"free="));
  }
  d.ota.state=OTA_STATE_SUCCEEDED;d.ota.target=OTA_TARGET_DSP;strcpy(d.ota.error_code,"OK");
+ const char *confirmation_codes[]={"TARGET_RESPONSE_TIMEOUT","TARGET_VERSION_UNCONFIRMED","DIAGNOSTIC_ONLY"};
+ const char *confirmation_labels[]={"Target did not restart","Upgrade unconfirmed","Diagnostic finished"};
+ for(unsigned i=0;i<3;i++){
+  d.ota.state=OTA_STATE_FAILED;strcpy(d.ota.error_code,confirmation_codes[i]);
+  direct_ui_build(&u,&d,&v);assert(!strcmp(v.rows[4],confirmation_labels[i]));
+  localized_fits(v.rows[4]);localized_fits(v.rows[6]);
+ }
+ d.ota.state=OTA_STATE_SUCCEEDED;strcpy(d.ota.error_code,"OK");
  strcpy(d.ota.message,"Target transfer complete; target response not observed");
  direct_ui_build(&u,&d,&v);assert(!strcmp(v.rows[0],"Transfer complete"));
  assert(!strcmp(v.rows[6],"Target response not observed"));assert(!v.rows[5][0]);
  strcpy(d.ota.message,"Target transfer complete; new App responded");direct_ui_build(&u,&d,&v);
  assert(!strcmp(v.rows[6],"Target response received"));
+ strcpy(d.ota.message,"Target transfer complete; application responded");direct_ui_build(&u,&d,&v);
+ assert(!strcmp(v.rows[0],"Transfer complete")&&!strcmp(v.rows[6],"Target response received"));
  strcpy(d.ota.message,"Some future diagnostic message");direct_ui_build(&u,&d,&v);
  assert(!strcmp(v.rows[6],"Target response not confirmed"));
  d.ota.target=OTA_TARGET_ARM;direct_ui_build(&u,&d,&v);assert(strstr(v.rows[1],"ARM"));

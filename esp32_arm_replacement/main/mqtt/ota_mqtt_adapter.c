@@ -468,6 +468,16 @@ bool mqtt_ota_handle_command(const char *topic, const uint8_t *payload,
     return true;
 }
 
+bool mqtt_ota_handle_delivery(const char *topic,const uint8_t *payload,
+                             unsigned int length,bool retained)
+{
+    if(retained){
+        ESP_LOGW(TAG,"Ignored retained OTA command; issue a new non-retained task to upgrade");
+        return false;
+    }
+    return mqtt_ota_handle_command(topic,payload,length);
+}
+
 void mqtt_ota_process(void)
 {
     ota_service_process();

@@ -2,6 +2,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include <string.h>
+#include <stdlib.h>
 #include "esp_log.h"
 
 static nvs_handle_t s_nvs_handle;
@@ -162,6 +163,41 @@ bool storage_set_ota_security_version_for_target(const char *target, uint32_t ve
     if (err == ESP_OK) err = nvs_commit(ota_handle);
     nvs_close(ota_handle);
     return err == ESP_OK;
+}
+
+bool storage_claim_direct_ota_task(const char *target,const char *task_id,bool *duplicate)
+{
+    if(!target||!task_id||!duplicate||!task_id[0]||strlen(task_id)>=64U)return false;
+    const char *key=!strcmp(target,"dsp")?"cmd_dsp":!strcmp(target,"bms")?"cmd_bms":NULL;
+    if(!key)return false;
+    *duplicate=false;
+    /* Allocate rather than add 520 bytes to the MQTT command task's stack. */
+    struct task_record {uint32_t magic;uint8_t count,next;char ids[8][64];};
+    struct task_record *record=calloc(1,sizeof(*record));
+    if(!record)return false;
+    nvs_handle_t handle;
+    if(nvs_open(OTA_NAMESPACE,NVS_READWRITE,&handle)!=ESP_OK){free(record);return false;}
+    size_t length=sizeof(*record);
+    esp_err_t err=nvs_get_blob(handle,key,record,&length);
+    bool ok=false;
+    if(err==ESP_ERR_NVS_NOT_FOUND){
+        memset(record,0,sizeof(*record));record->magic=0x4f544131U;
+    }else if(err!=ESP_OK||length!=sizeof(*record)||record->magic!=0x4f544131U||
+             record->count>8U||record->next>=8U||
+             (record->count<8U&&record->next!=record->count))goto done;
+    for(unsigned i=0;i<record->count;i++){
+        if(!record->ids[i][0]||!memchr(record->ids[i],0,64U))goto done;
+        if(!strcmp(record->ids[i],task_id)){*duplicate=true;ok=true;goto done;}
+    }
+    memset(record->ids[record->next],0,64U);
+    memcpy(record->ids[record->next],task_id,strlen(task_id));
+    record->next=(uint8_t)((record->next+1U)%8U);
+    if(record->count<8U)record->count++;
+    err=nvs_set_blob(handle,key,record,sizeof(*record));
+    if(err==ESP_OK)err=nvs_commit(handle);
+    ok=err==ESP_OK;
+done:
+    nvs_close(handle);free(record);return ok;
 }
 
 /* ==================== OTA 待确认记录 ==================== */

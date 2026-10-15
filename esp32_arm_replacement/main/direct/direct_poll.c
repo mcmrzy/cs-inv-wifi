@@ -149,6 +149,9 @@ static bool iap_send(void *ctx,const uint8_t *bytes,size_t n)
     uint32_t start=now_ms();
     unsigned timeout=(unsigned)(((uint64_t)n*10000U+baud-1U)/baud)+500U;
     job->trace.tx_frames++;job->trace.tx_len=(unsigned)n;
+    memset(job->trace.tx_head,0,sizeof(job->trace.tx_head));
+    memcpy(job->trace.tx_head,bytes,n<3U?n:3U);
+    if(n>=2U)memcpy(job->trace.tx_crc,bytes+n-2U,2U);
     bool completed=false;
     bool written=uart_write_bytes(port,bytes,n)==(int)n;
     while(written){
@@ -245,6 +248,7 @@ static bool iap_owner_step(direct_iap_target_t target)
     direct_iap_io_t io={.read_image=iap_read,.send=iap_send,.receive=iap_receive,
         .delay=iap_delay,.cancelled=iap_cancelled,.flush=iap_flush,
         .progress=iap_progress,.context=job,.now_ms=iap_now,.phase=iap_phase,
+        .probe_packet0=job->source.probe_packet0,
         .verify_identity=job->source.verify_identity?iap_verify_identity:NULL,
         .verify_version=job->source.verify_version?iap_verify_version:NULL};
     job->result=DIRECT_IAP_TX_FAILED;
@@ -295,7 +299,7 @@ static bool iap_owner_step(direct_iap_target_t target)
      * 目标若已跑起旧 App, EOT 只是被忽略的 6 字节; 若停在 Bootloader, 它会在
      * 镜像头校验不通过时继续监听, 不影响下一次升级。 */
     if(target==DIRECT_IAP_DSP && job->operation==0 && job->result!=DIRECT_IAP_OK &&
-       atomic_load(&s_dsp_boot)){
+       !job->source.probe_packet0 && atomic_load(&s_dsp_boot)){
         if(direct_dsp_ota_exit_boot(&io)==DIRECT_IAP_OK)io.delay(io.context,1000);
         atomic_store(&s_dsp_boot,false);
     }
@@ -739,12 +743,13 @@ static void dsp_report_tick(void)
         s_iap_evidence.pending=false;
         xSemaphoreGive(s_lock);
         if(pending){
-            char head[3*sizeof(raw_head)+1];int used=0;
+            char head[3*DIRECT_IAP_TRACE_HEAD_SIZE+1];int used=0;
             for(unsigned i=0;i<head_len&&used+3<(int)sizeof(head);++i)
                 used+=snprintf(head+used,sizeof(head)-used,"%02X ",raw_head[i]);
             if(used)head[used-1]='\0';
-            ESP_LOGW(TAG,"IAP %s failed (%d): rx=%u bytes head=%s",
-                     dsp?"dsp":"bms",result,rx_bytes,head_len?head:"(none)");
+            ESP_LOGW(TAG,"IAP %s %s (%d): rx=%u bytes head=%s",
+                     dsp?"dsp":"bms",result==DIRECT_IAP_DIAGNOSTIC_COMPLETE?"diagnostic":"failed",
+                     result,rx_bytes,head_len?head:"(none)");
             static const char *const phases[]={"NONE","HR","ERASE_ACK","ERASE_CR","DATA_ACK","EOT"};
             used=0;
             for(unsigned i=0;i<trace.rx_head_len&&used+3<(int)sizeof(head);++i)
@@ -754,6 +759,8 @@ static void dsp_report_tick(void)
                      (unsigned)trace.phase<sizeof(phases)/sizeof(phases[0])?phases[trace.phase]:"UNKNOWN",
                      trace.tx_frames,trace.tx_len,trace.tx_max_ms,trace.rx_bytes,
                      trace.rx_head_len?head:"(none)");
+            ESP_LOGW(TAG,"IAP tx_head=%02X %02X %02X tx_crc=%02X %02X (send completion is not flash verification)",
+                     trace.tx_head[0],trace.tx_head[1],trace.tx_head[2],trace.tx_crc[0],trace.tx_crc[1]);
         }
     }
     if(!direct_dsp_get_diagnostics(&d) || !d.task_running || d.quiet)return;

@@ -8,7 +8,8 @@ static struct {
  uint32_t now;size_t size;unsigned hr,erase,packets,eot,progress,last_index,packet_attempts;
  unsigned hr_drop,erase_drop,erase_cr_drop,packet_drop;bool bad_header,read_fail,tx_fail,abort,noise;
  bool erase_prefix,erase_echo_only;unsigned flushes;
- uint8_t queue[32],last_packet[1029];size_t used,pos,last_size;
+ bool custom_packet_reply;uint8_t packet_reply[80];size_t packet_reply_size;
+ uint8_t queue[128],last_packet[1029];size_t used,pos,last_size;
 } peer;
 static const uint8_t ack[]={1,0x10,4,0x38,0,2,4,0,0,0,0x11,3,0xd1};
 static uint8_t image_byte(size_t off){
@@ -57,6 +58,10 @@ static bool send(void *ctx,const uint8_t *p,size_t n){
   if(peer.last_size&&peer.last_index==index)assert(peer.last_size==n&&!memcmp(peer.last_packet,p,n));
   memcpy(peer.last_packet,p,n);peer.last_size=n;peer.last_index=index;peer.packet_attempts++;peer.packets++;
   if(peer.packet_drop){peer.packet_drop--;return true;}
+  if(peer.custom_packet_reply){
+   memcpy(peer.queue,peer.packet_reply,peer.packet_reply_size);peer.used=peer.packet_reply_size;
+   return true;
+  }
   peer.queue[0]='H';peer.queue[1]='R';peer.queue[2]='C';peer.queue[3]='C';peer.queue[4]='R';peer.used=5;
  }
  return true;
@@ -108,5 +113,23 @@ int main(void){
  assert(peer.now==4100); /* 12×250ms + 11×100ms 重试间隔: 噪声里也按真实截止时间 */
  reset(64);peer.now=UINT32_MAX-100;assert(direct_dsp_ota_enter_boot(&io)==DIRECT_IAP_OK);
  assert(direct_dsp_ota_exit_boot(&io)==DIRECT_IAP_OK&&peer.eot==1);
+ /* Diagnostic is a distinct non-success result, ONE pkt0, no EOT/progress.
+  * Collect the full two seconds even after CR; don't hide trailing diagnostics. */
+ io.probe_packet0=true;
+ reset(1030);peer.custom_packet_reply=true;memcpy(peer.packet_reply,"CRP",3);peer.packet_reply_size=3;
+ assert(direct_dsp_ota_flash(peer.size,&io)==DIRECT_IAP_DIAGNOSTIC_COMPLETE);
+ assert(peer.hr==1&&peer.erase==1&&peer.packets==1&&!peer.progress&&!peer.eot);
+ assert(peer.last_size==1029&&peer.last_packet[1]==1&&peer.last_packet[2]==0xfe);
+ assert(peer.now>=2000&&peer.now<2100&&peer.pos==peer.used);
+ const uint8_t replies[][5]={{0x69,1,0xfe},{0x72,1,0xfe,4,5},{0x50},{0}};
+ const size_t lengths[]={3,5,1,0};
+ for(unsigned i=0;i<4;i++){
+  reset(1030);peer.custom_packet_reply=true;
+  memcpy(peer.packet_reply,replies[i],lengths[i]);peer.packet_reply_size=lengths[i];
+  assert(direct_dsp_ota_flash(peer.size,&io)==DIRECT_IAP_DIAGNOSTIC_COMPLETE);
+  assert(peer.packets==1&&!peer.eot&&!peer.progress&&peer.now>=2000&&peer.pos==peer.used);
+ }
+ reset(64);assert(direct_dsp_ota_flash(peer.size,&io)==DIRECT_IAP_IMAGE_SIZE_INVALID&&!peer.hr);
+ puts("PASS pkt0-only diagnostic: exact 02 01 FE frame+CRC, one send, complete 2s CR/diagnostic/silent capture, no EOT or success progress");
  puts("PASS F280039C actual module protocol: preflight before CMD42, short tail, HR/erase/data retries, exact frame+CRC, 367 packets/address wrap, monotonic noise deadline, EOT only on success");
 }

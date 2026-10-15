@@ -221,4 +221,13 @@ menu "CS_INV ESP32 Direct Controller"
         int "Offline cache TTL days"
         default 7
 
+    config DIRECT_DSP_OTA_PACKET0_PROBE
+        bool "Diagnostic ONLY: erase DSP, send one packet, capture 2s, keep Boot"
+        default n
+        help
+            Destructive diagnostic image. A DSP OTA request sends only packet 0
+            once, captures its raw reply, and never reports upgrade success or
+            sends EOT. DSP polling stays paused until a new job or explicit exit.
+            Keep disabled for normal full-image upgrades.
+
 endmenu

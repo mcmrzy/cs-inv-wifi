@@ -24,8 +24,14 @@ try {
  if($LASTEXITCODE -ne 0){throw 'panel onboarding integration failed'}
  & $python tests/tls_memory_test.py
  if($LASTEXITCODE -ne 0){throw 'TLS memory regression failed'}
+ & $python tests/mqtt_start_memory_test.py
+ if($LASTEXITCODE -ne 0){throw 'MQTT startup memory regression failed'}
  & $python tests/ota_remote_memory_test.py
  if($LASTEXITCODE -ne 0){throw 'remote OTA memory regression failed'}
+ & $python tests/direct_ota_replay_test.py
+ if($LASTEXITCODE -ne 0){throw 'direct OTA replay protection failed'}
+ & $python tests/mqtt_ota_retained_test.py
+ if($LASTEXITCODE -ne 0){throw 'retained OTA rejection failed'}
  & $python tests/ota_https_memory_test.py
  if($LASTEXITCODE -ne 0){throw 'HTTPS OTA memory/resume regression failed'}
  & $python tests/ota_http_resume_test.py
@@ -147,6 +153,10 @@ try {
  if($LASTEXITCODE -ne 0){throw 'direct OTA flow compile failed'}
  & ./tmp/direct_ota_flow_test.exe
  if($LASTEXITCODE -ne 0){throw 'direct OTA flow failed'}
+ & $gcc -std=c11 -Wall -Wextra -Werror -DCONFIG_DIRECT_DSP_OTA_PACKET0_PROBE=1 -Imain/ota -Imain/direct tests/direct_ota_flow_test.c -o tmp/direct_ota_probe_flow_test.exe
+ if($LASTEXITCODE -ne 0){throw 'direct OTA probe flow compile failed'}
+ & ./tmp/direct_ota_probe_flow_test.exe
+ if($LASTEXITCODE -ne 0){throw 'direct OTA probe flow failed'}
  & $python tests/prepare_iap_uart_test.py
  if($LASTEXITCODE -ne 0){throw 'UART sender extraction failed'}
  & $gcc -std=c11 -Wall -Wextra -Werror -Imain/direct tests/iap_uart_flow_test.c -o tmp/iap_uart_flow_test.exe

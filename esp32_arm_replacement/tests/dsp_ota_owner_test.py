@@ -60,10 +60,11 @@ static struct {bool connected;} g_arm_stat;
 static uint32_t s_status_last_ms,s_measurement_last_ms,s_bms_last_ms;
 static uint8_t s_dsp_sync_pending;
 static uint32_t tick;
-static uint8_t image[1100],rx[64];
+static uint8_t image[1100],rx[96];
 static size_t rx_size,rx_offset;
 static unsigned hr_tx,erase_tx,data_tx,eot_tx,legacy_runs,progress_calls;
 static bool fail_hr,fail_erase,fail_data,noisy_data,fail_eot,fail_drain,fail_alloc,fail_read;
+static uint8_t diagnostic_reply[80];static size_t diagnostic_reply_size;
 static bool iap_owner_step(direct_iap_target_t target);
 static void peer_reply(const uint8_t *bytes,size_t size){
     assert(rx_offset==rx_size);memcpy(rx,bytes,size);rx_size=size;rx_offset=0;
@@ -111,7 +112,8 @@ static int uart_write_bytes(uart_port_t port,const uint8_t *bytes,size_t size){
         else if(erase_tx==1)peer_reply((const uint8_t *)"t",1);}
     else if(size==6 && bytes[2]==0xff){eot_tx++;if(fail_eot)return -1;}
     else {assert(bytes[0]==2);data_tx++;
-        if(!fail_data)peer_reply((const uint8_t *)"CR",2);
+        if(diagnostic_reply_size)peer_reply(diagnostic_reply,diagnostic_reply_size);
+        else if(!fail_data)peer_reply((const uint8_t *)"CR",2);
         else if(noisy_data){uint8_t noise[32];memset(noise,0xa6,sizeof(noise));peer_reply(noise,sizeof(noise));}}
     return (int)size;
 }
@@ -146,6 +148,7 @@ static void reset(void){
     hr_tx=erase_tx=data_tx=eot_tx=legacy_runs=progress_calls=0;rx_size=rx_offset=0;tick=100;
     fail_hr=fail_erase=fail_data=noisy_data=fail_eot=fail_drain=fail_alloc=fail_read=false;
     memset(&s_iap_evidence,0,sizeof(s_iap_evidence));
+    diagnostic_reply_size=0;
     memset(image,0xa6,sizeof(image));image[0]=0;image[1]=0x48;image[4]=image[5]=0x5a;
 }
 static void assert_idle(bool held){
@@ -205,9 +208,28 @@ int main(void){
     assert(s_iap_evidence.rx_bytes==17+10*32 && s_iap_evidence.head_len==24);
     assert(!memcmp(s_iap_evidence.head,erase_completed,sizeof(erase_completed)));
     for(unsigned i=17;i<24;i++)assert(s_iap_evidence.head[i]==0xa6);
-    assert(s_iap_evidence.trace.rx_bytes==10*32 && s_iap_evidence.trace.rx_head_len==24);
-    for(unsigned i=0;i<24;i++)assert(s_iap_evidence.trace.rx_head[i]==0xa6);
-    puts("PASS IAP RX diagnostics: exact 17-byte erase completion survives DATA_ACK timeout; total/stage prefixes cap at 24 without truncating byte counts");
+    assert(s_iap_evidence.trace.rx_bytes==10*32 && s_iap_evidence.trace.rx_head_len==64);
+    for(unsigned i=0;i<64;i++)assert(s_iap_evidence.trace.rx_head[i]==0xa6);
+    puts("PASS IAP RX diagnostics: total prefix 24, phase prefix 64, full byte counts");
+    io.probe_packet0=true;m.size=sizeof(image);
+    reset();uint32_t before_probe=tick;
+    assert(direct_link_run_iap(&m,&io)==DIRECT_IAP_DIAGNOSTIC_COMPLETE);
+    assert(hr_tx==1&&erase_tx==1&&data_tx==1&&!eot_tx&&!progress_calls);
+    assert_idle(true);assert(tick-before_probe>=2000&&tick-before_probe<2400);
+    assert(s_iap_evidence.trace.phase==DIRECT_IAP_PHASE_DATA_ACK);
+    assert(s_iap_evidence.trace.tx_len==1029 && s_iap_evidence.trace.tx_frames==1);
+    assert(!memcmp(s_iap_evidence.trace.tx_head,(uint8_t[]){2,1,0xfe},3));
+    assert(s_iap_evidence.trace.rx_bytes==2 && !memcmp(s_iap_evidence.trace.rx_head,"CR",2));
+    reset();memset(diagnostic_reply,0x72,sizeof(diagnostic_reply));diagnostic_reply_size=80;
+    assert(direct_link_run_iap(&m,&io)==DIRECT_IAP_DIAGNOSTIC_COMPLETE);
+    assert(s_iap_evidence.trace.rx_bytes==80&&s_iap_evidence.trace.rx_head_len==64);
+    for(unsigned i=0;i<64;i++)assert(s_iap_evidence.trace.rx_head[i]==0x72);
+    assert(!eot_tx&&data_tx==1);assert_idle(true);
+    reset();fail_data=true;
+    assert(direct_link_run_iap(&m,&io)==DIRECT_IAP_DIAGNOSTIC_COMPLETE);
+    assert(!s_iap_evidence.trace.rx_bytes&&!eot_tx&&data_tx==1);assert_idle(true);
+    puts("PASS actual pkt0 owner: 02 01 FE, one send, full/silent RX capture, no EOT, Boot hold, no progress success");
+    io.probe_packet0=false;m.size=64;
     reset();s_write.pending=true;assert(direct_link_run_iap(&m,&io)==DIRECT_IAP_BUSY);
     assert(!hr_tx && !erase_tx);assert_idle(false);
     reset();s_dsp_params_importing=true;assert(direct_link_dsp_control(DIRECT_DSP_REBOOT)==DIRECT_IAP_BUSY);assert_idle(false);

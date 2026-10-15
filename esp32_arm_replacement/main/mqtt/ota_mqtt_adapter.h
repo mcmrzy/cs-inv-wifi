@@ -25,6 +25,9 @@ void mqtt_ota_init(void);
 /* 处理 ota/cmd 主题消息 (mqtt_handler 分发), 返回 true=识别为 OTA 命令 */
 bool mqtt_ota_handle_command(const char *topic, const uint8_t *payload,
                              unsigned int length);
+/* Broker retained commands are historical deliveries, never an OTA trigger. */
+bool mqtt_ota_handle_delivery(const char *topic,const uint8_t *payload,
+                             unsigned int length,bool retained);
 
 /* 周期处理 (兼容接口) */
 void mqtt_ota_process(void);

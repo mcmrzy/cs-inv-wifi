@@ -22,5 +22,8 @@ direct_iap_result_t direct_dsp_ota_validate(size_t image_size,const direct_iap_i
  * Packets are up to 1024B; the supplied module sends a short final packet.
  * OK means all packet ACKs and EOT were sent, not App/version confirmation.
  * On failure, leave Boot active; never send EOT for an incomplete transfer. */
+/* io->probe_packet0: after erase, send pkt0 once and capture 2 seconds through
+ * io->receive. Return DIAGNOSTIC_COMPLETE (not OK), no EOT/progress. Caller
+ * must keep business UART polling paused; a partial image cannot be run. */
 direct_iap_result_t direct_dsp_ota_flash(size_t image_size,const direct_iap_io_t *io);
 #endif

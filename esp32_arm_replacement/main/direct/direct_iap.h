@@ -5,7 +5,7 @@
 typedef enum {DIRECT_IAP_DSP=2,DIRECT_IAP_BMS=3} direct_iap_target_t;
 typedef enum {DIRECT_IAP_OK,DIRECT_IAP_INCOMPATIBLE,DIRECT_IAP_READ_FAILED,DIRECT_IAP_TX_FAILED,DIRECT_IAP_ACK_FAILED,DIRECT_IAP_TARGET_ERROR,DIRECT_IAP_CANCELLED,DIRECT_IAP_VERSION_UNCONFIRMED,DIRECT_IAP_NO_MEMORY,
  DIRECT_IAP_IMAGE_SIZE_INVALID,DIRECT_IAP_IMAGE_OPCODE_INVALID,DIRECT_IAP_IMAGE_MAGIC_INVALID,
- DIRECT_IAP_BUSY,DIRECT_IAP_NOT_READY} direct_iap_result_t;
+ DIRECT_IAP_BUSY,DIRECT_IAP_NOT_READY,DIRECT_IAP_DIAGNOSTIC_COMPLETE} direct_iap_result_t;
 
 static inline const char *direct_iap_result_name(direct_iap_result_t result){
  switch(result){
@@ -23,6 +23,7 @@ static inline const char *direct_iap_result_name(direct_iap_result_t result){
  case DIRECT_IAP_IMAGE_MAGIC_INVALID:return "IMAGE_MAGIC_INVALID";
  case DIRECT_IAP_BUSY:return "UART_JOB_BUSY";
  case DIRECT_IAP_NOT_READY:return "UART_OWNER_NOT_READY";
+ case DIRECT_IAP_DIAGNOSTIC_COMPLETE:return "PACKET0_DIAGNOSTIC_COMPLETE";
  default:return "UNKNOWN";
  }
 }
@@ -32,10 +33,12 @@ typedef enum {DIRECT_IAP_PHASE_NONE,DIRECT_IAP_PHASE_HR,
  DIRECT_IAP_PHASE_DATA_ACK,DIRECT_IAP_PHASE_EOT} direct_iap_phase_t;
 /* Owner records numbers/bytes only. The consumer formats the snapshot. */
 #define DIRECT_IAP_RX_HEAD_SIZE 24U
+#define DIRECT_IAP_TRACE_HEAD_SIZE 64U
 typedef struct {
  direct_iap_phase_t phase;
  unsigned tx_frames,tx_len,tx_max_ms,rx_bytes;
- uint8_t rx_head[DIRECT_IAP_RX_HEAD_SIZE],rx_head_len;
+ uint8_t rx_head[DIRECT_IAP_TRACE_HEAD_SIZE],rx_head_len;
+ uint8_t tx_head[3],tx_crc[2];
 } direct_iap_trace_t;
 /* Called ONLY by a target UART transaction owner. verify_identity must confirm
  * actual target identity + stopped maintenance condition before any Boot command.
@@ -54,6 +57,7 @@ typedef struct {
  uint32_t (*now_ms)(void*); /* Monotonic uptime for bounded DSP OTA deadlines. */
  void *context;
  void (*phase)(void*,direct_iap_phase_t); /* Optional diagnostic; no logging. */
+ bool probe_packet0; /* Destructive diagnostic: erase, ONE packet, no EOT. */
 } direct_iap_io_t;
 direct_iap_result_t direct_iap_run(const direct_iap_image_t*,const direct_iap_io_t*);
 

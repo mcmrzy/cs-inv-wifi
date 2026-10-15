@@ -68,10 +68,8 @@ static void ota_quiet_end(void);
 #define OTA_MAX_RESUMES       3U
 #define OTA_ALLOC_ATTEMPTS     3U
 #define OTA_ALLOC_RETRY_MS     50U
-/* 直连(DSP/BMS)传输完成后再等目标自己回来: 目标只有镜像头校验通过、跑起新
- * App 之后才会重新应答 03/04。这一段就是 App 进度条的第 3 格"校验中"; 等不到
- * 不判失败(传输本身已完成), 只如实写进完成消息。旧实现把下载报成 0..100,
- * 进入安装又写死跳回 70, App 表现为"到 70% 卡住"。 */
+/* Direct completion requires packet ACKs and a fresh application response
+ * after EOT. This DSP protocol has no independent version-readback command. */
 #define OTA_TARGET_RESPONSE_WAIT_MS 8000U
 #define OTA_TARGET_RESPONSE_POLL_MS 200U
 
@@ -204,9 +202,10 @@ const char* ota_result_code(OtaResult result)
         "TARGET_UNSUPPORTED",
         "INSUFFICIENT_STORAGE",
         "DSP_TRANSFER_FAILED", "BMS_TRANSFER_FAILED", "IMAGE_FORMAT_INVALID",
-        "TARGET_NOT_READY",
+        "TARGET_NOT_READY", "TARGET_RESPONSE_TIMEOUT", "TARGET_VERSION_UNCONFIRMED",
+        "DIAGNOSTIC_ONLY", "TASK_REPLAY_BLOCKED",
     };
-    return result <= OTA_RESULT_TARGET_NOT_READY ? codes[result] : "INTERNAL_ERROR";
+    return (unsigned)result < sizeof(codes)/sizeof(codes[0]) ? codes[result] : "INTERNAL_ERROR";
 }
 
 bool ota_service_init(void)
@@ -617,6 +616,13 @@ static OtaResult reserve_manifest(const OtaManifest* manifest)
         return duplicate ? OTA_RESULT_DUPLICATE : OTA_RESULT_BUSY;
     }
 
+    if(manifest->target==OTA_TARGET_DSP||manifest->target==OTA_TARGET_BMS){
+        bool duplicate=false;
+        if(!storage_claim_direct_ota_task(ota_target_name(manifest->target),manifest->task_id,&duplicate)){
+            xSemaphoreGive(g_lock);return OTA_RESULT_PERSIST_FAILED;
+        }
+        if(duplicate){xSemaphoreGive(g_lock);return OTA_RESULT_TASK_REPLAY_BLOCKED;}
+    }
     g_active = true;
     g_manifest = *manifest;
     memset(&g_snapshot, 0, sizeof(g_snapshot));
@@ -910,36 +916,31 @@ static void direct_stage_progress(void *ctx,size_t done,size_t total)
                     "transferring",percent);
 }
 
-/* 目标是否已经在新 App 上应答。只认传输开始之后的那一帧: 升级前的旧样本、
- * 仍停在 Bootloader 的"沉默"都不算。 */
+/* A fresh application response is liveness evidence, not image/version proof. */
 static bool target_response_seen(bool dsp,uint32_t since_ms)
 {
     if(dsp){
         RunParamDef measurement;uint32_t received_ms=0;
         return direct_dsp_get_measurement(&measurement,&received_ms)&&
-               (int64_t)received_ms>=(int64_t)since_ms;
+               (int32_t)(received_ms-since_ms)>=0;
     }
     direct_bms_measurement_t measurement;uint32_t age_ms=0;
     return direct_bms_get_snapshot(&measurement,&age_ms)&&
            age_ms<=OTA_TARGET_RESPONSE_POLL_MS*2U;
 }
 
-/* 第 3 格"校验中": 目标写完剩余块并校验镜像头后才会跳进新 App 并重新应答。
- * 等不到不判失败——传输本身已经完成; 结果写进完成消息供云端/串口判断。 */
+/* Waiting time is not a measured fraction of target verification. */
 static bool wait_target_response(bool dsp,uint32_t since_ms)
 {
     const int64_t start=esp_timer_get_time()/1000;
     /* 先宣告"校验中": 目标立刻回来时也要让 App/云端看到这一格, 而不是直接跳到成功。 */
     update_snapshot_stage(OTA_STATE_VERIFYING,0,g_manifest.file_size,OTA_RESULT_OK,
-                          "Waiting for target to run the new App","verifying",0);
+                          "Waiting for target application response","verifying",0);
     for(;;){
+        if(cancel_requested())return false;
         if(target_response_seen(dsp,since_ms))return true;
         const uint32_t elapsed=(uint32_t)((esp_timer_get_time()/1000)-start);
         if(elapsed>=OTA_TARGET_RESPONSE_WAIT_MS)return false;
-        const uint8_t percent=(uint8_t)((uint64_t)elapsed*100U/OTA_TARGET_RESPONSE_WAIT_MS);
-        update_snapshot_stage(OTA_STATE_VERIFYING,percent,g_manifest.file_size,
-                              OTA_RESULT_OK,"Waiting for target to run the new App",
-                              "verifying",percent);
         vTaskDelay(pdMS_TO_TICKS(OTA_TARGET_RESPONSE_POLL_MS));
     }
 }
@@ -964,6 +965,8 @@ static OtaResult install_direct_iap(const OtaManifest* manifest,
     }
     if(result!=OTA_RESULT_OK || cancel_requested())goto done;
     if(fflush(g_direct_stage)!=0){result=OTA_RESULT_FLASH_WRITE_FAILED;goto done;}
+    ESP_LOGW("OTA","direct task=%s target=%s: one accepted command, one transfer session",
+             manifest->task_id,ota_target_name(manifest->target));
     /* Stop polling/configuration writes while the same UART owner enters Boot.
      * The owner finishes its current normal transaction before taking this job. */
     ota_quiet_begin();quiet=true;
@@ -974,6 +977,12 @@ static OtaResult install_direct_iap(const OtaManifest* manifest,
     snprintf(image.version,sizeof(image.version),"%s",manifest->version);
     direct_iap_io_t io={.read_image=direct_stage_read,.cancelled=direct_stage_cancel,
                        .progress=direct_stage_progress,.context=g_direct_stage};
+#if CONFIG_DIRECT_DSP_OTA_PACKET0_PROBE
+    io.probe_packet0=manifest->target==OTA_TARGET_DSP;
+#endif
+    if(io.probe_packet0){
+        ESP_LOGW("OTA","PACKET0 DIAGNOSTIC ONLY: erase DSP; send 02 01 FE once; capture 2000ms; no EOT or upgrade success");
+    }
     if(manifest->target==OTA_TARGET_DSP){
         uint8_t header[6]={0};
         if(direct_stage_read(g_direct_stage,0,header,sizeof(header))){
@@ -994,7 +1003,8 @@ static OtaResult install_direct_iap(const OtaManifest* manifest,
         snprintf(g_arm_failure_detail,sizeof(g_arm_failure_detail),
                  "%s direct OTA: %s (%d)",ota_target_name(manifest->target),
                  direct_iap_result_name(wire),(int)wire);
-        if(wire==DIRECT_IAP_CANCELLED)result=OTA_RESULT_OK;
+        if(wire==DIRECT_IAP_DIAGNOSTIC_COMPLETE)result=OTA_RESULT_DIAGNOSTIC_ONLY;
+        else if(wire==DIRECT_IAP_CANCELLED)result=OTA_RESULT_OK;
         else if(wire==DIRECT_IAP_BUSY)result=OTA_RESULT_BUSY;
         else if(wire==DIRECT_IAP_NOT_READY)result=OTA_RESULT_TARGET_NOT_READY;
         else if(wire==DIRECT_IAP_IMAGE_SIZE_INVALID || wire==DIRECT_IAP_IMAGE_OPCODE_INVALID ||
@@ -1002,19 +1012,24 @@ static OtaResult install_direct_iap(const OtaManifest* manifest,
         else result=manifest->target==OTA_TARGET_DSP?OTA_RESULT_DSP_TRANSFER_FAILED:OTA_RESULT_BMS_TRANSFER_FAILED;
         goto done;
     }
-    if(manifest->security_version!=0 && !storage_set_ota_security_version_for_target(
-        ota_target_name(manifest->target),manifest->security_version)){
-        result=OTA_RESULT_PERSIST_FAILED;goto done;
-    }
     /* 先恢复轮询, 否则新 App 起来了也没人问它 03/04。 */
     if(quiet){ota_quiet_end();quiet=false;}
     const uint32_t transfer_done_ms=(uint32_t)(esp_timer_get_time()/1000);
     const bool responded=wait_target_response(manifest->target==OTA_TARGET_DSP,
                                               transfer_done_ms);
+    if(cancel_requested()){result=OTA_RESULT_OK;goto done;}
+    if(!responded){
+        snprintf(g_arm_failure_detail,sizeof(g_arm_failure_detail),
+                 "%s: transfer ACKs received; no application response; upgrade unconfirmed",
+                 ota_target_name(manifest->target));
+        result=OTA_RESULT_TARGET_RESPONSE_TIMEOUT;goto done;
+    }
+    if(manifest->security_version!=0 && !storage_set_ota_security_version_for_target(
+        ota_target_name(manifest->target),manifest->security_version)){
+        result=OTA_RESULT_PERSIST_FAILED;goto done;
+    }
     char done_message[96];
-    snprintf(done_message,sizeof(done_message),responded
-        ?"Target transfer complete; new App responded"
-        :"Target transfer complete; target response not observed");
+    snprintf(done_message,sizeof(done_message),"Target transfer complete; application responded");
     if(manifest->source==OTA_SOURCE_MQTT)mqtt_publish_ota_trace("target-done",done_message);
     update_snapshot_stage(OTA_STATE_SUCCEEDED,100,manifest->file_size,OTA_RESULT_OK,
                     done_message,"succeeded",100);

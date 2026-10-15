@@ -105,19 +105,27 @@ static const char *upgrade_error(const char *code){
   {"INTERNAL_ERROR","Upgrade internal error"},{"TARGET_UNSUPPORTED","Upgrade target unsupported"},
   {"INSUFFICIENT_STORAGE","Insufficient firmware storage"},{"DSP_TRANSFER_FAILED","DSP transfer failed"},
   {"BMS_TRANSFER_FAILED","BMS transfer failed"},{"IMAGE_FORMAT_INVALID","Firmware format invalid"},
-  {"TARGET_NOT_READY","Target not ready"}};
+  {"TARGET_NOT_READY","Target not ready"},
+  {"TARGET_RESPONSE_TIMEOUT","Target did not restart"},
+  {"TARGET_VERSION_UNCONFIRMED","Upgrade unconfirmed"},
+  {"DIAGNOSTIC_ONLY","Diagnostic finished"},
+  {"TASK_REPLAY_BLOCKED","Upgrade already requested"}};
  for(size_t i=0;i<sizeof(errors)/sizeof(*errors);i++)if(!strcmp(code,errors[i].code))return errors[i].label;
  return "Upgrade failed";
 }
 static const char *upgrade_detail(const OtaSnapshot *ota){
+ if(ota->state==OTA_STATE_FAILED&&!strcmp(ota->error_code,"DIAGNOSTIC_ONLY"))return "Packet 0 only; Boot held";
+ if(ota->state==OTA_STATE_FAILED&&!strcmp(ota->error_code,"TARGET_VERSION_UNCONFIRMED"))return "Firmware readback unavailable";
  if(ota->state==OTA_STATE_FAILED)return "Check error code and retry";
  if(ota->state==OTA_STATE_SUCCEEDED && ota->target!=OTA_TARGET_ESP){
   if(!strcmp(ota->message,"Target transfer complete; new App responded"))return "Target response received";
+  if(!strcmp(ota->message,"Target transfer complete; application responded"))return "Target response received";
   if(!strcmp(ota->message,"Target transfer complete; target response not observed"))return "Target response not observed";
   return "Target response not confirmed";
  }
  if(!strcmp(ota->message,"Entering direct target Boot (waiting for HR)"))return "Waiting for target Boot";
- if(!strcmp(ota->message,"Waiting for target to run the new App"))return "Waiting for target response";
+ if(!strcmp(ota->message,"Waiting for target to run the new App")||
+    !strcmp(ota->message,"Waiting for target application response"))return "Waiting for target response";
  static const char *const details[]={"Send firmware from App or cloud","Preparing firmware upgrade",
   "Downloading firmware","Receiving firmware","Checking firmware image","Writing firmware image",
   "Cancelling firmware upgrade","Firmware upgrade cancelled","Restarting controller",
