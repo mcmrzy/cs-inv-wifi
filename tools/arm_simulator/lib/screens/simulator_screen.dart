@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/simulator_provider.dart';
+
 import '../models/inverter_state.dart';
 import '../models/alarm_system.dart';
 import '../services/uart_service.dart';
+import 'multi_device_screen.dart';
 
 class SimulatorScreen extends StatefulWidget {
   const SimulatorScreen({super.key});
@@ -40,7 +42,9 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
                           ? _buildDashboard(provider)
                           : _selectedTab == 1
                           ? _buildAlarmTab(provider)
-                          : _buildSettingsTab(provider),
+                          : _selectedTab == 2
+                          ? _buildSettingsTab(provider)
+                          : const MultiDeviceScreen(),
                     ),
                   ],
                 ),
@@ -79,6 +83,7 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
           _buildNavButton(0, Icons.dashboard_rounded, '仪表盘'),
           _buildNavButton(1, Icons.warning_rounded, '告警'),
           _buildNavButton(2, Icons.settings_rounded, '设置'),
+          _buildNavButton(3, Icons.devices_other, '多设备'),
           const Spacer(),
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -596,7 +601,7 @@ class _SimulatorScreenState extends State<SimulatorScreen> {
                               border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                               isDense: true,
                             ),
-                            value: provider.selectedPort,
+                            value: provider.availablePorts.contains(provider.selectedPort) ? provider.selectedPort : null,
                             items: provider.availablePorts
                                 .map((port) => DropdownMenuItem(value: port, child: Text(port)))
                                 .toList(),

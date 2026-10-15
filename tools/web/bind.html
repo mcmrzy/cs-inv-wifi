@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CS INV 设备绑定</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 40px 30px;
+            max-width: 400px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+        .logo {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        h1 {
+            font-size: 24px;
+            color: #333;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .device-info {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+            text-align: left;
+        }
+        .device-info .label {
+            font-size: 12px;
+            color: #999;
+            margin-bottom: 4px;
+        }
+        .device-info .value {
+            font-size: 18px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            color: #333;
+            font-weight: bold;
+            margin-bottom: 12px;
+        }
+        .device-info .value:last-child {
+            margin-bottom: 0;
+        }
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-bottom: 12px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn:active {
+            transform: scale(0.98);
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+        .loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 200px;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .footer {
+            margin-top: 30px;
+            font-size: 12px;
+            color: #999;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <!-- 加载中 -->
+    <div id="loading" class="card">
+        <div class="loading">
+            <div class="spinner"></div>
+            <p>正在检测 App...</p>
+        </div>
+    </div>
+
+    <!-- 已安装 App（自动跳转，用户看不到这个） -->
+    <div id="app-opened" class="card hidden">
+        <div class="loading">
+            <div class="spinner"></div>
+            <p>正在打开 App...</p>
+        </div>
+    </div>
+
+    <!-- 未安装 App：显示下载页 -->
+    <div id="download" class="card hidden">
+        <div class="logo">🏭</div>
+        <h1>CS INV 逆变器监控</h1>
+        <p class="subtitle">请下载 App 绑定您的设备</p>
+
+        <div class="device-info">
+            <div class="label">设备 SN</div>
+            <div class="value" id="sn-display">-</div>
+            <div class="label">PIN 码</div>
+            <div class="value" id="pin-display">-</div>
+        </div>
+
+        <button class="btn btn-primary" onclick="downloadApp()">
+            📱 下载 App
+        </button>
+
+        <button class="btn btn-secondary" onclick="copyInfo()">
+            📋 复制设备信息
+        </button>
+
+        <div class="footer">
+            辰烁科技 · CS-L10-6K2 逆变器
+        </div>
+    </div>
+
+    <script>
+        // 获取 URL 参数
+        const params = new URLSearchParams(window.location.search);
+        const sn = params.get('sn');
+        const pin = params.get('pin');
+
+        // 显示设备信息
+        if (sn) document.getElementById('sn-display').textContent = sn;
+        if (pin) document.getElementById('pin-display').textContent = pin;
+
+        // App 自定义 Scheme
+        const appScheme = 'csinv';
+        const appHost = 'bind';
+        const appUrl = `${appScheme}://${appHost}?sn=${encodeURIComponent(sn || '')}&pin=${encodeURIComponent(pin || '')}`;
+
+        // 尝试打开 App
+        function tryOpenApp() {
+            const start = Date.now();
+            
+            // 使用 iframe 尝试打开 App（兼容性更好）
+            const iframe = document.createElement('iframe');
+            iframe.style.display = 'none';
+            iframe.src = appUrl;
+            document.body.appendChild(iframe);
+
+            // 2秒后检测是否成功打开
+            setTimeout(() => {
+                const elapsed = Date.now() - start;
+                if (elapsed < 2500) {
+                    // App 未安装，显示下载页
+                    document.getElementById('loading').classList.add('hidden');
+                    document.getElementById('download').classList.remove('hidden');
+                } else {
+                    // App 可能已打开
+                    document.getElementById('loading').classList.add('hidden');
+                    document.getElementById('app-opened').classList.remove('hidden');
+                }
+                // 清理 iframe
+                setTimeout(() => document.body.removeChild(iframe), 1000);
+            }, 2000);
+        }
+
+        // 下载 App
+        function downloadApp() {
+            const ua = navigator.userAgent.toLowerCase();
+            if (/iphone|ipad|ipod/.test(ua)) {
+                // iOS
+                window.location.href = 'https://apps.apple.com/app/cs-inv/id123456789';
+            } else if (/android/.test(ua)) {
+                // Android
+                window.location.href = 'https://play.google.com/store/apps/details?id=com.csinv.app';
+            } else {
+                // 桌面端
+                window.location.href = 'https://jiuxiaoyw.online/download';
+            }
+        }
+
+        // 复制设备信息
+        function copyInfo() {
+            const text = `设备SN: ${sn}\nPIN码: ${pin}`;
+            navigator.clipboard.writeText(text).then(() => {
+                alert('已复制到剪贴板');
+            }).catch(() => {
+                // 降级方案
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert('已复制到剪贴板');
+            });
+        }
+
+        // 页面加载后尝试打开 App
+        window.onload = tryOpenApp;
+    </script>
+</body>
+</html>

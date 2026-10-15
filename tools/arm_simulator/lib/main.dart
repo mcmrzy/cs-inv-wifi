@@ -1,14 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'providers/simulator_provider.dart';
+import 'providers/multi_device_simulator.dart';
 import 'screens/simulator_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final provider = SimulatorProvider();
   await provider.initialize();
+  final multiDeviceSimulator = MultiDeviceSimulator();
   runApp(
-    ChangeNotifierProvider.value(value: provider, child: const SimulatorApp()),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: provider),
+        ChangeNotifierProvider.value(value: multiDeviceSimulator),
+      ],
+      child: const SimulatorApp(),
+    ),
   );
 }
 

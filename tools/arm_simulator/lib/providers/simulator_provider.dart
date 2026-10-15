@@ -151,6 +151,9 @@ class SimulatorProvider extends ChangeNotifier {
       _mqttTls = prefs.getBool('mqtt.tls') ?? _mqttTls;
       _mqttUsername = prefs.getString('mqtt.username') ?? _mqttUsername;
       _selectedPort = prefs.getString('serial.port') ?? _selectedPort;
+      if (_selectedPort != null && !_availablePorts.contains(_selectedPort)) {
+        _selectedPort = _availablePorts.isNotEmpty ? _availablePorts.first : null;
+      }
       _autoSimulate = prefs.getBool('simulation.auto') ?? _autoSimulate;
       _autoPublish = prefs.getBool('publish.auto') ?? _autoPublish;
       _publishInterval =
@@ -222,6 +225,9 @@ class SimulatorProvider extends ChangeNotifier {
   /// 刷新可用串口列表
   void refreshPorts() {
     _availablePorts = SerialPort.availablePorts;
+    if (_selectedPort != null && !_availablePorts.contains(_selectedPort)) {
+      _selectedPort = null;
+    }
     if (_availablePorts.isNotEmpty && _selectedPort == null) {
       _selectedPort = _availablePorts.first;
     }

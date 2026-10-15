@@ -23,6 +23,7 @@ class MqttService {
     required void Function(String topic, String payload) onMessage,
     required void Function(String message) onLog,
     required void Function(bool connected) onConnectionChanged,
+    bool autoReconnect = true,
   }) async {
     await disconnect();
 
@@ -30,8 +31,8 @@ class MqttService {
     final client = MqttServerClient.withPort(host, clientId, port)
       ..secure = useTls
       ..keepAlivePeriod = 30
-      ..autoReconnect = true
-      ..resubscribeOnAutoReconnect = true
+      ..autoReconnect = autoReconnect
+      ..resubscribeOnAutoReconnect = autoReconnect
       ..logging(on: false)
       ..onConnected = () {
         onLog('[MQTT] 已连接 $host:$port');

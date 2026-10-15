@@ -67,5 +67,6 @@
     "--compile-commands-dir=d:\\CS_INV_WIFI\\build"
   ],
   "idf.flashType": "UART",
-  "idf.portWin": "COM3"
+  "idf.portWin": "COM3",
+  "idf.flashBaudRate": "115200"
 }

@@ -83,7 +83,7 @@ def main():
     count = 0
     for i in range(batch_size):
         seq_num = seq_start + i
-        cust_num = cust_start + i
+        cust_num = cust_start  # 客户流水号固定，不递增
 
         seq_str    = str(seq_num).zfill(5)
         cust_str   = str(cust_num).zfill(3)
