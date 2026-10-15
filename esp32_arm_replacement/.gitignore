@@ -1,0 +1,9 @@
+build/
+build_*/
+tmp/
+sdkconfig
+sdkconfig.old
+managed_components/
+protocol_test.exe
+*.obj
+build_verify.log

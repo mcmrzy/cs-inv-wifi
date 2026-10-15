@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F280039C 常驻 bootloader —— ARM(GD32) 侧指南</title>
+<style>
+  :root { --bg:#0f1115; --fg:#e6e8eb; --dim:#9aa4b2; --line:#2a2f3a;
+          --ok:#39d353; --warn:#ffb020; --bad:#ff5c5c; --acc:#4aa8ff; --card:#171a21; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:32px 20px 80px; background:var(--bg); color:var(--fg);
+         font:15px/1.75 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  .wrap { max-width:1000px; margin:0 auto; }
+  h1 { font-size:25px; margin:0 0 6px; }
+  h2 { font-size:20px; margin:36px 0 12px; padding-left:10px; border-left:4px solid var(--acc); }
+  .sub { color:var(--dim); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:14px 0; }
+  .hero { background:#162a1a; border-color:#2a5a32; }
+  .warnbox { background:#2a2416; border-color:#5a4a2a; }
+  pre { background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:14px 16px;
+        overflow-x:auto; font:13px/1.6 Consolas,"Courier New",monospace; color:#d5dbe3; }
+  code { background:#0b0d11; padding:1px 5px; border-radius:4px; font:13px Consolas,monospace; color:#9fe3a8; }
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:14px; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#1b1f28; color:#cfe3ff; font-weight:600; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); } .dim { color:var(--dim); }
+  ol,ul { padding-left:22px; } li { margin:4px 0; }
+  hr { border:0; border-top:1px solid var(--line); margin:32px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>F280039C 常驻 bootloader —— ARM(GD32) 侧指南</h1>
+<p class="sub">
+  链路：云端 → ESP32 → <b>ARM(GD32)</b> → SCI-B → DSP(F280039C)&nbsp;|&nbsp;
+  DSP 侧：bootloader 于 0x080000~0x081FFF，App 从 0x082000
+</p>
+
+<div class="card hero">
+  <h2 style="margin-top:0;border:0;padding:0">结论：协议没变，ARM 侧几乎不用改 ✓</h2>
+  <p style="margin:6px 0">
+    这是刻意的设计选择 ✓：DSP 侧的 <code>iap.c</code>（协议层）是
+    <b>从 F28335 bootloader 原样移植</b>的 ✓，一个字符都没改 ✓。因此：
+  </p>
+  <table style="margin-top:8px">
+    <tr><th>ARM 侧的东西</th><th>是否要改</th><th>原因</th></tr>
+    <tr><td>IAP 帧格式（<code>HR</code> / 擦除请求 / 数据包 / EOT）</td><td class="ok">不变 ✓</td>
+        <td>DSP 侧代码同一份 ✓</td></tr>
+    <tr><td>擦除应答案（13 字节 <code>01 10 04 38 … 11 03 D1</code>）</td><td class="ok">不变 ✓</td>
+        <td>DSP 逐字节回同样的常量 ✓</td></tr>
+    <tr><td>包地址编码 <code>Addr = 0x01FE + 0xFF×包号</code></td><td class="ok">不变 ✓</td>
+        <td>DSP 自己换算成 Flash 地址 ✓（ARM 只发包号 ✓）</td></tr>
+    <tr><td>CRC16-Modbus（命令帧低字节先 / 数据帧高字节先）</td><td class="ok">不变 ✓</td>
+        <td>DSP 两种都接受 ✓</td></tr>
+    <tr><td>每包 1024 字节 / 最多 <b>367</b> 包</td><td class="warn">容量变了</td>
+        <td>App 区 188144 字（367 KB）；F28335 是 196608 字（384 包）✓ 见下</td></tr>
+    <tr><td><b>下载的镜像内容</b></td><td class="warn">必须换</td>
+        <td>F280039C 的 <code>.bin</code>（由 <code>pack_f28003x.py</code> 生成）✓</td></tr>
+  </table>
+</div>
+
+<h2>一、DSP 侧时序（与 F28335 完全一致）</h2>
+<pre>
+DSP 上电/复位 ──► bootloader 启动
+                  ├ App 无效（空白/CRC 不过）→ 一直监听，直到镜像写成功 ✓
+                  └ App 有效 → 开 3 秒窗口等主机 ──┬ 收到 "HR" → 进入升级 ✓
+                                                  └ 超时 → 校验镜像头后跳进 App ✓
+
+升级过程（ARM 视角）：
+  ARM  →  复位 DSP（或让 App 主动交接：写 0xBFFE 的握手字后跳到 0x080000）
+  DSP  →  "HR"               （就绪，可重复询问）
+  ARM  →  01 10 04 38 00 02 04 00 00 00 00 C3 DD      （擦除请求）
+  DSP  →  01 10 04 38 00 02 04 00 00 00 11 03 D1      （擦除开始应答）
+  DSP  →  （擦除 App 区：扇区 2~47，F28003x 是硬件 Bank Erase，很快 ✓）
+  DSP  →  "CR"               （擦除完成）
+  ARM  →  02 AddrH AddrL &lt;1024 字节&gt; CRCH CRCL        （数据包，Addr=包号编码）
+  DSP  →  "CR"               （每包一条）
+  ...重复到发完...
+  ARM  →  02 00 FF 45 4F 54  （EOT）
+  DSP  →  校验写回 → 跳进新 App（不再复位，直接跑 ✓）
+</pre>
+
+<h2>二、真正需要 ARM 做的事</h2>
+<ol>
+  <li><b>下发 F280039C 的镜像</b> ✓ —— 由云端用
+      <code>py host\pack_f28003x.py app.out app.bin --version …</code> 生成 ✓
+      （每字<b>高字节先</b>，与 DSP 侧 <code>iap_words[i]=(hi&lt;&lt;8)|lo</code> 一致 ✓）。</li>
+  <li><b>容量上限改成 367 包</b> ✓ —— 原来的 384 包上限是按 F28335 的 196608 字算的 ✓；
+      F280039C 的 App 区是 <b>188144 字</b>（0x082000~0x0AFEEF，367 KB）→ 上限 <b>367 包</b> ✓
+      （DSP 侧 <code>IAP_MAX_PACKET_INDEX = 0x2DEF0/512 - 1 = 366</code>，即包号 0~366 ✓）。
+      超了 DSP 会拒收（<code>idx &gt; IAP_MAX_PACKET_INDEX</code> ✓）。</li>
+  <li><b>单槽，不再需要“选 bank”</b> ✓ —— 旧 LDFU 三 bank 方案才有"写哪一份镜像"的问题 ✗；
+      现在只有一份 App 区 ✓，云端下发同一份即可 ✓。</li>
+  <li><b>可选</b>：校验 DSP 回报的版本号（镜像头字 8..9 的 version ✓）。</li>
+</ol>
+
+<h2>三、时间参数（F280039C 更快，旧超时仍然安全）</h2>
+<table>
+  <tr><th>环节</th><th>F28335 实测/设定</th><th>F280039C</th><th>建议</th></tr>
+  <tr><td>擦除（整个 App 区）</td><td>约 9.4 s（8 扇区逐扇区）</td>
+      <td>硬件 Bank Erase，<b>明显更快</b> ✓</td>
+      <td class="ok">沿用 12 s 超时 ✓ 安全</td></tr>
+  <tr><td>每包应答</td><td>1.2 s 超时</td><td>Flash 编程更快 ✓</td>
+      <td class="ok">沿用即可 ✓</td></tr>
+  <tr><td>HR 等待</td><td>2 s × 5 次</td><td>bootloader 窗口是 <b>3 s</b> ✓</td>
+      <td class="warn">首次询问留 ≤3 s 内 ✓，重试要重新复位/交接 ✓</td></tr>
+</table>
+<p class="dim">
+  注意 DSP 侧有两个独立超时：<code>IAP_FRAME_TIMEOUT_MS = 5000</code>（等一帧的开始 ✓）
+  与 <code>IAP_BYTE_GAP_MS = 20</code>（帧内两字节之间 ✓）。
+  所以<b>一个帧内的字节必须连续发</b> ✗ —— 中间插入几百毫秒的其他事务会触发断帧 ✓。
+</p>
+
+<h2>四、触发升级的两条路（都不改协议）</h2>
+<table>
+  <tr><th>方式</th><th>做法</th><th>适用</th></tr>
+  <tr><td class="ok">复位 + HR</td>
+      <td>ARM 拉 DSP 复位（或让 DSP 软复位）→ 3 秒窗口内发 "HR" ✓</td>
+      <td>最常用 ✓ 与 F28335 时代一致 ✓</td></tr>
+  <tr><td class="ok">App 主动交接</td>
+      <td>ARM 发业务命令 → App 自己写 <code>0xBFFE</code> 握手字并跳到 <code>0x080000</code> ✓<br>
+          然后 ARM 立即发 "HR" ✓（bootloader 跳过窗口直接监听 ✓）</td>
+      <td>不想复位、要平滑进入升级时 ✓</td></tr>
+</table>
+<p class="warn">
+  ⚠️ 若 DSP 处于「App 有效且已过窗口」的运行态，那时它<b>不在监听</b> ✗ ——
+  直接发 HR 不会有任何回应 ✓。必须先复位/交接 ✓。
+</p>
+
+<h2>五、失败处理（不变，但结果更好）</h2>
+<table>
+  <tr><th>失败点</th><th>现象</th><th>结果</th></tr>
+  <tr><td>发 HR 无回应</td><td>超时</td><td class="ok">DSP 仍在跑旧 App ✓（不影响生产）</td></tr>
+  <tr><td>擦除无应答</td><td>超时</td><td class="ok">旧 App 已被擦 ✗ → DSP 停在 bootloader 监听 ✓ 可重试 ✓</td></tr>
+  <tr><td>传一半断电</td><td>—</td><td class="ok">镜像头 CRC 不过 → bootloader <b>不跳转</b> ✓ 继续监听 ✓ 重传即可 ✓</td></tr>
+  <tr><td>数据传输 CRC 错</td><td>DSP 回 NAK/不应答</td><td>重发该包（现有重试逻辑 ✓）</td></tr>
+</table>
+<p class="dim">
+  关键改进：升级"写了一半"的镜像<b>永远不会被执行</b> ✓（bootloader 的 magic+长度+CRC32
+  三重校验 ✓）→ 所以 ARM 侧不需要复杂的回滚逻辑 ✓，上报失败让用户重试即可 ✓。
+</p>
+
+<h2>六、ARM 侧改动清单（照这个改就够）</h2>
+<ol>
+  <li>把镜像换成 F280039C 的 <code>.bin</code> ✓（<code>pack_f28003x.py</code> 产出 ✓）</li>
+  <li>包数上限 384 → <b>367</b> ✓</li>
+  <li>删除/绕过一切"bank 选择"逻辑（若有）✓</li>
+  <li>HR 首次等待 ≤3 s（bootloader 窗口）✓</li>
+  <li>其余协议代码<b>保持原样</b> ✓✓</li>
+</ol>
+
+<h2>七、联调验收</h2>
+<ol>
+  <li>发 HR 能收到 "HR" ✓</li>
+  <li>擦除请求能收到 13 字节应答，随后收到 "CR" ✓</li>
+  <li>9 包（≈8 KB）传输完成后，DSP 串口出现新版 App 的启动横幅 ✓</li>
+  <li>再升级一次（换版本号）→ 横幅版本随之变化 ✓</li>
+  <li>传输中途断电 → 重新上电仍是旧版本 ✓</li>
+</ol>
+
+<hr>
+<p class="dim">
+  协议源码（DSP 侧，可从 ARM 侧对照实现）：<code>f28003x_boot\src\iap.c</code>；
+  PC 侧参考实现：<code>host\dsp_iap_core.py</code>；
+  历史协议说明：<code>docs\DSP_IAP_PROTOCOL.md</code>。
+</p>
+
+</div>
+</body>
+</html>

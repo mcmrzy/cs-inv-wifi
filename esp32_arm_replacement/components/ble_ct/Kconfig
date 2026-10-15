@@ -1,0 +1,13 @@
+menuconfig BLE_CT_ENABLED
+    bool "Enable BLE Control & Telemetry (CSIV-CT)"
+    default y
+    help
+        Enable BLE local mode for device control and telemetry.
+
+config BLE_CT_AUTH_LOCKOUT_SECONDS
+    int "Auth failure lockout duration (seconds)"
+    default 60
+
+config BLE_CT_BIND_WINDOW_SECONDS
+    int "Binding window duration (seconds)"
+    default 600
