@@ -612,6 +612,10 @@ void mqtt_flush_offline_cache(void)
     if (!g_mqtt_client || !atomic_load(&g_mqtt_connected)) {
         return;
     }
+    if (offline_cache_is_quiet()) {
+        return;
+    }
+
 
     int cached = offline_cache_count();
     if (cached == 0) {

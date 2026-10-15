@@ -66,6 +66,7 @@ static TaskHandle_t g_remote_task;
 static atomic_bool g_cancel_requested;
 static atomic_uint_fast32_t g_main_loop_tick;
 static bool g_active;
+static bool g_config_change_active;
 static bool g_boot_validation_required;
 static StorageOtaPending g_boot_pending;
 /* 传输缓冲按目标选择：BLE→ESP 的分片不超过 256B，其他路径保留 4608B。 */
@@ -133,6 +134,7 @@ static void update_snapshot(OtaState state, uint8_t progress,
 static void release_active(void)
 {
     if (!g_lock || xSemaphoreTake(g_lock, portMAX_DELAY) != pdTRUE) return;
+    if (g_manifest.target != OTA_TARGET_ESP) offline_cache_set_quiet(false);
     g_active = false;
     xSemaphoreGive(g_lock);
 }
@@ -463,7 +465,7 @@ static OtaResult validate_manifest_cheap(const OtaManifest* manifest)
         return OTA_RESULT_INVALID_TARGET;
     }
     /* BMS 与 ARM/DSP 走同一采集器 PULL 通道 (IAP param1=3), 由 ARM boot
-     * 中转到 BMS 线协议; 链路速率 9600 baud, 全程按进度回报续命云端超时。 */
+     * 中转到 BMS 线协议; 链路速率 115200 baud, 全程按进度回报续命云端超时。 */
     if (manifest->target == OTA_TARGET_BMS && manifest->file_size > OTA_BMS_MAX_SIZE) {
         return OTA_RESULT_FILE_TOO_LARGE;
     }
@@ -496,7 +498,9 @@ static OtaResult check_available(const OtaManifest* manifest)
         return OTA_RESULT_INTERNAL;
     }
     OtaResult result = OTA_RESULT_OK;
-    if (g_active) {
+    if (g_config_change_active) {
+        result = OTA_RESULT_BUSY;
+    } else if (g_active) {
         result = strcmp(g_snapshot.task_id, manifest->task_id) == 0
             ? OTA_RESULT_DUPLICATE : OTA_RESULT_BUSY;
     }
@@ -555,6 +559,10 @@ static OtaResult reserve_manifest(const OtaManifest* manifest)
     if (!g_lock || xSemaphoreTake(g_lock, portMAX_DELAY) != pdTRUE) {
         return OTA_RESULT_INTERNAL;
     }
+    if (g_config_change_active) {
+        xSemaphoreGive(g_lock);
+        return OTA_RESULT_BUSY;
+    }
     if (g_active) {
         const bool duplicate = strcmp(g_snapshot.task_id, manifest->task_id) == 0;
         xSemaphoreGive(g_lock);
@@ -574,6 +582,7 @@ static OtaResult reserve_manifest(const OtaManifest* manifest)
     strlcpy(g_snapshot.error_code, "OK", sizeof(g_snapshot.error_code));
     atomic_store(&g_cancel_requested, false);
     OtaSnapshot copy = g_snapshot;
+    if (manifest->target != OTA_TARGET_ESP) offline_cache_set_quiet(true);
     xSemaphoreGive(g_lock);
     disable_wifi_ps();
     notify_snapshot(&copy);
@@ -1324,6 +1333,22 @@ bool ota_service_is_busy(void)
         xSemaphoreGive(g_lock);
     }
     return active;
+}
+
+bool ota_service_begin_config_change(void)
+{
+    if (!g_lock || xSemaphoreTake(g_lock, portMAX_DELAY) != pdTRUE) return false;
+    bool accepted = !g_active && !g_config_change_active;
+    if (accepted) g_config_change_active = true;
+    xSemaphoreGive(g_lock);
+    return accepted;
+}
+
+void ota_service_end_config_change(void)
+{
+    if (!g_lock || xSemaphoreTake(g_lock, portMAX_DELAY) != pdTRUE) return;
+    g_config_change_active = false;
+    xSemaphoreGive(g_lock);
 }
 
 const char* ota_service_get_task_id(void)

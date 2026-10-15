@@ -28,6 +28,7 @@
 #include "arm_ota.h"
 #include "debug_log.h"
 #include "ota_mqtt_adapter.h"
+#include "serial_admin.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -193,10 +194,17 @@ static void main_loop_task(void *arg)
     for (;;) {
         /* ARM 只读信息 SN 与 NVS 不一致 → 重启使 MQTT topic/client_id 生效;
            配网进行中 (s_prov_busy) 不重启, 等配网结束 */
-        if (arm_poll_sn_changed() && !s_prov_busy) {
-            ESP_LOGW(TAG, "SN updated by ARM, restarting in 2s ...");
-            vTaskDelay(pdMS_TO_TICKS(2000));   /* 让 App 先收到状态/日志 */
-            esp_restart();
+        if (arm_poll_sn_changed()) {
+            if (!s_prov_busy) {
+                ESP_LOGW(TAG, "SN synchronized with ARM, restarting in 2s ...");
+                vTaskDelay(pdMS_TO_TICKS(2000));   /* 让 App 先收到状态/日志 */
+                esp_restart();
+            }
+            /* Wait for provisioning to finish without publishing with mixed
+             * old/new identity or resurrecting old retained status. */
+            esp_task_wdt_reset();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
         }
         switch (s_state) {
         case STATE_INIT:
@@ -255,7 +263,14 @@ static void main_loop_task(void *arg)
         }
 
         /* 周期任务 (ARM 轮询始终运行, 与 MQTT 状态无关) */
+        serial_admin_tick();
         arm_poll_tick();
+        serial_admin_tick(); /* report completed save before next-loop restart */
+        if (arm_poll_sn_changed()) {
+            esp_task_wdt_reset();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
         telemetry_tick();
         debug_log_tick();      /* 调试模式生效时把串口日志批量上行 */
         sntp_sync_tick();
@@ -354,6 +369,7 @@ void app_main(void)
 
     setup_wifi();
     sntp_sync_init();
+    serial_admin_init();
 
     enter_state(STATE_INIT);
 

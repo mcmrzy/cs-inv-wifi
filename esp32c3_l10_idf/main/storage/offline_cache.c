@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -56,11 +57,16 @@ static SemaphoreHandle_t s_mutex = NULL;
 /* Write batch buffer */
 static OfflineCacheItem *s_batch = NULL;
 /* OTA 静默窗口: 暂停周期补传 (缓冲继续积压, 事后照常补) */
-static volatile bool s_quiet = false;
+static atomic_bool s_quiet;
 
 void offline_cache_set_quiet(bool quiet)
 {
-    s_quiet = quiet;
+    atomic_store(&s_quiet, quiet);
+}
+
+bool offline_cache_is_quiet(void)
+{
+    return atomic_load(&s_quiet);
 }
 static int s_batch_count = 0;
 static int64_t s_batch_start_ms = 0;
@@ -467,7 +473,7 @@ void offline_cache_process(void) {
     s_last_process_ms = current_ms;
 
     if (xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
-    if (s_quiet) {
+    if (offline_cache_is_quiet()) {
         /* 不能持锁 return：main_loop 下一次调用会永久阻塞在同一把非递归 mutex，
          * 随后持续触发 Task WDT，且 OTA 结束也无法恢复。 */
         xSemaphoreGive(s_mutex);
@@ -554,11 +560,12 @@ bool offline_cache_reserve_space(size_t bytes) {
 }
 
 int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *payload, uint32_t timestamp)) {
+    if (offline_cache_is_quiet()) return 0;
     if (!s_initialized || !send_func) return 0;
 
     /* 首先刷新 RAM 批次缓冲到 SPIFFS (持 mutex) */
     xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200));
-    if (s_batch_count > 0) {
+    if (s_batch_count > 0 && !offline_cache_is_quiet()) {
         flush_batch();
         s_batch_start_ms = now_ms();
     }
@@ -570,9 +577,13 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
     ESP_LOGI(TAG, "Flushing cached batches...");
 
     /* 逐文件处理: 读取持 mutex, 发送释放 mutex, 删除再持 mutex */
-    while (1) {
+    while (!offline_cache_is_quiet()) {
         /* 1. 持 mutex: 找到最旧文件 + 读取内容 */
         if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) != pdTRUE) break;
+        if (offline_cache_is_quiet()) {
+            xSemaphoreGive(s_mutex);
+            break;
+        }
 
         uint32_t min_seq = find_min_seq();
         if (min_seq == UINT32_MAX) {
@@ -583,8 +594,12 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
         make_filename(min_seq, path, sizeof(path));
         cJSON *arr = read_batch_file(path);
         if (!arr) {
-            remove(path);
+            const int removed = remove(path);
             xSemaphoreGive(s_mutex);
+            if (removed != 0) {
+                ESP_LOGW(TAG, "Unable to remove invalid cache batch %s", path);
+                break;
+            }
             continue;
         }
         xSemaphoreGive(s_mutex);
@@ -596,6 +611,12 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
 
         for (int i = 0; i < n; i++) {
             cJSON *item = cJSON_GetArrayItem(arr, i);
+            if (offline_cache_is_quiet()) {
+                batch_ok = false;
+                first_unsent = i;
+                break;
+            }
+
             cJSON *jt = cJSON_GetObjectItem(item, "t");
             cJSON *jp = cJSON_GetObjectItem(item, "p");
             cJSON *jts = cJSON_GetObjectItem(item, "ts");
@@ -640,18 +661,23 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
             }
 
             if (batch_ok) {
-                remove(path);
-                s_total_msgs -= (s_total_msgs >= (uint32_t)n) ? (uint32_t)n : s_total_msgs;
+                if (remove(path) == 0) {
+                    s_total_msgs -= (s_total_msgs >= (uint32_t)n) ? (uint32_t)n : s_total_msgs;
+                } else {
+                    ESP_LOGW(TAG, "Unable to remove sent cache batch %s", path);
+                    batch_ok = false;
+                }
             }
             xSemaphoreGive(s_mutex);
         }
 
         cJSON_Delete(arr);
         if (!batch_ok) break;
+        vTaskDelay(1);
     }
 
     /* 最终元数据更新 */
-    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    if (!offline_cache_is_quiet() && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
         s_total_msgs = count_all_messages();
         if (sent > 0 && failed == 0) {
             s_last_sync = now_epoch();

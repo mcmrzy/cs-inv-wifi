@@ -29,6 +29,7 @@ extern "C" {
 #define CS_CMD_READ_R_DATA      0x06
 #define CS_CMD_CTRLCMD          0x07
 #define CS_CMD_READ_BATTSUM     0x08
+#define CS_CMD_WRITE_SN         0x09 /* CS App: p1=0, p2=16, zero-padded ASCII SN */
 #define CS_CMD_READ_TEST_RUNPARAM 0x14
 
 #define CS_BATTSUM_LAYOUT       0

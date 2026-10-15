@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.16)
 project(ble_host_tests C)
 enable_testing()
+add_executable(test_admin_sn_command test_admin_sn_command.c ../../main/app/admin_sn_command.c)
+target_include_directories(test_admin_sn_command PRIVATE ../../main/app)
+if(MSVC)
+  target_compile_options(test_admin_sn_command PRIVATE /utf-8)
+endif()
+add_test(NAME admin_sn_command COMMAND test_admin_sn_command)
+add_executable(test_serial_admin test_serial_admin.c ../../main/app/admin_sn_command.c
+  ../../main/app/serial_admin.c)
+target_include_directories(test_serial_admin PRIVATE . ../../main/app ../../main/telemetry)
+target_compile_definitions(test_serial_admin PRIVATE HOST_TEST)
+target_compile_features(test_serial_admin PRIVATE c_std_11)
+if(MSVC)
+  target_compile_options(test_serial_admin PRIVATE /utf-8)
+endif()
+add_test(NAME serial_admin COMMAND test_serial_admin)
 set(CJSON_DIR "$ENV{IDF_PATH}/components/json/cJSON" CACHE PATH "Directory containing the firmware's cJSON.c")
 if(NOT EXISTS "${CJSON_DIR}/cJSON.c")
   message(FATAL_ERROR "Set CJSON_DIR to the ESP-IDF cJSON directory")
@@ -64,7 +79,9 @@ add_test(NAME debug_log_ring COMMAND test_debug_log_ring)
 
 add_executable(test_offline_cache_quiet_lock test_offline_cache_quiet_lock.c)
 target_compile_definitions(test_offline_cache_quiet_lock PRIVATE
-  OFFLINE_CACHE_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../../main/storage/offline_cache.c")
+  OFFLINE_CACHE_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../../main/storage/offline_cache.c"
+  MQTT_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../../main/mqtt/mqtt_handler.c"
+  OTA_SERVICE_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/../../main/ota/ota_service.c")
 if(MSVC)
   target_compile_definitions(test_offline_cache_quiet_lock PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
@@ -101,9 +118,10 @@ endif()
 add_test(NAME telemetry_bms COMMAND test_telemetry_bms)
 
 add_executable(test_arm_bms_poll test_arm_bms_poll.c
-  ../../main/telemetry/cs_protocol.c)
+  ../../main/telemetry/cs_protocol.c ../../main/app/serial_admin.c
+  ../../main/app/admin_sn_command.c)
 target_include_directories(test_arm_bms_poll PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}" ../../main/telemetry)
+  "${CMAKE_CURRENT_SOURCE_DIR}" ../../main/telemetry ../../main/app)
 target_compile_features(test_arm_bms_poll PRIVATE c_std_11)
 target_compile_definitions(test_arm_bms_poll PRIVATE HOST_TEST)
 if(MSVC)

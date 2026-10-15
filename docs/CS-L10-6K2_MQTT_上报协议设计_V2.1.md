@@ -142,6 +142,9 @@ V2.1 在 V2.0 基础上的三个核心变化：
 | `cs_inv/{sn}/cmd` | 1 | — | 按需（云端→ESP32） | 云端 | 控制命令下行 |
 | `cs_inv/{sn}/cmd/response` | 1 | false | 按需（ESP32→云端） | ESP32 | 命令执行结果上行 |
 | `cs_inv/{sn}/ota/cmd`、`ota/status` | 1 | — | 按需 | — | OTA（沿用现有） |
+| `cs_inv/{sn}/debug/log` | 0 | false | 仅调试模式生效期间，按批（≤1 批/s） | ESP32 | 串口日志上云，便于远程判读（ARM 轮询超时、OTA、WiFi 等）；后端不解析 |
+
+> **调试模式（`set_debug_telemetry`）**：设备侧把 heartbeat 周期从 180s 临时切到 `args=[enabled, interval_s, duration_s]` 指定值（默认 5s，5..3600s；时长默认 1h，上限 24h），到期、收到关闭命令或重启后自动恢复 180s，不持久化。生效期间串口日志同时按批上行到 `cs_inv/{sn}/debug/log`，payload 为 `{"lines":["…"],"n":<行数>[,"dropped":<溢出丢弃字节数>]}`（`lines` 为串口日志原文，不含时间戳；信封 `t` 为上报时刻）。关闭调试模式后不再上行。
 
 > **时间戳**：所有上行数据由 ESP32 添加 Unix 秒级时间戳（NTP 同步），与现有实现一致。
 > **上报失败**：不得补发已过期的实时快照（heartbeat 可丢弃）；告警、命令结果、配置状态必须保留到确认投递（QoS 1 + 离线缓存）。

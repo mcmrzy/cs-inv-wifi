@@ -1,5 +1,12 @@
 menu "CS_INV L10 Module"
 
+    config CS_INV_ADMIN_PASSWORD
+        string "USB serial administrator password (empty disables SN changes)"
+        default ""
+        help
+            Independent password for set_sn <password> <SN> on USB Serial/JTAG.
+            SN writes require matching ARM App CS 0x09 support and verified readback.
+
     config CS_INV_UART_TX_PIN
         int "UART TX GPIO (U0TXD)"
         default 1
@@ -10,7 +17,7 @@ menu "CS_INV L10 Module"
 
     config CS_INV_UART_BAUD
         int "UART baudrate"
-        default 9600
+        default 115200
 
     config CS_INV_WIFI_SSID
         string "WiFi SSID (NVS 无配置时使用, 留空则等待)"

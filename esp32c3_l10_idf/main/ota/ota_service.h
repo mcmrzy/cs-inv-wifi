@@ -110,6 +110,10 @@ OtaResult ota_service_cancel(const char* task_id);
 
 bool ota_service_get_snapshot(OtaSnapshot* snapshot);
 bool ota_service_is_busy(void);
+/* Configuration changes and OTA reservations share the same mutex.
+ * Successful begin must be paired with end, or retained until restart. */
+bool ota_service_begin_config_change(void);
+void ota_service_end_config_change(void);
 const char* ota_service_get_task_id(void);
 void ota_service_process(void);
 bool ota_service_schedule_reboot(uint32_t delay_ms);

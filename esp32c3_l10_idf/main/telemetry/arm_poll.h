@@ -40,6 +40,19 @@ bool onlyread_sn_to_str(const OnlyReadDataDef *o, char *out, size_t len);
 /* ARM 只读信息 SN 与 NVS 不一致 (待重启生效) */
 bool arm_poll_sn_changed(void);
 
+typedef enum {
+    ARM_SN_IDLE, ARM_SN_PENDING, ARM_SN_OK, ARM_SN_REJECTED,
+    ARM_SN_TIMEOUT, ARM_SN_MISMATCH, ARM_SN_NVS_FAILED,
+    ARM_SN_TX_FAILED, ARM_SN_INTERRUPTED
+} arm_sn_result_t;
+/* Call from main loop, after reserving configuration access against OTA.
+ * 0=accepted, -1=busy, -2=invalid SN. Only alphanumeric ASCII, 1..16 bytes.
+ * A failure keeps ESP identity unchanged and suppresses automatic ARM SN adoption
+ * until reboot or a successful authenticated retry. */
+int arm_poll_request_sn(const char *sn);
+bool arm_poll_sn_busy(void);
+arm_sn_result_t arm_poll_sn_result(void);
+
 /* 最近一次 可读写数据 (含 UTC 回读) */
 extern ReadWiteDataDef g_read_write;
 

@@ -1,7 +1,7 @@
 /*
  * arm_poll.c — ARM 串口轮询调度
  *
- *  UART1 (9600, 8N1) 连接 ARM 采集器接口 :
+ *  UART1 (115200, 8N1) 连接 ARM 采集器接口 :
  *   - 每 30s 轮询运行参数 (READ_RUNPARAM 0x03E8, 174B): 保活 + 数据保鲜
  *     (请求长度随 RUN_PARAM_SIZE 自动为 174B)
  *   - 只读信息 (READ_R_DATA 0x0190, 52B) 事件性读取: 上电/MQTT连接/query_info 时,
@@ -31,7 +31,7 @@
 
 static const char *TAG = "ARMPOLL";
 
-/* 应答超时 (ms): 9600 波特率下 174B 帧 ~180ms, ARM 处理 <100ms; 800ms 覆盖收帧+处理 */
+/* 应答超时 (ms): 115200 波特率下 174B 帧 ~15ms, ARM 处理 <100ms; 800ms 沿用不收紧 */
 #define ARM_RESP_TIMEOUT_MS    800
 /* 接收字节间隔超时 (ms), 与 ARM 端 1s 一致, 防止残帧堆积 */
 #define ARM_RX_GAP_TIMEOUT_MS  1000
@@ -57,6 +57,13 @@ static uint32_t s_rx_last_byte_ms;
 
 /* ARM 只读信息 SN 与 NVS 不一致 → 置位, 主循环检测后重启生效 */
 static volatile bool s_sn_changed;
+static bool s_sn_sync_blocked;
+static enum { SN_IDLE, SN_SEND_WRITE, SN_WAIT_WRITE, SN_SEND_READ,
+              SN_WAIT_READ, SN_COMMIT } s_sn_phase;
+static arm_sn_result_t s_sn_result;
+static uint8_t s_sn_bytes[16];
+static char s_requested_sn[17];
+static volatile bool s_quiet = false;
 
 /* 写命令队列 (单槽) */
 static struct {
@@ -97,14 +104,14 @@ static uint32_t now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-static void send_frame_cmd(uint8_t cmd, uint16_t param1, uint16_t param2,
+static bool send_frame_cmd(uint8_t cmd, uint16_t param1, uint16_t param2,
                            const uint8_t *data)
 {
     uint8_t out[CS_FRAME_MAX * 2 + 4];
     size_t n = cs_frame_send(out, cmd, param1, param2, data, esp_random());
     if (n == 0) {
         ESP_LOGE(TAG, "frame too large");
-        return;
+        return false;
     }
     /* ARM 已连接时每帧打印 TX; 断连后降频 (每 10 次打一次, 与 timeout 节流同步) */
     if (g_arm_stat.connected || s_timeout_count <= 1 || s_timeout_count % 10 == 0) {
@@ -112,12 +119,13 @@ static void send_frame_cmd(uint8_t cmd, uint16_t param1, uint16_t param2,
                  param2, n, UART_INVERT_TX ? " (inv)" : "");
     }
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, out, MIN(n, 16), ESP_LOG_DEBUG);
-    uart_write_bytes(UART_PORT_NUM, out, n);
+    if (uart_write_bytes(UART_PORT_NUM, out, n) != (int)n) return false;
     s_wait_resp = true;
     s_wait_cmd = cmd;
     s_wait_param1 = param1;
     s_wait_param2 = param2;
     s_wait_start_ms = s_now_ms;
+    return true;
 }
 
 /* ---------------- 接收分发 (UART RX 任务) ---------------- */
@@ -237,6 +245,7 @@ bool onlyread_sn_to_str(const OnlyReadDataDef *o, char *out, size_t len)
    更新并置重启标志; 一致时零写入 (保护 NVS 擦写寿命) */
 static void sync_sn_from_onlyread(void)
 {
+    if (s_sn_sync_blocked) return;
     char arm_sn[32];
     if (!onlyread_sn_to_str(&g_only_read, arm_sn, sizeof(arm_sn))) {
         return;
@@ -246,7 +255,6 @@ static void sync_sn_from_onlyread(void)
         strlcpy(old_sn, g_device_sn, sizeof(old_sn));
         /* 换 SN 前清掉旧 SN 的 retained status: 否则旧主题会作为"幽灵设备"
          * 永久留在 broker/设备列表里 (见 mqtt_clear_retained_status 注释)。 */
-        mqtt_clear_retained_status(old_sn);
         if (!storage_set_sn(arm_sn)) {
             /* NVS 写失败(分区满/碎片)时绝不能置重启标志: 否则每次开机都同步一次
              * 又一次重启, 设备永远起不来, 现场表现得像"配网/配置全丢"。 */
@@ -254,11 +262,20 @@ static void sync_sn_from_onlyread(void)
                      arm_sn, old_sn);
             return;
         }
+        mqtt_clear_retained_status(old_sn);
         strlcpy(g_device_sn, arm_sn, sizeof(g_device_sn));
         s_sn_changed = true;
         ESP_LOGW(TAG, "SN from ARM: %s (was %s), restart to apply",
                  arm_sn, old_sn);
     }
+}
+
+/* Caller holds s_param_mutex. Terminal results persist for console reporting. */
+static void finish_sn(arm_sn_result_t result)
+{
+    s_sn_result = result;
+    s_sn_phase = SN_IDLE;
+    s_wait_resp = false;
 }
 
 static void handle_frame(uint8_t *raw, size_t len)
@@ -294,6 +311,17 @@ static void handle_frame(uint8_t *raw, size_t len)
     }
 
     switch (cmd) {
+    case CS_CMD_WRITE_SN:
+        /* Strict status response: cmdlen=12, p1=0, p2=1, data[0]=err.
+         * Reject malformed/unrelated replies without advancing the transaction. */
+        if (s_sn_phase == SN_WAIT_WRITE && s_wait_resp &&
+            s_wait_cmd == cmd && param1 == 0 && param2 == 1 &&
+            raw[CS_OFF_CMDLEN] == 12 && raw[CS_OFF_CMDLEN + 1] == 0) {
+            s_wait_resp = false;
+            if (data[0] == 0) s_sn_phase = SN_SEND_READ;
+            else finish_sn(ARM_SN_REJECTED);
+        }
+        break;
     case CS_CMD_READ_RUNPARAM:            /* 0x03 运行参数应答 */
         if (param2 == RUN_PARAM_SIZE && len >= 8 + RUN_PARAM_SIZE) {
             memcpy(&g_run_param, data, RUN_PARAM_SIZE);
@@ -321,6 +349,21 @@ static void handle_frame(uint8_t *raw, size_t len)
         }
         break;
     case CS_CMD_READ_R_DATA:              /* 0x06 只读信息应答 */
+        if (s_sn_phase == SN_WAIT_READ && s_wait_resp &&
+            s_wait_cmd == cmd && param1 == ONLYREAD_START_INDEX &&
+            param2 == ONLYREAD_DATA_SIZE &&
+            raw[CS_OFF_CMDLEN] == 8 + ONLYREAD_DATA_SIZE &&
+            raw[CS_OFF_CMDLEN + 1] == 0) {
+            s_wait_resp = false;
+            if (memcmp(data + 10, s_sn_bytes, sizeof(s_sn_bytes)) == 0) {
+                memcpy(&g_only_read, data, ONLYREAD_DATA_SIZE);
+                g_arm_stat.last_info_ms = now;
+                s_sn_phase = SN_COMMIT;
+            } else finish_sn(ARM_SN_MISMATCH);
+            break;
+        }
+        /* Ignore stale info while setting SN, including replies before ACK. */
+        if (s_sn_phase != SN_IDLE) break;
         if (param2 == ONLYREAD_DATA_SIZE && len >= 8 + ONLYREAD_DATA_SIZE) {
             memcpy(&g_only_read, data, ONLYREAD_DATA_SIZE);
             dump_fields("ONLYREAD", ONLYREAD_START_INDEX,
@@ -390,6 +433,12 @@ static void uart_rx_task(void *arg)
     (void)arg;
     for (;;) {
         int n = uart_read_bytes(UART_PORT_NUM, buf, sizeof(buf), pdMS_TO_TICKS(100));
+        /* RX task exclusively owns PPP assembly and gap expiry. Never reset
+         * this buffer from the scheduler while a received chunk is parsed. */
+        if (s_rx_active && (now_ms() - s_rx_last_byte_ms) > ARM_RX_GAP_TIMEOUT_MS) {
+            cs_ppp_rx_init(&s_ppp_rx);
+            s_rx_active = false;
+        }
         if (n > 0) {
             uint8_t raw[CS_FRAME_MAX];
             int i;
@@ -441,6 +490,11 @@ void arm_poll_init(void)
     s_last_utc_ms = 0;
     s_rx_active = false;
     s_write_pending.active = false;
+    s_sn_changed = false;
+    s_sn_sync_blocked = false;
+    s_sn_phase = SN_IDLE;
+    s_sn_result = ARM_SN_IDLE;
+    s_quiet = false;
     s_timeout_count = 0;
     memset(s_write_cbs, 0, sizeof(s_write_cbs));
 
@@ -482,16 +536,59 @@ void arm_poll_request_config(void)
 int arm_poll_send_write(uint8_t cmd, uint16_t param1, uint16_t param2,
                         const uint8_t *data)
 {
-    if (s_write_pending.active) {
+    if (!data || !param2 || param2 > WRITE_DATA_MAX ||
+        xSemaphoreTake(s_param_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return -1;
+    if (s_write_pending.active || s_sn_phase != SN_IDLE || s_sn_changed) {
+        xSemaphoreGive(s_param_mutex);
         return -1;    /* 忙 */
     }
-    s_write_pending.active = true;
     s_write_pending.cmd = cmd;
     s_write_pending.param1 = param1;
     s_write_pending.param2 = param2;
-    s_write_pending.data_len = (param2 > WRITE_DATA_MAX) ? WRITE_DATA_MAX : param2;
+    s_write_pending.data_len = param2;
     memcpy(s_write_pending.data, data, s_write_pending.data_len);
+    s_write_pending.active = true;
+    xSemaphoreGive(s_param_mutex);
     return 0;
+}
+
+int arm_poll_request_sn(const char *sn)
+{
+    if (!sn) return -2;
+    size_t length = strlen(sn);
+    if (!length || length > 16) return -2;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)sn[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+              (c >= 'a' && c <= 'z'))) return -2;
+    }
+    if (xSemaphoreTake(s_param_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return -1;
+    if (s_sn_phase != SN_IDLE || s_sn_changed || s_write_pending.active ||
+        s_wait_resp || s_cfg_phase || s_quiet || arm_ota_active()) {
+        xSemaphoreGive(s_param_mutex);
+        return -1;
+    }
+    memset(s_sn_bytes, 0, sizeof(s_sn_bytes));
+    memcpy(s_sn_bytes, sn, length);
+    memcpy(s_requested_sn, sn, length + 1);
+    s_sn_sync_blocked = true;
+    s_sn_result = ARM_SN_PENDING;
+    s_sn_phase = SN_SEND_WRITE;
+    xSemaphoreGive(s_param_mutex);
+    return 0;
+}
+
+arm_sn_result_t arm_poll_sn_result(void)
+{
+    if (xSemaphoreTake(s_param_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return ARM_SN_PENDING;
+    arm_sn_result_t result = s_sn_result;
+    xSemaphoreGive(s_param_mutex);
+    return result;
+}
+
+bool arm_poll_sn_busy(void)
+{
+    return arm_poll_sn_result() == ARM_SN_PENDING;
 }
 
 bool arm_poll_write_pending(void)
@@ -547,22 +644,44 @@ void arm_poll_set_ctrl_snapshot_cb(arm_ctrl_snapshot_cb_t cb)
 /* OTA 静默窗口: 停发周期轮询(0x03), 但保留残帧超时/应答超时等状态维护,
  * 使恢复后不会因为计数或残帧而误判。仅 ESP 自升级用 (ARM/DSP/BMS 的传输
  * 通道就是这条 UART, 绝不能停)。 */
-static volatile bool s_quiet = false;
-
 void arm_poll_set_quiet(bool quiet)
 {
     s_quiet = quiet;
 }
 
-void arm_poll_tick(void)
+static void arm_poll_tick_locked(void)
 {
     s_now_ms = now_ms();
 
-    /* 1. 接收残帧超时重置 (与 ARM 端 1s 超时一致) */
-    if (s_rx_active && (s_now_ms - s_rx_last_byte_ms) > ARM_RX_GAP_TIMEOUT_MS) {
-        cs_ppp_rx_init(&s_ppp_rx);
-        s_rx_active = false;
+    /* Dedicated SN transaction owns the transport until terminal result.
+     * Receive dispatcher and scheduler share the same parameter lock. */
+    if (s_sn_phase != SN_IDLE) {
+        if (arm_ota_active() || s_quiet) finish_sn(ARM_SN_INTERRUPTED);
+        else if (s_wait_resp && (s_now_ms - s_wait_start_ms) > ARM_RESP_TIMEOUT_MS)
+            finish_sn(ARM_SN_TIMEOUT);
+        else if (s_sn_phase == SN_SEND_WRITE) {
+            s_sn_phase = SN_WAIT_WRITE;
+            if (!send_frame_cmd(CS_CMD_WRITE_SN, 0, sizeof(s_sn_bytes), s_sn_bytes))
+                finish_sn(ARM_SN_TX_FAILED);
+        } else if (s_sn_phase == SN_SEND_READ) {
+            s_sn_phase = SN_WAIT_READ;
+            s_info_requested = false;
+            s_last_info_req_ms = s_now_ms;
+            if (!send_frame_cmd(CS_CMD_READ_R_DATA, ONLYREAD_START_INDEX, ONLYREAD_DATA_SIZE, NULL))
+                finish_sn(ARM_SN_TX_FAILED);
+        } else if (s_sn_phase == SN_COMMIT) {
+            if (!storage_set_sn(s_requested_sn)) finish_sn(ARM_SN_NVS_FAILED);
+            else {
+                mqtt_clear_retained_status(g_device_sn);
+                /* Keep running MQTT/BLE identity stable. ensure_sn() loads the
+                 * committed identity after restart. */
+                s_sn_changed = true;
+                finish_sn(ARM_SN_OK);
+            }
+        }
+        return;
     }
+    if (s_sn_changed) return; /* identity replacement awaits restart */
 
     /* 2. 写命令应答超时 */
     if (s_wait_resp && (s_now_ms - s_wait_start_ms) > ARM_RESP_TIMEOUT_MS) {
@@ -637,4 +756,11 @@ void arm_poll_tick(void)
             send_frame_cmd(CS_CMD_READ_BATTSUM, 0, 0, NULL);
         }
     }
+}
+
+void arm_poll_tick(void)
+{
+    if (xSemaphoreTake(s_param_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
+    arm_poll_tick_locked();
+    xSemaphoreGive(s_param_mutex);
 }

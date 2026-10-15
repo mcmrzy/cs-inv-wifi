@@ -1,5 +1,18 @@
 # Host regressions
 
+On the configured Windows workstation, `cmd /c tests\host\run_windows.cmd`
+uses the existing Visual Studio and ESP-IDF CMake/Ninja tools.
+
+`admin_sn_command` exercises bounded, non-echoing command input, authentication,
+SN validation, CRLF/backspace, overflow rejection and password-buffer erasure.
+`serial_admin` compiles the real USB command adapter with USB/OTA/scheduler
+boundaries stubbed and checks reservations, retry and log redaction.
+`arm_bms_poll` additionally exercises the complete serial SN command through
+the real scheduler and CS encrypted wire codec, write ACK, readback and NVS
+commit. It covers failure status, malformed/unrelated responses, stale info,
+write/read timeouts, NVS failure, retry, UART write failure and OTA interruption.
+No host test proves USB hardware, ARM firmware persistence or actual reboot.
+
 Use a native C compiler and the same cJSON source as the installed ESP-IDF:
 
 ```sh

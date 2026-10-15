@@ -1,6 +1,8 @@
 idf_component_register(
     SRCS
         "app/app_main.c"
+        "app/admin_sn_command.c"
+        "app/serial_admin.c"
         "telemetry/arm_poll.c"
         "ota/arm_ota.c"
         "ota/arm_iap_codec.c"
@@ -35,6 +37,7 @@ idf_component_register(
         esp_event
         esp_timer
         driver
+        esp_driver_usb_serial_jtag
         mqtt
         json
         lwip

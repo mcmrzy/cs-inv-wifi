@@ -16,7 +16,7 @@
  *    - 块失败 (0x0B status=1, ERROR=101/102/103/0xFF): boot 包号不递增,
  *      本侧重发同一包号 (上限 BMS_PACKET_MAX_RETRIES)
  *    - 末包 ACK 覆盖 0xFC+BMS 整体 CRC32, 等待窗口放宽到 30s
- *    - 全程 ~13-15s/块 (9600 baud), 92KB 约 5-6 分钟
+ *    - 全程 ~0.4-0.7s/块 (115200 baud), 92KB 约 1 分钟
  *
  *  目标选择 (s_iap_target):
  *    ARM-only: p1=1 有货, p1=2 回"无"
@@ -69,8 +69,8 @@ static const char* TAG = "ARM-OTA";
 #define ARMU_RESP_TIMEOUT_MS    2000    /* App 对 ARMU 的应答 */
 #define TRIGGER_ATTEMPTS        3
 #define BOOT_INFO_WINDOW_MS     15000   /* 复位后等 boot 0x09 (覆盖 boot 自检) */
-/* 每包 ACK 等待: 4112B 帧 @9600bps 单程 ≈4.3s, 加 boot→BMS 转发 + 4KB 擦除
- * + ACK 回传, 全往返 ≈13s; 窗口 15s 覆盖。 */
+/* 每包 ACK 等待: 4112B 帧 @115200bps 单程 ≈0.4s, 加 boot→BMS 转发 + 4KB 擦除
+ * + ACK 回传; 窗口 15s 沿用不收紧。 */
 #define PACKET_EVENT_WAIT_MS    15000   /* 0x0A / 每包 ACK 等待 */
 #define ARM_ERASE_WAIT_MS      45000    /* info 应答后等 boot 擦完 APP 区发 0x0A */
 #define DSP_ERASE_WAIT_MS      60000    /* DSP 路径: 握手+擦除 (ARM 侧最长约 24s, 留裕量) */
@@ -622,6 +622,9 @@ static bool pull_transfer(void)
         unsigned bms_retries = 0;
         int64_t wait_ms = first_erase_wait;
         while (!success && !iap_cancelled()) {
+            if (sent >= packets && g_ota_callback) {
+                g_ota_callback(ARM_OTA_VERIFYING, 0, "Waiting for image CRC confirmation");
+            }
             /* BMS 末包 ACK 覆盖 块写入+0xFC+BMS 整体 CRC32, 窗口放宽 */
             const int64_t iter_wait =
                 (s_iap_target == IAP_TARGET_BMS && sent >= packets)
@@ -734,6 +737,9 @@ static bool pull_transfer(void)
                     continue;
                 }
                 success = true;
+                if (g_ota_callback) {
+                    g_ota_callback(ARM_OTA_VERIFYING, 100, "Image CRC confirmed");
+                }
                 break;
             }
         }
