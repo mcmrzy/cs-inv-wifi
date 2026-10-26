@@ -81,9 +81,9 @@ esp32c3_l10_idf/tools/cs_inv_l10_vdev_merged.bin
 sdkconfig.old
 build_log.txt
 build_output.txt
-esp32_arm_replacement/sdkconfig.device
-esp32_arm_replacement/sdkconfig.factory
-esp32_arm_replacement/sdkconfig.production
+esp32_direct/sdkconfig.device
+esp32_direct/sdkconfig.factory
+esp32_direct/sdkconfig.production
 
 # Local SSH credentials and generated pairing labels
 simulator_platform/deploy/deploy.py

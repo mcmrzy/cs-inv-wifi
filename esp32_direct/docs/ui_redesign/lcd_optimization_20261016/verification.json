@@ -1,0 +1,1131 @@
+{
+  "checkedAt": "2026-10-16T01:50:23.503Z",
+  "revision": "House raster scene and original six-column physical footer",
+  "checks": [
+    "embedded raster loaded",
+    "home footer matches original",
+    "menu footer matches original",
+    "list footer matches original",
+    "edit footer matches original",
+    "review footer matches original",
+    "animation advances",
+    "battery reverses",
+    "zero PV stops its path",
+    "stale stops all paths",
+    "animation stops off home",
+    "manual animation toggle",
+    "reduced motion",
+    "original review save behavior",
+    "light theme",
+    "self contained",
+    "anchors",
+    "mobile width",
+    "browser errors"
+  ],
+  "structure": {
+    "brokenLinks": 0,
+    "external": 0,
+    "canvas": [
+      320,
+      240
+    ]
+  },
+  "errors": [],
+  "labelFix": {
+    "checkedAt": "2026-10-16T01:53:50.844Z",
+    "checks": [
+      "all four labels outside image rectangle",
+      "all labels above footer",
+      "anchors inside transformed image",
+      "grid left of roof solar",
+      "battery below roof",
+      "load right of battery",
+      "original footer preserved",
+      "animation advances",
+      "charge/discharge toggle",
+      "zero and stale behavior",
+      "review/save",
+      "both themes",
+      "mobile width",
+      "browser errors"
+    ],
+    "layout": {
+      "image": {
+        "x": 58,
+        "y": 62,
+        "w": 204,
+        "h": 122.4
+      },
+      "labels": {
+        "grid": {
+          "x": 8,
+          "y": 27,
+          "w": 140,
+          "h": 32,
+          "anchor": [
+            88.6,
+            100.25
+          ]
+        },
+        "pv": {
+          "x": 174,
+          "y": 27,
+          "w": 138,
+          "h": 32,
+          "anchor": [
+            194.425,
+            93.2375
+          ]
+        },
+        "battery": {
+          "x": 8,
+          "y": 187,
+          "w": 146,
+          "h": 32,
+          "anchor": [
+            131.95,
+            153.8
+          ]
+        },
+        "load": {
+          "x": 174,
+          "y": 187,
+          "w": 138,
+          "h": 32,
+          "anchor": [
+            213.55,
+            152.52499999999998
+          ]
+        }
+      }
+    },
+    "errors": []
+  },
+  "cleanLayout": {
+    "checkedAt": "2026-10-16T02:00:08.444Z",
+    "checks": [
+      "no dashed leaders",
+      "two aligned rows",
+      "equal column widths",
+      "image does not overlap text",
+      "original footer",
+      "stale stops animation",
+      "both themes",
+      "mobile width",
+      "no browser errors"
+    ],
+    "layout": {
+      "image": {
+        "x": 58,
+        "y": 62,
+        "w": 204,
+        "h": 122.4
+      },
+      "labels": {
+        "grid": {
+          "x": 12,
+          "y": 27,
+          "w": 136,
+          "h": 32
+        },
+        "pv": {
+          "x": 172,
+          "y": 27,
+          "w": 136,
+          "h": 32
+        },
+        "battery": {
+          "x": 12,
+          "y": 187,
+          "w": 136,
+          "h": 32
+        },
+        "load": {
+          "x": 172,
+          "y": 187,
+          "w": 136,
+          "h": 32
+        }
+      }
+    },
+    "errors": []
+  },
+  "composedHouse": {
+    "checkedAt": "2026-10-16T02:08:20.410Z",
+    "asset": "home-energy-composed-v2.png",
+    "textSpaces": {
+      "grid": {
+        "occupiedRatio": 0,
+        "rectangle": {
+          "x": 64,
+          "y": 58,
+          "w": 82,
+          "h": 54
+        }
+      },
+      "pv": {
+        "occupiedRatio": 0,
+        "rectangle": {
+          "x": 190,
+          "y": 28,
+          "w": 122,
+          "h": 38
+        }
+      },
+      "battery": {
+        "occupiedRatio": 0,
+        "rectangle": {
+          "x": 64,
+          "y": 155,
+          "w": 90,
+          "h": 56
+        }
+      },
+      "load": {
+        "occupiedRatio": 0,
+        "rectangle": {
+          "x": 186,
+          "y": 179,
+          "w": 126,
+          "h": 39
+        }
+      }
+    },
+    "checks": [
+      "image loaded",
+      "reserved text spaces inspected",
+      "original footer",
+      "energy animation",
+      "zero PV",
+      "battery direction",
+      "stale stops flow",
+      "light and dark",
+      "mobile width",
+      "no browser errors"
+    ],
+    "errors": []
+  },
+  "calmHouse": {
+    "checkedAt": "2026-10-16T02:15:23.541Z",
+    "asset": "home-energy-calm-v3.png",
+    "labelSpaces": {
+      "grid": {
+        "occupiedRatio": 0,
+        "region": {
+          "x": 12,
+          "y": 30,
+          "w": 93,
+          "h": 36
+        }
+      },
+      "pv": {
+        "occupiedRatio": 0.0603125,
+        "region": {
+          "x": 174,
+          "y": 26,
+          "w": 100,
+          "h": 32
+        }
+      },
+      "battery": {
+        "occupiedRatio": 0,
+        "region": {
+          "x": 77,
+          "y": 170,
+          "w": 44,
+          "h": 48
+        }
+      },
+      "load": {
+        "occupiedRatio": 0,
+        "region": {
+          "x": 185,
+          "y": 187,
+          "w": 124,
+          "h": 32
+        }
+      }
+    },
+    "glyphOverlap": [
+      {
+        "text": "市电",
+        "collision": 0
+      },
+      {
+        "text": "1800 W",
+        "collision": 0
+      },
+      {
+        "text": "230 V",
+        "collision": 0
+      },
+      {
+        "text": "光伏",
+        "collision": 0
+      },
+      {
+        "text": "4200 W",
+        "collision": 0
+      },
+      {
+        "text": "电池",
+        "collision": 0
+      },
+      {
+        "text": "78%",
+        "collision": 0
+      },
+      {
+        "text": "52.4 V",
+        "collision": 0
+      },
+      {
+        "text": "负载",
+        "collision": 0
+      },
+      {
+        "text": "3200 W",
+        "collision": 0
+      },
+      {
+        "text": "230 V",
+        "collision": 0
+      }
+    ],
+    "checks": [
+      "generated asset loaded",
+      "text glyphs do not overlap image",
+      "fine cable animation",
+      "charge/discharge direction",
+      "zero PV stops flow",
+      "stale stops animation",
+      "original footer preserved",
+      "light and dark themes",
+      "mobile width",
+      "no browser errors"
+    ],
+    "errors": []
+  },
+  "userSelectedHouse": {
+    "checkedAt": "2026-10-16T02:18:38.051Z",
+    "asset": "home-energy-house-v1.png",
+    "checks": [
+      "original asset restored",
+      "text does not cover image",
+      "battery row not clipped",
+      "original six-key footer",
+      "animation and battery direction",
+      "stale stops flow",
+      "both themes",
+      "mobile width",
+      "no browser errors"
+    ],
+    "inspection": [
+      {
+        "text": "市电",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "1800 W",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "230 V",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "光伏",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "4200 W",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "电池",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "78%",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "52.4 V",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "充电",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "负载",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "3200 W",
+        "overlap": 0,
+        "outside": 0
+      },
+      {
+        "text": "230 V",
+        "overlap": 0,
+        "outside": 0
+      }
+    ],
+    "errors": []
+  },
+  "horizontalCorners": {
+    "checkedAt": "2026-10-16T02:27:22.931Z",
+    "checks": [
+      "requested corner order",
+      "single horizontal row per group",
+      "all groups fit native 320px width",
+      "battery watts plus voltage and SOC",
+      "grid watts",
+      "both PV voltages",
+      "no image overlap",
+      "no footer clipping",
+      "charge/discharge power",
+      "zero power",
+      "stale state",
+      "original footer",
+      "themes and mobile"
+    ],
+    "rows": {
+      "grid": {
+        "x": 6,
+        "y": 30,
+        "width": 108.3125,
+        "available": 150,
+        "segments": [
+          {
+            "text": "市电",
+            "x": 6,
+            "y": 31,
+            "width": 24,
+            "size": 12
+          },
+          {
+            "text": "1800W",
+            "x": 34,
+            "y": 30,
+            "width": 47.0859375,
+            "size": 14
+          },
+          {
+            "text": "230V",
+            "x": 85.0859375,
+            "y": 31,
+            "width": 29.2265625,
+            "size": 12
+          }
+        ]
+      },
+      "pv": {
+        "x": 166,
+        "y": 30,
+        "width": 134.55078125,
+        "available": 148,
+        "segments": [
+          {
+            "text": "光伏",
+            "x": 166,
+            "y": 31,
+            "width": 24,
+            "size": 12
+          },
+          {
+            "text": "4200W",
+            "x": 194,
+            "y": 30,
+            "width": 47.0859375,
+            "size": 14
+          },
+          {
+            "text": "368/372V",
+            "x": 245.0859375,
+            "y": 31,
+            "width": 55.46484375,
+            "size": 12
+          }
+        ]
+      },
+      "battery": {
+        "x": 6,
+        "y": 204,
+        "width": 145.7412109375,
+        "available": 154,
+        "segments": [
+          {
+            "text": "电池",
+            "x": 6,
+            "y": 205,
+            "width": 24,
+            "size": 12
+          },
+          {
+            "text": "充655W",
+            "x": 34,
+            "y": 204,
+            "width": 52.8759765625,
+            "size": 14
+          },
+          {
+            "text": "52.4V",
+            "x": 90.8759765625,
+            "y": 205,
+            "width": 32.115234375,
+            "size": 12
+          },
+          {
+            "text": "78%",
+            "x": 126.9912109375,
+            "y": 205,
+            "width": 24.75,
+            "size": 12
+          }
+        ]
+      },
+      "load": {
+        "x": 166,
+        "y": 204,
+        "width": 108.3125,
+        "available": 148,
+        "segments": [
+          {
+            "text": "负载",
+            "x": 166,
+            "y": 205,
+            "width": 24,
+            "size": 12
+          },
+          {
+            "text": "3200W",
+            "x": 194,
+            "y": 204,
+            "width": 47.0859375,
+            "size": 14
+          },
+          {
+            "text": "230V",
+            "x": 245.0859375,
+            "y": 205,
+            "width": 29.2265625,
+            "size": 12
+          }
+        ]
+      }
+    },
+    "collision": [
+      {
+        "id": "grid",
+        "text": "市电",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "grid",
+        "text": "1800W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "grid",
+        "text": "230V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "pv",
+        "text": "光伏",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "pv",
+        "text": "4200W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "pv",
+        "text": "368/372V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "battery",
+        "text": "电池",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "battery",
+        "text": "充655W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "battery",
+        "text": "52.4V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "battery",
+        "text": "78%",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "load",
+        "text": "负载",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "load",
+        "text": "3200W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "id": "load",
+        "text": "230V",
+        "overlap": 0,
+        "footer": 0
+      }
+    ],
+    "errors": []
+  },
+  "wifiAndLabels": {
+    "checkedAt": "2026-10-16T02:44:59.806Z",
+    "checks": [
+      "grid name",
+      "four white bold names",
+      "grid/battery vertical",
+      "PV/load horizontal",
+      "signed charging/discharging watts",
+      "Wi-Fi connected/disconnected",
+      "four RSSI levels",
+      "original footer",
+      "image and footer boundaries",
+      "themes and mobile",
+      "no browser errors"
+    ],
+    "collision": [
+      {
+        "text": "电网",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "1800W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "230V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "光伏",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "4200W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "368/372V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "电池",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "+655W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "52.4V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "78%",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "负载",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "3200W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "230V",
+        "overlap": 0,
+        "footer": 0
+      }
+    ],
+    "rows": {
+      "grid": {
+        "x": 6,
+        "y": 27,
+        "width": 53.8125,
+        "available": 82,
+        "vertical": true,
+        "segments": [
+          {
+            "text": "电网",
+            "x": 6,
+            "y": 27,
+            "width": 24,
+            "size": 12,
+            "color": "#ffffff",
+            "weight": 700
+          },
+          {
+            "text": "1800W",
+            "x": 6,
+            "y": 40,
+            "width": 53.8125,
+            "size": 16,
+            "color": "#edf2f8",
+            "weight": 400
+          },
+          {
+            "text": "230V",
+            "x": 6,
+            "y": 57,
+            "width": 29.2265625,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400
+          }
+        ]
+      },
+      "pv": {
+        "x": 166,
+        "y": 30,
+        "width": 134.55078125,
+        "available": 148,
+        "vertical": false,
+        "segments": [
+          {
+            "text": "光伏",
+            "x": 166,
+            "y": 31,
+            "width": 24,
+            "size": 12,
+            "color": "#ffffff",
+            "weight": 700
+          },
+          {
+            "text": "4200W",
+            "x": 194,
+            "y": 30,
+            "width": 47.0859375,
+            "size": 14,
+            "color": "#edf2f8",
+            "weight": 400
+          },
+          {
+            "text": "368/372V",
+            "x": 245.0859375,
+            "y": 31,
+            "width": 55.46484375,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400
+          }
+        ]
+      },
+      "battery": {
+        "x": 6,
+        "y": 160,
+        "width": 63.865234375,
+        "available": 82,
+        "vertical": true,
+        "segments": [
+          {
+            "text": "电池",
+            "x": 6,
+            "y": 160,
+            "width": 24,
+            "size": 12,
+            "color": "#ffffff",
+            "weight": 700
+          },
+          {
+            "text": "+655W",
+            "x": 6,
+            "y": 176,
+            "width": 56.296875,
+            "size": 16,
+            "color": "#edf2f8",
+            "weight": 400
+          },
+          {
+            "text": "52.4V",
+            "x": 6,
+            "y": 197,
+            "width": 32.115234375,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400
+          },
+          {
+            "text": "78%",
+            "x": 45.115234375,
+            "y": 197,
+            "width": 24.75,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400
+          }
+        ]
+      },
+      "load": {
+        "x": 166,
+        "y": 204,
+        "width": 108.3125,
+        "available": 148,
+        "vertical": false,
+        "segments": [
+          {
+            "text": "负载",
+            "x": 166,
+            "y": 205,
+            "width": 24,
+            "size": 12,
+            "color": "#ffffff",
+            "weight": 700
+          },
+          {
+            "text": "3200W",
+            "x": 194,
+            "y": 204,
+            "width": 47.0859375,
+            "size": 14,
+            "color": "#edf2f8",
+            "weight": 400
+          },
+          {
+            "text": "230V",
+            "x": 245.0859375,
+            "y": 205,
+            "width": 29.2265625,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400
+          }
+        ]
+      }
+    },
+    "errors": []
+  },
+  "alignedType": {
+    "checkedAt": "2026-10-16T02:52:08.704Z",
+    "checks": [
+      "all names 14px bold",
+      "all powers 16px",
+      "horizontal shared baselines",
+      "fixed aligned power/voltage columns",
+      "only PV1 voltage",
+      "unsigned battery watts with separate state",
+      "native 320px desktop preview",
+      "no image/footnote overlap",
+      "charge/discharge states",
+      "Wi-Fi and footer preserved",
+      "themes and mobile"
+    ],
+    "rows": {
+      "grid": {
+        "x": 8,
+        "y": 27,
+        "width": 53.8125,
+        "available": 84,
+        "vertical": true,
+        "segments": [
+          {
+            "text": "电网",
+            "x": 8,
+            "baseline": 39,
+            "width": 28,
+            "size": 14,
+            "color": "#ffffff",
+            "weight": 700,
+            "ascent": 0.328125,
+            "descent": 11.671875
+          },
+          {
+            "text": "1800W",
+            "x": 8,
+            "baseline": 56,
+            "width": 53.8125,
+            "size": 16,
+            "color": "#edf2f8",
+            "weight": 400,
+            "ascent": 12,
+            "descent": 0
+          },
+          {
+            "text": "230V",
+            "x": 8,
+            "baseline": 68,
+            "width": 29.2265625,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400,
+            "ascent": 9,
+            "descent": 0
+          }
+        ]
+      },
+      "pv": {
+        "x": 166,
+        "y": 27,
+        "width": 127.2265625,
+        "available": 146,
+        "vertical": false,
+        "segments": [
+          {
+            "text": "光伏",
+            "x": 166,
+            "baseline": 39,
+            "width": 28,
+            "size": 14,
+            "color": "#ffffff",
+            "weight": 700,
+            "ascent": 11,
+            "descent": 1
+          },
+          {
+            "text": "4200W",
+            "x": 204,
+            "baseline": 39,
+            "width": 53.8125,
+            "size": 16,
+            "color": "#edf2f8",
+            "weight": 400,
+            "ascent": 12,
+            "descent": 0
+          },
+          {
+            "text": "368V",
+            "x": 264,
+            "baseline": 39,
+            "width": 29.2265625,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400,
+            "ascent": 9,
+            "descent": 0
+          }
+        ]
+      },
+      "battery": {
+        "x": 8,
+        "y": 161,
+        "width": 76.4296875,
+        "available": 88,
+        "vertical": true,
+        "segments": [
+          {
+            "text": "电池",
+            "x": 8,
+            "baseline": 173,
+            "width": 28,
+            "size": 14,
+            "color": "#ffffff",
+            "weight": 700,
+            "ascent": 11,
+            "descent": 1
+          },
+          {
+            "text": "655W",
+            "x": 8,
+            "baseline": 195,
+            "width": 44.4296875,
+            "size": 16,
+            "color": "#edf2f8",
+            "weight": 400,
+            "ascent": 12,
+            "descent": 0
+          },
+          {
+            "text": "52.4V",
+            "x": 8,
+            "baseline": 217,
+            "width": 32.115234375,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400,
+            "ascent": 9,
+            "descent": 0
+          },
+          {
+            "text": "78%",
+            "x": 49,
+            "baseline": 217,
+            "width": 24.75,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400,
+            "ascent": 9,
+            "descent": 0
+          },
+          {
+            "text": "充电",
+            "x": 60.4296875,
+            "baseline": 195,
+            "width": 24,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400,
+            "ascent": 10,
+            "descent": 1
+          }
+        ]
+      },
+      "load": {
+        "x": 166,
+        "y": 205,
+        "width": 127.2265625,
+        "available": 146,
+        "vertical": false,
+        "segments": [
+          {
+            "text": "负载",
+            "x": 166,
+            "baseline": 217,
+            "width": 28,
+            "size": 14,
+            "color": "#ffffff",
+            "weight": 700,
+            "ascent": 11,
+            "descent": 1
+          },
+          {
+            "text": "3200W",
+            "x": 204,
+            "baseline": 217,
+            "width": 53.8125,
+            "size": 16,
+            "color": "#edf2f8",
+            "weight": 400,
+            "ascent": 12,
+            "descent": 0
+          },
+          {
+            "text": "230V",
+            "x": 264,
+            "baseline": 217,
+            "width": 29.2265625,
+            "size": 12,
+            "color": "#a5b4c6",
+            "weight": 400,
+            "ascent": 9,
+            "descent": 0
+          }
+        ]
+      }
+    },
+    "inspection": [
+      {
+        "text": "电网",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "1800W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "230V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "光伏",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "4200W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "368V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "电池",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "655W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "52.4V",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "78%",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "充电",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "负载",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "3200W",
+        "overlap": 0,
+        "footer": 0
+      },
+      {
+        "text": "230V",
+        "overlap": 0,
+        "footer": 0
+      }
+    ],
+    "errors": []
+  }
+}

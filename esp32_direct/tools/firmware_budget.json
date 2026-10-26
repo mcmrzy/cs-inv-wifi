@@ -1,0 +1,5 @@
+{
+  "max_app_bytes": 1650000,
+  "min_partition_free_bytes": 32768,
+  "max_static_ram_bytes": 196608
+}
