@@ -1,161 +1,90 @@
-# CS-I10-6k2 单相离网48V逆变器 WiFi 通信模块
+# CS Inv WiFi · 逆变器通信与直连控制固件
 
-辰烁科技 CS-I10-6k2 48V 单相离网逆变器的 ESP32-C3 WiFi 通信固件。
+辰烁科技逆变器的 ESP32 通信固件、直连控制器及配套开发工具。仓库同时保留 ESP-IDF 和早期 Arduino 工程，编译前请先选择与硬件架构对应的目录。
 
-## 产品规格
+当前直连控制器入口为 **[esp32_direct](esp32_direct/README.md)**，由原 `esp32_arm_replacement` 目录更名而来。固件版本以该工程的 [version.txt](esp32_direct/version.txt) 为准。
 
-| 参数 | 值 |
-|------|-----|
-| 型号 | CS-I10-6k2 |
-| 类型 | 单相离网逆变器 |
-| 额定功率 | 6200W |
-| 额定电压 | 220V / 50Hz |
-| 电池电压 | 48V (16S LiFePO4) |
-| MPPT 电压范围 | 60~150V |
-| 通信模块 | ESP32-C3 |
+## 选择工程
 
-## 项目结构
+| 目录 | 用途 |
+| --- | --- |
+| [esp32_direct/](esp32_direct/README.md) | ESP32-C3 直接连接 DSP、BMS、屏幕与按键，整合联网、本地控制和维护功能 |
+| `esp32c3_l10_idf/` | L10 通信模块 ESP-IDF 工程，通过 ARM 中转连接逆变器 |
+| `esp32c3_idf/`、`esp32c2_idf/` | 其他 C3/C2 通信模块工程，使用各自的配置和分区表 |
+| `esp32c2_test/` | C2 测试工程 |
+| `src/`、`platformio.ini` | 早期 Arduino / PlatformIO 通信模块工程 |
+| [simulator_platform/](simulator_platform/README.md) | Web 设备认领、遥测与 MQTT 控制模拟平台 |
+| `tools/` | 串口模拟器、协议测试、扫码绑定及其他辅助工具 |
+| `docs/` | 通信协议、接口说明与设计资料 |
 
-```
-arduino_inverter_wifi/
-├── src/                    # ESP32 固件源码
-│   ├── main.cpp            # 主程序入口
-│   ├── config.h            # 配置参数
-│   ├── mqtt_handler.cpp/h  # MQTT 通信处理
-│   ├── uart_protocol.cpp/h # UART 帧协议
-│   ├── nvs_storage.cpp/h   # NVS 存储管理
-│   ├── led_status.cpp/h   # LED 状态指示
-│   ├── tcp_provision.cpp/h# TCP 配网
-│   ├── sn_encoder.cpp/h    # SN 编码/校验
-│   ├── ip_geolocation.cpp/h# IP 地理位置
-│   └── mqtt_ca_cert.h     # MQTT CA 证书
-├── tools/                  # 开发工具
-│   ├── arm_inverter_simulator_gui.py  # ARM 模拟器 GUI
-│   ├── esp32_gateway_simulator.py      # ESP32 网关模拟器
-│   └── ...
-├── docs/                   # 协议规范文档
-│   ├── 系统参数规范.md     # MQTT 数据参数定义
-│   ├── MQTT通信协议.md     # MQTT 通信协议
-│   └── ARM与ESP32通信协议.md # UART 帧协议
-└── .pio/                  # PlatformIO 构建目录
-```
+## 直连控制器能力
 
-## 功能特性
+- **DSP/BMS 通信**：独立 UART 任务负责 DSP 遥测、配置同步及 BMS 数据采集；BMS 默认使用现有 BBJ `0x7C` 协议。
+- **屏幕与按键**：ST7789 320×240 界面、中英文显示、状态与参数菜单、升级状态及 LCD 诊断。
+- **网络与本地连接**：Wi-Fi、BLE 配网与本地控制、MQTT 上报、离线缓存和网络重连。
+- **电池设置**：LCD、BLE、MQTT 共用整组电池配置校验、修订号和持久化流程，支持铅酸与锂电配置。
+- **升级与维护**：ESP 自升级、DSP/BMS 直连升级路径、Device/Factory/Production 配置及 USB 工厂身份工具。
 
-### 通信功能
-- **UART 透传**：ARM MCU 与 ESP32 之间通过二进制帧协议通信
-- **MQTT 上报**：支持 8 个数据主题上报（AC/电池/光伏/状态/能量/电芯/告警/设备信息）
-- **云端控制**：支持 19 种控制命令（逆变器/BMS/MPPT）
-- **IP 定位**：WiFi 连接后自动获取设备地理位置
-- **LWT 遗嘱**：设备离线自动通知
+参数回执中的 `saved` / `submitted` 表示 ESP 已保存或已提交同步；DSP 实际采用需要独立回读证据。升级下载完成、编译通过和实机验收也分别记录，不互相替代。具体支持范围见[直连工程说明](esp32_direct/README.md)。
 
-### 数据上报
-| 主题 | 频率 | 说明 |
-|------|------|------|
-| `cs_inv/{sn}/info` | 连接时 | 设备信息 |
-| `cs_inv/{sn}/data/ac` | 5s | 交流输出参数 |
-| `cs_inv/{sn}/data/battery` | 5s | 电池 BMS 参数 |
-| `cs_inv/{sn}/data/pv` | 5s | 光伏 MPPT 参数 |
-| `cs_inv/{sn}/data/status` | 5s | 逆变器系统状态 |
-| `cs_inv/{sn}/data/energy` | 60s | 能量统计 |
-| `cs_inv/{sn}/data/cells` | 30s | 电芯详细数据 |
-| `cs_inv/{sn}/data/alarm` | 事件 | 告警/故障事件 |
+## 快速开始：ESP-IDF 直连工程
 
-### 控制命令
-- **逆变器控制**：开关机、电压/频率设定、功率限制、节能模式
-- **BMS 控制**：充放电使能、电流/电压限值、均衡控制
-- **MPPT 控制**：开关控制、功率限制
+使用 ESP-IDF 5.5.4，并先在当前终端加载其开发环境。
 
-## 固件编译
+```powershell
+git clone https://github.com/mcmrzy/cs-inv-wifi.git
+cd cs-inv-wifi/esp32_direct
 
-### 环境要求
-- PlatformIO Core 或 PlatformIO IDE
-- ESP32 开发板支持
-
-### 编译步骤
-```bash
-# 克隆项目
-git clone <repository_url>
-cd arduino_inverter_wifi
-
-# 安装依赖
-pio lib install
+# 首次配置，按实际硬件和连接环境调整并保存
+idf.py menuconfig
 
 # 编译
-pio run
-
-# 上传固件
-pio run --target upload
+idf.py build
 ```
 
-### 串口监视
-```bash
-pio device monitor
+工程通过 CMake 指定 ESP32-C3，默认配置来自 `sdkconfig.defaults`，分区布局见 `partitions.csv`。默认配置包含首次运行时永久关闭 UART ROM 日志的 eFuse 设置；运行固件前请阅读[引脚与启动配置说明](esp32_direct/docs/ESP32C3_PINOUT.md)。
+
+Windows 本机也可使用 `esp32_direct/build.ps1` 构建不同配置；脚本内的 ESP-IDF、Python 和工具链路径需要与本机安装位置一致。初始化配置、构建产物和维护流程见[构建说明](esp32_direct/README.md#构建)。
+
+## 其他工程构建
+
+L10 的 ESP-IDF 工程需在自己的目录内配置和构建。从仓库根目录执行：
+
+```powershell
+cd esp32c3_l10_idf
+idf.py menuconfig
+idf.py build
 ```
 
-## 开发工具
+各工程的 GPIO、协议、版本和分区布局独立，配置不能直接混用。早期 Arduino 工程在仓库根目录使用 PlatformIO：
 
-### ARM 模拟器
-用于在没有实际 ARM MCU 的情况下测试 ESP32 固件：
-
-```bash
-cd tools
-python arm_inverter_simulator_gui.py
+```powershell
+pio run -e esp32-c3-devkitm-1
 ```
 
-### ESP32 网关模拟器
-用于在没有实际 ESP32 的情况下测试 MQTT 云端对接：
+## 工具与文档
 
-```bash
-cd tools
-python esp32_gateway_simulator.py
-```
+| 入口 | 内容 |
+| --- | --- |
+| [直连工厂工具](esp32_direct/tools/README.md) | 身份写入与复核、分段烧录、升级和测试流程 |
+| [工厂工具 GUI](esp32_direct/tools/README_GUI.md) | 图形界面及打包说明 |
+| [电池配置](esp32_direct/docs/BATTERY_CONFIG_20261020.md) | 电池类型、成组提交、NVS 兼容与同步边界 |
+| [BLE 本地控制](esp32_direct/docs/BLE_P0_20261019.md) | 信息读取、分帧、会话协商与保存级回执 |
+| [远程控制](esp32_direct/docs/REMOTE_CONTROL_P0_20261020.md) | 任务幂等、期限和命令阶段 |
+| [DSP/BMS 协议依据](esp32_direct/docs/TARGET_PROTOCOL_EVIDENCE.md) | 目标协议与升级证据 |
+| [L10 MQTT 协议](docs/CS-L10-6K2_MQTT_上报协议设计_V2.1.md) | L10 上报协议设计；其他工程需结合实际实现核对 |
+| [ARM 串口协议](docs/ARM_ESP32_UART_Protocol.md) | ARM 中转架构的串口帧协议 |
+| [BLE 配网协议](docs/BLE_Provisioning_Protocol.md) | 配网接口说明 |
+| [扫码绑定工具](tools/web/README.md) | Web 绑定工具入口 |
 
-## 协议文档
+历史设计和验证记录包含各自日期、版本及构建哈希，不代表当前源码已经通过同样的设备验收。首次烧录、分区迁移和已有设备维护应使用对应工具流程；完整 Flash 镜像会覆盖设备身份和用户配置，应用 OTA 不更新分区表。
 
-详细协议规范请参考 `docs/` 目录：
+## 配置与验证
 
-- **系统参数规范.md** — MQTT 数据字段定义、JSON 格式、数据校验范围
-- **MQTT通信协议.md** — MQTT 连接参数、主题格式、上下行数据格式
-- **ARM与ESP32通信协议.md** — UART 帧协议格式、命令码定义
+Wi-Fi、MQTT 和身份设置按所选工程配置。管理员密码、连接凭据、私钥和逐台工单保存在本地，不应写入 README 或提交到仓库。`esp32_direct` 的生成配置、构建目录、临时文件和发布目录由 `.gitignore` 排除。
 
-## 硬件连接
+直连工程的主机测试位于 `esp32_direct/tests/`。测试入口、依赖与当前已知限制见[验证说明](esp32_direct/README.md#验证)。主机测试与固件构建之后，仍需分别验证真实 DSP/BMS、屏幕、BLE/MQTT 和断电恢复。
 
-```
-ARM MCU          ESP32-C3
--------          ---------
-TX  ────────────► RX (GPIO1)
-RX ◄──────────── TX (GPIO0)
-GND ──────────── GND
-```
+## 版权
 
-| 参数 | 值 |
-|------|-----|
-| 波特率 | 115200 |
-| 数据位 | 8 |
-| 停止位 | 1 |
-| 校验 | 无 |
-
-## 配置说明
-
-### 默认 MQTT Broker
-- 地址：`jiuxiaoyw.online:8883`
-- 用户名：`CSKJ-INV-DEVICE-6K2`
-- 密码：`CSKJINVDEVICE6K2`
-
-### SN 格式
-设备序列号遵循 CS-SN-STD-001 V1.1 标准：
-```
-MM-CC-PPPP-YW-SSSSS-C
-│  │  │    │  │     │
-│  │  │    │  │     └── 校验位 (CRC-16-CCITT)
-│  │  │    │  └───────── 序列号 (5位数字)
-│  │  │    └──────────── 年月码 (年码1位 + 月码1位)
-│  │  └───────────────── 产品型号 (4位)
-│  └───────────────────── 客户代码 (2位)
-└───────────────────────── 制造商代码 (2位)
-```
-
-## License
-
-Copyright © 辰烁科技
+Copyright © 辰烁科技。第三方组件及字体遵循各自目录中的许可说明。
