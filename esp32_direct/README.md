@@ -25,11 +25,10 @@
 
 ```powershell
 cd esp32_direct
-idf.py menuconfig
 idf.py build
 ```
 
-首次 `menuconfig` 根据 `sdkconfig.defaults` 生成本地 `sdkconfig`。检查板级 GPIO、网络和身份选项后保存。CMake 固定目标为 ESP32-C3，并从 `version.txt` 读取版本。
+VS Code 中将 `esp32_direct` 作为 ESP-IDF 工程打开，即可执行 Build、Flash 和 Monitor。首次构建从 `sdkconfig.defaults` 生成本地 `sdkconfig`。默认 L10 接线使用 T280C7-C12-26 IPS 初始化，CS 接地时自动选择复位优先启动和 SPI Mode 3。CMake 固定目标为 ESP32-C3，并从 `version.txt` 读取版本。
 
 默认输出为 `build/cs_inv_direct_c3.bin` 和 `build/cs_inv_direct_c3.elf`。BIN 是应用镜像，不能当作地址 0 的整片镜像使用。默认分区表见 [partitions.csv](partitions.csv)。
 
@@ -60,7 +59,7 @@ idf.py build
 | --- | --- |
 | DSP UART0 | TX 1、RX 0，115200 8N1 |
 | BMS UART1 → RS485 | TX 21、RX 20，默认 BBJ 9600 8N1，自动换向 |
-| ST7789 320×240 | SCK 6、MOSI 7、D/C 9、RESET 10，4 线 SPI |
+| ST7789 320×240 | SCK 6、MOSI 7、D/C 9、RESET 10，4 线 SPI。新屏为 [T280C7-C12-26 IPS](docs/T280C7-C12-26_IPS.md) |
 | LCD CS / 背光 | 外部保持有效，不分配 ESP GPIO |
 | BS818A_2 按键 | CLK 2、DAT 3 |
 | 蜂鸣器 | GPIO8，高有效 |

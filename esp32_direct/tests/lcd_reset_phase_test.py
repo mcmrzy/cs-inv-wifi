@@ -56,6 +56,11 @@ static atomic_bool s_spi_active;
 static bool s_panel_initialized;
 static int pins[32];
 static unsigned clock_ms,first_command,reset_writes,useful_writes,reset_low_at,reset_released_at;
+static bool saw_madctl;
+static bool expect_madctl_data;
+static uint8_t inversion_command;
+static uint8_t lcd_command;
+static bool saw_ips_vcom,saw_ips_gamma,saw_sleep_out;
 static bool configured;
 static bool fail_prime;
 static unsigned stage_seen,tasks;
@@ -85,7 +90,27 @@ static int spi_device_polling_transmit(void *h,const spi_transaction_t *t){
  if(fail_prime)return -1;
  if(!configured){assert(pins[10]==0);configured=true;pins[6]=1;}
  if(!pins[10])reset_writes++;
- else {if(!useful_writes){assert(clock_ms-reset_released_at>=150U);first_command=*(const uint8_t*)t->tx_buffer;}useful_writes++;}
+ else {
+  const uint8_t value=*(const uint8_t*)t->tx_buffer;
+  if(!useful_writes){assert(clock_ms-reset_released_at>=150U);first_command=value;}
+  if(expect_madctl_data){
+   assert(pins[9]==1&&t->length==8&&value==0x70&&"MADCTL must select RGB landscape");
+   saw_madctl=true;
+  }
+  expect_madctl_data=pins[9]==0&&value==0x36;
+  if(pins[9]==0){
+   lcd_command=value;
+   if(value==0x20||value==0x21)inversion_command=value;
+   if(value==0x11)saw_sleep_out=true;
+  }else if(!saw_sleep_out){
+   if(lcd_command==0xbb)saw_ips_vcom=t->length==8&&value==0x1a;
+   if(lcd_command==0xe1){
+    const uint8_t *gamma=t->tx_buffer;
+    saw_ips_gamma=t->length==14U*8U&&gamma[0]==0xf0&&gamma[13]==0x30;
+   }
+  }
+  useful_writes++;
+ }
  return ESP_OK;
 }
 static void esp_rom_delay_us(unsigned us){(void)us;}
@@ -105,10 +130,22 @@ FUNCTIONS
 int main(void){
  for(unsigned idle=0;idle<2;idle++){
   configured=false;reset_writes=useful_writes=0;pins[4]=1;pins[6]=idle;
+  saw_madctl=expect_madctl_data=false;
+  inversion_command=0;
+  saw_ips_vcom=saw_ips_gamma=saw_sleep_out=false;
   unsigned started=clock_ms;
   direct_panel_prepare_boot();direct_panel_init();
   assert(clock_ms-started==440U); /* 20ms low + 150ms release + SWRESET 150ms + SLPOUT 120ms */
   assert(reset_writes==1&&first_command==1&&useful_writes>1&&pins[4]==1);
+  assert(saw_madctl);
+  if(inversion_command!=0x21){
+   fprintf(stderr,"Expected IPS INVON (0x21), got 0x%02X\n",inversion_command);
+   return 1;
+  }
+  if(!saw_ips_vcom||!saw_ips_gamma||!saw_sleep_out){
+   fputs("Expected vendor IPS VCOM and gamma before SLPOUT\n",stderr);
+   return 1;
+  }
  }
  fail_prime=true;configured=false;tasks=0;atomic_store(&s_lcd_tx_errors,0);
  direct_panel_prepare_boot();direct_panel_init();

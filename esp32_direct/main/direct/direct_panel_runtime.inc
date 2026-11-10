@@ -71,7 +71,7 @@ static onboarding_inputs_t panel_onboarding_inputs(bool testing){
 static void panel_onboarding_close(void){
  s_ui.page=s_phone_return;if(s_phone_return==UI_SUBMENU)s_ui.selected=s_ui.submenu_selected;s_ui.dirty=true;s_have_previous=false;
 }
-static bool s_lcd_test_inverted;
+static bool s_lcd_test_inverted=CONFIG_DIRECT_LCD_MINIMAL_INIT;
 static direct_ui_page_t s_previous_page;
 static uint8_t s_previous_mode;
 static uint32_t s_strip_hash[15];
@@ -200,7 +200,8 @@ static uint32_t strip_hash(const uint16_t *pixels,size_t count) {
 }
 static void panel_render(void) {
     direct_ui_build(&s_ui,&s_ui_data,&s_view);
-    bool requested_inversion=s_ui.page==UI_HELP && s_ui.detail_page==2;
+    bool requested_inversion=CONFIG_DIRECT_LCD_MINIMAL_INIT;
+    if(s_ui.page==UI_HELP && s_ui.detail_page!=0)requested_inversion=s_ui.detail_page==2;
     if(requested_inversion!=s_lcd_test_inverted){
         uint32_t errors=s_lcd_tx_errors;
         command(requested_inversion?0x21:0x20);
@@ -248,7 +249,7 @@ static bool panel_reset_display(void) {
     s_panel_initialized=panel_hardware_initialize();
     if(s_panel_initialized)direct_panel_enable_display();
     s_panel_initialized=s_panel_initialized && atomic_load(&s_lcd_tx_errors)==before;
-    s_blank=false;s_have_previous=false;s_lcd_test_inverted=false;s_ui.dirty=true;
+    s_blank=false;s_have_previous=false;s_lcd_test_inverted=CONFIG_DIRECT_LCD_MINIMAL_INIT;s_ui.dirty=true;
     return s_panel_initialized;
 }
 

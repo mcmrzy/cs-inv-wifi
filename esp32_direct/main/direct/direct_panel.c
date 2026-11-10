@@ -24,6 +24,9 @@
 #ifndef CONFIG_DIRECT_LCD_NOCS_BOOT
 #define CONFIG_DIRECT_LCD_NOCS_BOOT 0
 #endif
+#ifndef CONFIG_DIRECT_LCD_MINIMAL_INIT
+#define CONFIG_DIRECT_LCD_MINIMAL_INIT 0
+#endif
 #ifndef CONFIG_DIRECT_LCD_GPIO_SPI
 #define CONFIG_DIRECT_LCD_GPIO_SPI 0
 #endif
@@ -260,25 +263,41 @@ static uint8_t panel_terminal_read8(uint8_t cmd)
 }
 #endif
 
-/* Compare factory defaults with the supplied ARM power/gamma profile. */
 static void panel_register_init(void)
 {
     command(0x01); /* SWRESET, after the hardware reset has settled. */
     vTaskDelay(pdMS_TO_TICKS(150));
     command(0x28); /* Keep scanout off until the first complete frame is written. */
-    command(0x11);
-    vTaskDelay(pdMS_TO_TICKS(120));
 #if CONFIG_DIRECT_LCD_MINIMAL_INIT
-    /* Keep reset-loaded analog defaults. This is not an optical calibration
-     * and cannot eliminate the module's TN viewing-angle dependence. */
-    command(0x36); data8(0x70); /* 320x240 landscape, matching the ARM. */
+    /* ST7789P3 IPS sample: configure the panel before exiting sleep. */
+    static const uint8_t porch[] = {0x0c,0x0c,0x00,0x33,0x33};
+    static const uint8_t gamma_pos[] =
+        {0xf0,0x03,0x09,0x0b,0x0a,0x16,0x2b,0x33,0x41,0x38,0x14,0x14,0x29,0x2f};
+    static const uint8_t gamma_neg[] =
+        {0xf0,0x04,0x06,0x09,0x08,0x04,0x2b,0x32,0x41,0x36,0x12,0x12,0x2a,0x30};
+    command(0xb2); tx(true, porch, sizeof(porch));
+    command(0x36); data8(0x70); /* 320x240 landscape, RGB panel order. */
     command(0x3a); data8(0x55); /* RGB565 for MCU/RGB interfaces. */
     command(0xb0); data8(0x00); data8(0xf0); /* MCU RAM, big endian. */
+    command(0xb7); data8(0x55);
+    command(0xbb); data8(0x1a);
+    command(0xc0); data8(0x2c);
+    command(0xc2); data8(0x01);
+    command(0xc3); data8(0x19);
+    command(0xc6); data8(0x0f);
+    command(0xd0); data8(0xa4); data8(0xa1); /* Complete two-parameter PWCTRL1. */
+    command(0xd6); data8(0xa1);
+    command(0xe0); tx(true, gamma_pos, sizeof(gamma_pos));
+    command(0xe1); tx(true, gamma_neg, sizeof(gamma_neg));
+    command(0x21); /* INVON for the replacement IPS panel. */
+    command(0x11); /* SLPOUT */
+    vTaskDelay(pdMS_TO_TICKS(120));
     command(0x13); /* Normal display mode. */
-    command(0x20); /* Inversion off, matching this TN module's ARM profile. */
-    ESP_LOGI(TAG, "LCD MINIMAL_INIT: factory power/gamma, COLMOD=55 RAMCTRL=00/F0, CS=%d",
+    ESP_LOGI(TAG, "LCD T280C7-C12-26 IPS: sample power/gamma, COLMOD=55 RAMCTRL=00/F0 inversion=ON, CS=%d",
              CONFIG_DIRECT_LCD_CS_PIN);
 #else
+    command(0x11);
+    vTaskDelay(pdMS_TO_TICKS(120));
 #if CONFIG_DIRECT_LCD_GPIO_SPI
     command(0x13); /* NORON: explicitly leave partial mode. */
 #endif
@@ -543,7 +562,7 @@ void direct_panel_init(void)
     }
     ESP_LOGI(TAG, "LCD_READBACK CS=GPIO%d deselected; resume color test",
              CONFIG_DIRECT_LCD_CS_PIN);
-    command(0x36); data8(0x70); /* Restore landscape after the challenge. */
+    command(0x36); data8(0x70); /* Restore landscape and RGB after the challenge. */
 #endif
     ESP_LOGI(TAG, "LCD SCK=%d MOSI=%d DC=%d CS=%d RST=%d BL=%d",
              CONFIG_DIRECT_LCD_SCLK_PIN, CONFIG_DIRECT_LCD_MOSI_PIN,

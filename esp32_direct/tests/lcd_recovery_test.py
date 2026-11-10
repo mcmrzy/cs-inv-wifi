@@ -108,9 +108,10 @@ int main(void){
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#define CONFIG_DIRECT_LCD_MINIMAL_INIT 1
 static atomic_uint s_lcd_tx_errors;
 static atomic_bool s_first_frame_done;
-static bool s_panel_initialized,s_blank=true,s_have_previous=true,s_lcd_test_inverted=true;
+static bool s_panel_initialized,s_blank=true,s_have_previous=true,s_lcd_test_inverted;
 static struct {bool dirty;int page,draft;bool pending;} s_ui={false,8,123,true};
 static unsigned hardware_calls,enable_calls;static bool fail_hardware,fail_enable;
 static bool panel_hardware_initialize(void){hardware_calls++;if(fail_hardware)atomic_fetch_add(&s_lcd_tx_errors,1);return !fail_hardware;}
@@ -119,7 +120,7 @@ FUNCTION
 int main(void){
  atomic_store(&s_first_frame_done,true);
  assert(panel_reset_display());assert(hardware_calls==1&&enable_calls==1);
- assert(!s_blank&&!s_have_previous&&!s_lcd_test_inverted&&s_ui.dirty);
+ assert(!s_blank&&!s_have_previous&&s_lcd_test_inverted&&s_ui.dirty);
  assert(!atomic_load(&s_first_frame_done)&&s_ui.page==8&&s_ui.draft==123&&s_ui.pending);
  fail_hardware=true;assert(!panel_reset_display());assert(enable_calls==1);
  fail_hardware=false;fail_enable=true;assert(!panel_reset_display());assert(enable_calls==2);

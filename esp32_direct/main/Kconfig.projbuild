@@ -111,13 +111,13 @@ menu "CS_INV ESP32 Direct Controller"
         help
             Applies to hardware SPI only. Validate wiring before increasing.
     config DIRECT_LCD_MINIMAL_INIT
-        bool "ST7789 minimal initialization using factory power/gamma defaults"
+        bool "ST7789P3 IPS initialization using the module sample"
         depends on DIRECT_LCD_4WIRE
         default n
         help
-            Reset and use the controller's factory power/gamma values.
-            Configure only sleep exit, orientation, RGB565, RAM byte order
-            and display mode. This is a comparison profile for the new module.
+            Use the T280C7-C12-26 IPS power and gamma settings. This option
+            retains its legacy name so existing device configurations select
+            the IPS profile. Disable it to use the legacy ARM profile.
     config DIRECT_LCD_READBACK_TERMINAL
         bool "Single LCD register readback diagnostic"
         depends on DIRECT_LCD_GPIO_SPI
@@ -128,16 +128,23 @@ menu "CS_INV ESP32 Direct Controller"
             high impedance. With GPIO CS, deselect before restoring output
             and continue the display test.
             A failed read does not prove a fault if the module has no readback.
-    config DIRECT_LCD_NOCS_BOOT
-        bool "Experimental CS-grounded write-only boot profile"
-        depends on DIRECT_LCD_CS_PIN = -1 || DIRECT_LCD_CS_FIXED_LOW
-        depends on !DIRECT_LCD_READBACK_TERMINAL
-        default n
-        help
-            Hold RESET low at application entry, park SCL high, disable
-            GPIO probes and all register reads, then send mode-3 bytes.
-            Requires a dedicated display bus. Physical startup validation
-            is required; the application cannot control ROM pin states.
+    choice DIRECT_LCD_BOOT_MODE
+        prompt "ST7789 startup mode"
+        default DIRECT_LCD_NOCS_BOOT if DIRECT_LCD_CS_PIN = -1 && DIRECT_LCD_4WIRE
+        default DIRECT_LCD_STANDARD_BOOT
+
+        config DIRECT_LCD_STANDARD_BOOT
+            bool "Standard SPI startup (mode 0)"
+
+        config DIRECT_LCD_NOCS_BOOT
+            bool "Reset-first startup with CS held low (mode 3)"
+            depends on DIRECT_LCD_CS_PIN = -1 || DIRECT_LCD_CS_FIXED_LOW
+            depends on !DIRECT_LCD_READBACK_TERMINAL
+            help
+                Hold RESET low at application entry, park SCL high, disable
+                GPIO probes and register reads, then send mode-3 bytes.
+                Requires a dedicated display bus with CS held low.
+    endchoice
     config DIRECT_LCD_CS_PIN
         int "ST7789 CS GPIO (-1 when CS is tied active)"
         default -1
