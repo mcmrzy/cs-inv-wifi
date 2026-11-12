@@ -21,6 +21,9 @@ bool storage_init(void);
 
 bool storage_has_wifi_config(void);
 bool storage_get_wifi(char *ssid, size_t ssid_len, char *pass, size_t pass_len);
+#ifdef PANEL_FULL_DIRECT
+bool storage_get_wifi_at(unsigned index,char *ssid,size_t ssid_len,char *pass,size_t pass_len);
+#endif
 bool storage_set_wifi(const char *ssid, const char *pass);
 bool storage_clear_wifi(void);
 

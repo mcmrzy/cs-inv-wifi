@@ -8,6 +8,9 @@
  */
 #include "ota_mqtt_adapter.h"
 #include "ota_service.h"
+#ifdef PANEL_FULL_DIRECT
+#include "panel_firmware_catalog.h"
+#endif
 #include "mqtt_handler.h"
 #include "cs_protocol_defs.h"
 #include "cJSON.h"
@@ -273,6 +276,9 @@ static void ota_status_observer(const OtaSnapshot *snapshot)
 
 void mqtt_ota_init(void)
 {
+#ifdef PANEL_FULL_DIRECT
+    panel_firmware_catalog_init();
+#endif
     g_request_task_id[0] = '\0';
     g_request_version[0] = '\0';
     g_request_target[0] = '\0';
@@ -436,6 +442,9 @@ static void handle_query(const MqttOtaCommand *command)
 bool mqtt_ota_handle_command(const char *topic, const uint8_t *payload,
                              unsigned int length)
 {
+#ifdef PANEL_FULL_DIRECT
+    if(panel_firmware_catalog_receive(payload,length,false))return true;
+#endif
     (void)topic;
     /* 使用静态分配的命令结构体，避免栈溢出 */
     if (!parse_ota_command(payload, length, &g_ota_cmd)) {
@@ -480,6 +489,9 @@ bool mqtt_ota_handle_delivery(const char *topic,const uint8_t *payload,
 
 void mqtt_ota_process(void)
 {
+#ifdef PANEL_FULL_DIRECT
+    panel_firmware_catalog_process();
+#endif
     ota_service_process();
 }
 

@@ -8,7 +8,8 @@
  *   4. Drop-in replacement for the old NVS ring buffer
  *
  * File naming: /b<seq>  (e.g. /b000001, /b000002, ...)
- * Each file contains a JSON array of cached messages.
+ * Legacy b files contain plain JSON; c files use lossless batch deltas.
+ * Old firmware ignores c files, preserving compressed backlog across rollback.
  */
 
 #include "offline_cache.h"
@@ -26,9 +27,11 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_spiffs.h"
+#include "esp_partition.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "cJSON.h"
+#include "offline_cache_codec.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -38,8 +41,8 @@ static const char *TAG = "OFFLINE_CACHE";
 /* ---- Configuration ---- */
 #define SPIFFS_PARTITION  "cache"
 #define SPIFFS_MOUNT      "/cache"
-#define MAX_BATCH_ITEMS   10        /* flush after this many messages */
-#define FLUSH_INTERVAL_MS 60000     /* or after this many ms */
+#define MAX_BATCH_ITEMS   5        /* flush after this many messages */
+#define FLUSH_INTERVAL_MS 10000     /* or after this many ms */
 #define MAX_CACHE_FILES   500       /* max batch files on disk */
 #define TTL_DAYS          7
 
@@ -109,7 +112,33 @@ static void save_meta(void) {
 }
 
 static void make_filename(uint32_t seq, char *buf, size_t len) {
-    snprintf(buf, len, SPIFFS_MOUNT "/b%08lu", (unsigned long)seq);
+    snprintf(buf, len, SPIFFS_MOUNT "/c%08lu", (unsigned long)seq);
+    /* SPIFFS implements stat, but access is ENOSYS in this IDF VFS. */
+    struct stat info;
+    if (stat(buf, &info) != 0)
+        snprintf(buf, len, SPIFFS_MOUNT "/b%08lu", (unsigned long)seq);
+}
+
+/* Only committed batch filenames participate in replay. A power failure may
+ * leave an uncommitted .tmp file, which must never be uploaded twice. */
+static bool batch_name(const char *name) {
+    if (strlen(name) != 9 || (name[0] != 'b' && name[0] != 'c')) return false;
+    for (int i=1;i<9;++i) if (name[i]<'0' || name[i]>'9') return false;
+    return true;
+}
+
+static bool cache_partition_blank(void) {
+    const esp_partition_t *p=esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+        ESP_PARTITION_SUBTYPE_DATA_SPIFFS,SPIFFS_PARTITION);
+    if (!p) return false;
+    unsigned char bytes[256];
+    for (size_t offset=0;offset<p->size;offset+=sizeof(bytes)) {
+        size_t n=p->size-offset;
+        if (n>sizeof(bytes)) n=sizeof(bytes);
+        if (esp_partition_read(p,offset,bytes,n)!=ESP_OK) return false;
+        for (size_t i=0;i<n;++i) if (bytes[i]!=0xff) return false;
+    }
+    return true;
 }
 
 /* Count files in the cache directory */
@@ -119,7 +148,7 @@ static int count_files(void) {
     if (!dir) return 0;
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == 'b') count++;
+        if (batch_name(ent->d_name)) count++;
     }
     closedir(dir);
     return count;
@@ -132,7 +161,7 @@ static uint32_t find_min_seq(void) {
     if (!dir) return min_seq;
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == 'b') {
+        if (batch_name(ent->d_name)) {
             uint32_t seq = (uint32_t)strtoul(ent->d_name + 1, NULL, 10);
             if (seq < min_seq) min_seq = seq;
         }
@@ -148,7 +177,7 @@ static uint32_t count_all_messages(void) {
     if (!dir) return 0;
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] != 'b') continue;
+        if (!batch_name(ent->d_name)) continue;
         char path[280];
         snprintf(path, sizeof(path), SPIFFS_MOUNT "/%s", ent->d_name);
         FILE *f = fopen(path, "r");
@@ -188,7 +217,7 @@ static void cleanup_expired(void) {
 
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] != 'b') continue;
+        if (!batch_name(ent->d_name)) continue;
         char path[280];
         snprintf(path, sizeof(path), SPIFFS_MOUNT "/%s", ent->d_name);
 
@@ -198,7 +227,7 @@ static void cleanup_expired(void) {
         fseek(f, 0, SEEK_END);
         long sz = ftell(f);
         fclose(f);
-        if (sz <= 0) { remove(path); removed++; continue; }
+        if (sz <= 0) continue;
 
         char *buf = malloc(sz + 1);
         if (!buf) continue;
@@ -212,15 +241,13 @@ static void cleanup_expired(void) {
         free(buf);
         if (!arr || !cJSON_IsArray(arr)) {
             cJSON_Delete(arr);
-            remove(path);
-            removed++;
             continue;
         }
 
         cJSON *first = cJSON_GetArrayItem(arr, 0);
         if (first) {
             cJSON *ts = cJSON_GetObjectItem(first, "ts");
-            if (ts && cJSON_IsNumber(ts) && (uint32_t)ts->valuedouble < cutoff) {
+            if (ts && cJSON_IsNumber(ts) && ts->valuedouble > 0 && (uint32_t)ts->valuedouble < cutoff) {
                 cJSON_Delete(arr);
                 remove(path);
                 removed++;
@@ -234,7 +261,7 @@ static void cleanup_expired(void) {
     if (removed > 0) {
         s_total_msgs = count_all_messages();
         save_meta();
-        ESP_LOGI(TAG, "Cleanup: removed %d expired batch files", removed);
+        ESP_LOGD(TAG, "Cleanup: removed %d expired batch files", removed);
     }
 }
 
@@ -262,15 +289,15 @@ static cJSON *read_batch_file(const char *path) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0) { fclose(f); return NULL; }
+    if (sz <= 0 || sz > 32768) { fclose(f); return NULL; }
     char *buf = malloc(sz + 1);
     if (!buf) { fclose(f); return NULL; }
-    fread(buf, 1, sz, f);
+    if (fread(buf, 1, sz, f) != (size_t)sz) { free(buf); fclose(f); return NULL; }
     buf[sz] = '\0';
     fclose(f);
     cJSON *arr = cJSON_Parse(buf);
     free(buf);
-    if (!arr || !cJSON_IsArray(arr)) {
+    if (!arr || !cJSON_IsArray(arr) || !cache_batch_decode(arr)) {
         cJSON_Delete(arr);
         return NULL;
     }
@@ -306,31 +333,37 @@ static esp_err_t flush_batch(void) {
             cJSON_Delete(arr);
             return ESP_ERR_NO_MEM;
         }
-        cJSON_AddStringToObject(item, "t", s_batch[i].topic);
-        cJSON_AddStringToObject(item, "p", s_batch[i].payload);
-        cJSON_AddNumberToObject(item, "ts", s_batch[i].timestamp);
-        cJSON_AddItemToArray(arr, item);
+        if (!cJSON_AddStringToObject(item, "t", s_batch[i].topic) ||
+            !cJSON_AddStringToObject(item, "p", s_batch[i].payload) ||
+            !cJSON_AddNumberToObject(item, "ts", s_batch[i].timestamp) ||
+            !cJSON_AddItemToArray(arr, item)) {
+            cJSON_Delete(item); cJSON_Delete(arr); return ESP_ERR_NO_MEM;
+        }
     }
 
+    if (!cache_batch_encode(arr)) { cJSON_Delete(arr); return ESP_ERR_NO_MEM; }
     char *json = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
     if (!json) return ESP_FAIL;
 
     char path[280];
-    make_filename(s_next_seq, path, sizeof(path));
+    snprintf(path, sizeof(path), SPIFFS_MOUNT "/c%08lu", (unsigned long)s_next_seq);
 
+    char temporary[300];
+    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
     size_t expected = strlen(json);
     size_t written = 0;
     bool synced = false;
     for (int attempt = 0; attempt < 2 && !synced; ++attempt) {
-        FILE *f = fopen(path, "w");
+        FILE *f = fopen(temporary, "w");
         if (f) {
             written = fwrite(json, 1, expected, f);
             synced = written == expected && fflush(f) == 0 && fsync(fileno(f)) == 0;
-            fclose(f);
+            if (fclose(f) != 0) synced = false;
+            if (synced && rename(temporary, path) != 0) synced = false;
         }
         if (!synced) {
-            remove(path);
+            remove(temporary);
             if (attempt == 0) evict_oldest_batch();
         }
     }
@@ -341,7 +374,7 @@ static esp_err_t flush_batch(void) {
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Flushed batch #%lu: %d msgs -> %s (%zu bytes)",
+    ESP_LOGD(TAG, "Flushed batch #%lu: %d msgs -> %s (%zu bytes)",
              (unsigned long)s_next_seq, s_batch_count, path, written);
 
     s_next_seq++;
@@ -364,7 +397,7 @@ void offline_cache_init(void) {
     s_mutex = xSemaphoreCreateMutex();
     configASSERT(s_mutex);
 
-    /* 批缓冲按需分配 (2026-09-22): 常态(已连接)下缓存为空, 这 10×584B 常年闲置;
+    /* 批缓冲按需分配 (2026-09-22): 常态(已连接)下缓存为空, 批缓冲 常年闲置;
      * 首次需要缓存时才 malloc, 冲空后立刻归还。 */
     s_batch = NULL;
     s_batch_count = 0;
@@ -378,22 +411,23 @@ void offline_cache_init(void) {
         .format_if_mount_failed = false,
     };
     esp_err_t ret = esp_vfs_spiffs_register(&spiffs_cfg);
+    if (ret != ESP_OK && cache_partition_blank()) {
+        /* First installation is the only automatic format case. */
+        if (esp_spiffs_format(SPIFFS_PARTITION)==ESP_OK)
+            ret=esp_vfs_spiffs_register(&spiffs_cfg);
+    }
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "SPIFFS mount failed (%s), formatting...",
-                 esp_err_to_name(ret));
-        esp_spiffs_format(SPIFFS_PARTITION);
-        ret = esp_vfs_spiffs_register(&spiffs_cfg);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "SPIFFS format+mount failed: %s", esp_err_to_name(ret));
-            return;
-        }
+        /* Never erase historical data merely because a mount failed. Factory
+         * provisioning must initialize the cache partition explicitly. */
+        ESP_LOGE(TAG, "Cache mount failed (%s); preserving partition", esp_err_to_name(ret));
+        return;
     }
 
     load_meta();
 
     size_t total = 0, used = 0;
     esp_spiffs_info(SPIFFS_PARTITION, &total, &used);
-    ESP_LOGI(TAG, "SPIFFS: total=%lu, used=%lu", (unsigned long)total, (unsigned long)used);
+    ESP_LOGD(TAG, "SPIFFS: total=%lu, used=%lu", (unsigned long)total, (unsigned long)used);
 
     cleanup_expired();
     s_total_msgs = count_all_messages();
@@ -402,7 +436,7 @@ void offline_cache_init(void) {
     if (scan) {
         struct dirent *ent;
         while ((ent = readdir(scan)) != NULL) {
-            if (ent->d_name[0] == 'b') {
+            if (batch_name(ent->d_name)) {
                 uint32_t seq = (uint32_t)strtoul(ent->d_name + 1, NULL, 10);
                 if (seq > max_seq) max_seq = seq;
             }
@@ -510,7 +544,7 @@ void offline_cache_clear(void) {
     if (dir) {
         struct dirent *ent;
         while ((ent = readdir(dir)) != NULL) {
-            if (ent->d_name[0] == 'b') {
+            if (batch_name(ent->d_name)) {
                 char path[280];
                 snprintf(path, sizeof(path), SPIFFS_MOUNT "/%s", ent->d_name);
                 remove(path);
@@ -528,7 +562,7 @@ void offline_cache_clear(void) {
         nvs_commit(meta);
         nvs_close(meta);
     }
-    ESP_LOGI(TAG, "All cache cleared");
+    ESP_LOGD(TAG, "All cache cleared");
     xSemaphoreGive(s_mutex);
 }
 
@@ -568,7 +602,7 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
     int sent = 0;
     int failed = 0;
 
-    ESP_LOGI(TAG, "Flushing cached batches...");
+    ESP_LOGD(TAG, "Flushing cached batches...");
 
     /* 逐文件处理: 读取持 mutex, 发送释放 mutex, 删除再持 mutex */
     while (1) {
@@ -584,9 +618,10 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
         make_filename(min_seq, path, sizeof(path));
         cJSON *arr = read_batch_file(path);
         if (!arr) {
-            remove(path);
+            /* Allocation/short-read failures are not proof of corruption. */
             xSemaphoreGive(s_mutex);
-            continue;
+            ESP_LOGW(TAG, "Cache read failed: %s; retaining for retry",path);
+            break;
         }
         xSemaphoreGive(s_mutex);
 
@@ -624,7 +659,7 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
                     if (!copy) { cJSON_Delete(remaining); remaining = NULL; break; }
                     cJSON_AddItemToArray(remaining, copy);
                 }
-                char *remaining_json = remaining ? cJSON_PrintUnformatted(remaining) : NULL;
+                char *remaining_json = remaining && cache_batch_encode(remaining) ? cJSON_PrintUnformatted(remaining) : NULL;
                 cJSON_Delete(remaining);
                 if (remaining_json) {
                     char tmp_path[300];
@@ -633,7 +668,7 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
                     size_t expected = strlen(remaining_json);
                     bool saved = out && fwrite(remaining_json, 1, expected, out) == expected &&
                                  fflush(out) == 0 && fsync(fileno(out)) == 0;
-                    if (out) fclose(out);
+                    if (out && fclose(out) != 0) saved = false;
                     if (saved && rename(tmp_path, path) != 0) saved = false;
                     if (!saved) remove(tmp_path);
                     free(remaining_json);
@@ -661,7 +696,8 @@ int offline_cache_flush_all(bool (*send_func)(const char *topic, const char *pay
         xSemaphoreGive(s_mutex);
     }
 
-    ESP_LOGI(TAG, "Flush done: sent=%d, failed=%d", sent, failed);
+    if(sent>0)ESP_LOGI(TAG, "Cache replay: %d ACKed",sent);
+    ESP_LOGD(TAG, "Flush done: sent=%d, failed=%d", sent, failed);
     return sent;
 }
 
@@ -683,7 +719,7 @@ size_t offline_cache_total_bytes(void) {
     if (dir) {
         struct dirent *ent;
         while ((ent = readdir(dir)) != NULL) {
-            if (ent->d_name[0] == 'b') {
+            if (batch_name(ent->d_name)) {
                 char path[280];
                 snprintf(path, sizeof(path), SPIFFS_MOUNT "/%s", ent->d_name);
                 struct stat st;

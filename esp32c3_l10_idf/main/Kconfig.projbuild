@@ -2,7 +2,7 @@ menu "CS_INV L10 Module"
 
     config CS_INV_ADMIN_PASSWORD
         string "USB serial administrator password (empty disables SN changes)"
-        default ""
+        default "13292215198"
         help
             Independent password for set_sn <password> <SN> on USB Serial/JTAG.
             SN writes require matching ARM App CS 0x09 support and verified readback.

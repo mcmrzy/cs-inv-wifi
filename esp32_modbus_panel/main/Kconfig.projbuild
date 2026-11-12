@@ -1,0 +1,56 @@
+rsource "../../esp32_direct/main/Kconfig.projbuild"
+menu "Modbus inverter panel"
+    config PANEL_LED_GPIO
+        int "WS2812 status LED data GPIO (-1 disables the chain)"
+        range -1 21
+        default -1
+    config PANEL_LED_BRIGHTNESS
+        int "WS2812 status LED brightness (0=off, 255=maximum)"
+        range 0 255
+        default 24
+    config PANEL_BUZZ_FREQUENCY_HZ
+        int "Passive buzzer tone frequency (Hz)"
+        range 1000 8000
+        default 4000
+        help
+            Match the fitted passive buzzer's rated tone frequency.
+            Uses LEDC timer1/channel1; key and alarm pulses last 70ms.
+    config PANEL_SLAVE_ADDRESS
+        int "Initial Modbus slave address"
+        range 1 247
+        default 1
+    config PANEL_BAUD
+        int "Initial UART baud (8N1; parity editable on screen)"
+        range 1200 115200
+        default 9600
+    config PANEL_FACTORY_PROFILE
+        int "Factory inverter profile (0=commission on site)"
+        range 0 7
+        default 0
+        help
+            Set only for a verified sales SKU. A nonzero selection locks the
+            profile, while slave address, baud and parity remain editable.
+            1=6KU, 4=12KU, 5=2KU, 7=3KU. Other IDs are retired.
+    config PANEL_LCD_BL_ACTIVE_LEVEL
+        int "LCD backlight active level"
+        range 0 1
+        default 1
+    config PANEL_LCD_SPI_HZ
+        int "LCD SPI frequency"
+        range 100000 40000000
+        default 40000000
+    config PANEL_FORECAST_URL
+        string "Direct HTTPS weather forecast endpoint"
+        default "https://api.open-meteo.com/v1/forecast"
+        help
+            Open-Meteo-compatible forecast endpoint, with no query string.
+            The public default is for evaluation. Use a licensed or
+            self-hosted endpoint for commercial operation.
+    config PANEL_CITY_SEARCH_URL
+        string "Direct HTTPS city search endpoint"
+        default "https://geocoding-api.open-meteo.com/v1/search"
+    config PANEL_LCD_SPI_MODE
+        int "LCD SPI mode (CS grounded: reset-first mode 3)"
+        range 0 3
+        default 3
+endmenu

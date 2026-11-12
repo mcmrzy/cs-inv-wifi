@@ -9,6 +9,9 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#ifdef PANEL_FULL_DIRECT
+#include "panel_theme.h"
+#endif
 
 #define SPLASH_W 320
 #define SPLASH_H 240
@@ -79,9 +82,15 @@ void direct_splash_run(bool light_theme)
     /* The caller is the panel task, before its normal render loop. Reuse its
      * scratch band rather than permanently reserving another 10,240 bytes. */
     uint16_t *band = direct_panel_band_buffer();
-    const splash_palette_t dark = {SPLASH_BLACK, {SPLASH_BLUE_DARK, SPLASH_WHITE}};
-    const splash_palette_t light = {SPLASH_WHITE, {SPLASH_BLUE_LIGHT, SPLASH_BLACK}};
-    const splash_palette_t *p = light_theme ? &light : &dark;
+#ifdef PANEL_FULL_DIRECT
+    const panel_theme_t theme = panel_theme(light_theme);
+    const splash_palette_t palette = {theme.background, {theme.accent, theme.text}};
+#else
+    const splash_palette_t palette = light_theme ?
+        (splash_palette_t){SPLASH_WHITE, {SPLASH_BLUE_LIGHT, SPLASH_BLACK}} :
+        (splash_palette_t){SPLASH_BLACK, {SPLASH_BLUE_DARK, SPLASH_WHITE}};
+#endif
+    const splash_palette_t *p = &palette;
     splash_layout_t l;
     l.logo_w = (int)direct_boot_logo_width;
     l.logo_h = (int)direct_boot_logo_height;

@@ -19,10 +19,12 @@ uint32_t direct_display_signature(const direct_ui_state_t *u,const direct_ui_dat
  const char *hints[6];direct_ui_key_hints(u,d,hints);
  for(unsigned i=0;i<6;i++)text(&hash,hints[i]);
  if(u->page==UI_HOME && !u->main_mode){
-  D(clock_valid);D(hour);D(minute);D(dsp_online);D(dsp_display_held);D(ota_busy);
+  D(clock_valid);D(hour);D(minute);D(dsp_online);D(dsp_display_held);D(ota_busy);D(bluetooth_connected);
   int8_t wifi=(int8_t)direct_home_wifi_level(d);bytes(&hash,&wifi,sizeof(wifi));
+#ifndef PANEL_FULL_DIRECT
   uint8_t phase=direct_home_animation_active(u,d)?d->home_flow_phase:0;
   bytes(&hash,&phase,sizeof(phase));
+#endif
   if(d->dsp_online || d->dsp_display_held){
    R(ACInWatt);R(GridVolt);R(OutputWatt);R(ACOutputVolt);R(Ppv);R(Vpv1);R(BatterySOC);R(BatVolt);
    R(BatChgCurr);R(BatDischgCurr);

@@ -18,6 +18,7 @@ uint32_t ble_ct_cmd_write_token(void);
 /* Capture token at enqueue. Direct completion proves save+UART submission,
  * never DSP observation. A stale token cannot finish a newer operation. */
 void ble_ct_cmd_on_write_ack(uint32_t token, const char *param_id, int err);
+void ble_ct_cmd_on_write_protocol_accepted(uint32_t token, const char *param_id);
 void ble_ct_cmd_on_write_saved(uint32_t token, const char *param_id, double actual,
                                uint32_t parameter_revision);
 
@@ -35,6 +36,20 @@ typedef int (*ble_cmd_battery_write_fn)(const struct cJSON *config, bool validat
 typedef struct cJSON *(*ble_cmd_battery_read_fn)(void);
 void ble_ct_cmd_set_battery_executors(ble_cmd_battery_write_fn write_fn,
                                       ble_cmd_battery_read_fn read_fn);
+/* Products without the private grouped format explicitly advertise/reject it.
+ * Default true preserves existing direct-controller behavior. */
+void ble_ct_cmd_set_battery_supported(bool supported);
+
+/* Product-native panel API. The read callback fills caller-owned actual and
+ * returns NULL on success. Writes carry the negotiated request token. */
+typedef const char *(*ble_cmd_panel_read_fn)(const char *action,
+    const struct cJSON *params, struct cJSON *actual);
+typedef int (*ble_cmd_panel_write_fn)(const char *param_id, double value,
+    const struct cJSON *params, uint32_t token);
+void ble_ct_cmd_set_panel_executors(ble_cmd_panel_read_fn read_fn,
+                                    ble_cmd_panel_write_fn write_fn);
+void ble_ct_cmd_on_panel_write_result(uint32_t token, const char *param_id,
+    const char *error, bool observed, bool submitted, double value);
 
 /* 命令执行结果码（与 main 层 cmd_handler 对齐） */
 enum {

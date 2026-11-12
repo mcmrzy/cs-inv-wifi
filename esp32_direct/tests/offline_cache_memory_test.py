@@ -10,6 +10,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +123,7 @@ static cJSON *cJSON_CreateArray(void) { CHECK(false); return NULL; }
 static cJSON *cJSON_Duplicate(cJSON *item,bool recurse) { (void)item;(void)recurse; CHECK(false); return NULL; }
 static void cJSON_AddItemToArray(cJSON *arr,cJSON *item) { (void)arr;(void)item; CHECK(false); }
 static void cJSON_Delete(cJSON *arr) { (void)arr; CHECK(false); }
+static bool cache_batch_encode(cJSON *arr) { (void)arr; CHECK(false); return false; }
 static char *cJSON_PrintUnformatted(cJSON *arr) { (void)arr; CHECK(false); return NULL; }
 static unsigned count_all_messages(void) { CHECK(held&&!external_owner); return persisted_count; }
 static void save_meta(void) { CHECK(held&&!external_owner); }
@@ -152,24 +154,28 @@ static void verify_persisted(unsigned count) {
 static bool send_item(const char *topic,const char *payload,uint32_t timestamp) {
     (void)topic;(void)payload;(void)timestamp; CHECK(false); return false;
 }
+static bool pending_is_next(void) {
+    char expected[32];snprintf(expected,sizeof(expected),"{\"id\":%u}",(unsigned)MAX_BATCH_ITEMS);
+    return s_batch && !strcmp(s_batch[0].payload,expected);
+}
 int main(int argc,char **argv) {
     CHECK(argc==2);
     if (!strcmp(argv[1],"retry")) {
         fill_failed_batch(); fail_flush=false;
-        CHECK(add(10)); verify_persisted(10);
+        CHECK(add(MAX_BATCH_ITEMS)); verify_persisted(MAX_BATCH_ITEMS);
         CHECK(allocations==2 && s_batch_count==1 && s_batch);
-        CHECK(!strcmp(s_batch[0].payload,"{\"id\":10}") && s_batch[0].index==0);
+        CHECK(pending_is_next() && s_batch[0].index==0);
     } else if (!strcmp(argv[1],"alloc_after_flush")) {
         fill_failed_batch(); fail_flush=false; fail_alloc=true;
-        CHECK(!add(10)); verify_persisted(10);
+        CHECK(!add(MAX_BATCH_ITEMS)); verify_persisted(MAX_BATCH_ITEMS);
         CHECK(allocations==2 && !s_batch && s_batch_count==0);
-        fail_alloc=false; CHECK(add(10)); verify_persisted(10);
-        CHECK(s_batch && s_batch_count==1 && !strcmp(s_batch[0].payload,"{\"id\":10}"));
+        fail_alloc=false; CHECK(add(MAX_BATCH_ITEMS)); verify_persisted(MAX_BATCH_ITEMS);
+        CHECK(s_batch && s_batch_count==1 && pending_is_next());
     } else if (!strcmp(argv[1],"failed_flush")) {
         fill_failed_batch(); OfflineCacheItem before[MAX_BATCH_ITEMS];
         memcpy(before,s_batch,sizeof(before));
         for (unsigned i=0;i<20;i++) {
-            CHECK(!add(10)); CHECK(allocations==1 && s_batch_count==MAX_BATCH_ITEMS);
+            CHECK(!add(MAX_BATCH_ITEMS)); CHECK(allocations==1 && s_batch_count==MAX_BATCH_ITEMS);
             CHECK(!memcmp(before,s_batch,sizeof(before)) && persisted_count==0);
         }
     } else if (!strcmp(argv[1],"normal")) {
@@ -178,7 +184,7 @@ int main(int argc,char **argv) {
             if ((i+1)%MAX_BATCH_ITEMS==0) CHECK(!s_batch && !allocation && s_batch_count==0);
             else CHECK(s_batch && s_batch_count==(int)((i+1)%MAX_BATCH_ITEMS));
         }
-        CHECK(allocations==3 && flushes==3); verify_persisted(30);
+        CHECK(allocations==30/MAX_BATCH_ITEMS && flushes==30/MAX_BATCH_ITEMS); verify_persisted(30);
     } else if (!strcmp(argv[1],"initial_alloc")) {
         fail_alloc=true; CHECK(!add(0));
         CHECK(!s_batch && s_batch_count==0 && !persisted_count && !flushes);
@@ -236,7 +242,7 @@ class OfflineCacheMemoryTests(unittest.TestCase):
     def test_repeated_failed_flush_retains_full_batch_without_overflow(self):
         self.run_case("failed_flush")
 
-    def test_normal_ten_message_batches_still_flush_and_release(self):
+    def test_normal_batches_still_flush_and_release(self):
         self.run_case("normal")
 
     def test_initial_allocation_failure_can_retry(self):
@@ -247,4 +253,4 @@ class OfflineCacheMemoryTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main(testRunner=unittest.TextTestRunner(stream=sys.stdout, verbosity=2))

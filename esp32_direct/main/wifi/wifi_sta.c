@@ -239,12 +239,20 @@ bool wifi_sta_connect(const char *ssid, const char *pass)
     }
 
     wifi_config_t sta_cfg = {0};
+#ifdef PANEL_FULL_DIRECT
+    size_t ssid_length=strlen(ssid),pass_length=pass?strlen(pass):0;
+    if(ssid_length>sizeof(sta_cfg.sta.ssid) || pass_length>sizeof(sta_cfg.sta.password))return false;
+    memcpy(sta_cfg.sta.ssid,ssid,ssid_length);
+    if(pass_length)memcpy(sta_cfg.sta.password,pass,pass_length);
+    sta_cfg.sta.threshold.authmode=pass_length?WIFI_AUTH_WPA2_PSK:WIFI_AUTH_OPEN;
+#else
     strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
     if (pass && pass[0]) {
         strncpy((char *)sta_cfg.sta.password, pass,
                 sizeof(sta_cfg.sta.password) - 1);
     }
     sta_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+#endif
 
     wifi_config_t previous;
     bool same_credentials = esp_wifi_get_config(WIFI_IF_STA, &previous) == ESP_OK &&

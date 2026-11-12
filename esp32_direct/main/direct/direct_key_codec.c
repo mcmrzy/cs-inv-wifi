@@ -10,6 +10,16 @@ int direct_key_decode(uint16_t frame)
     if ((frame & 0xf000U) != 0xa000U) return DIRECT_KEY_BAD_FRAME;
     if ((frame & 0x0f00U) == 0) return DIRECT_KEY_NONE;
     switch ((uint8_t)frame) {
+#if defined(PANEL_FULL_DIRECT) && PANEL_FULL_DIRECT
+    /* Modbus board KEY1..KEY6: ENTER, RIGHT, DOWN, UP, LEFT, ESC. */
+    case 0xfe: return DIRECT_KEY_ENTER;
+    case 0xfd: return DIRECT_KEY_RIGHT;
+    case 0xfb: return DIRECT_KEY_DOWN;
+    case 0xf7: return DIRECT_KEY_UP;
+    case 0xef: return DIRECT_KEY_LEFT;
+    case 0xdf: return DIRECT_KEY_BACK;
+    case 0xde: return DIRECT_KEY_ENTER_BACK;
+#else
     case 0xef: return DIRECT_KEY_BACK;
     case 0xfe: return DIRECT_KEY_ENTER;
     case 0xdf: return DIRECT_KEY_UP;
@@ -17,6 +27,7 @@ int direct_key_decode(uint16_t frame)
     case 0xfb: return DIRECT_KEY_DOWN;
     case 0xfd: return DIRECT_KEY_RIGHT;
     case 0xee: return DIRECT_KEY_ENTER_BACK;
+#endif
     case 0xff: return DIRECT_KEY_NONE;
     default: return DIRECT_KEY_BAD_FRAME;
     }

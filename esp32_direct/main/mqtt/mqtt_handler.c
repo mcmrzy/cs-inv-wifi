@@ -13,6 +13,7 @@
 #include "config.h"
 #include "nvs_storage.h"
 #include "offline_cache.h"
+#include "offline_cache_route.h"
 #include "cs_protocol_defs.h"
 #include "wifi_sta.h"
 #include "telemetry.h"
@@ -77,10 +78,9 @@ static atomic_bool g_cache_flush_paused;
 static QueueHandle_t g_offline_ack_queue = NULL;
 
 #define OFFLINE_ACK_TIMEOUT_MS  5000
-/* 补传任务内包含 offline_send_callback 的 1KB 级局部缓冲、
- * esp_mqtt_client_publish 内部调用链及 ESP_LOGI 格式化，
- * 2048 字节会发生栈溢出 (Stack protection fault)，需留足余量 */
-#define OFFLINE_FLUSH_TASK_STACK 4096
+/* Replay includes filesystem/JSON and libc formatting. Keep TLS writes in
+ * the MQTT task and leave headroom for SPIFFS/logging on this worker. */
+#define OFFLINE_FLUSH_TASK_STACK 6144
 
 static char g_rx_topic[128];
 static char g_rx_payload[MQTT_RX_MAX + 1];
@@ -120,6 +120,8 @@ static bool offline_send_callback(const char *topic, const char *payload,
         return false;
     }
 
+    const uint16_t version=cache_route_decode(&topic);
+
     /* 大缓冲放堆上，避免占用已紧张的补传任务栈 */
     char *full_topic = malloc(128);
     if (!full_topic) {
@@ -132,15 +134,15 @@ static bool offline_send_callback(const char *topic, const char *payload,
         return false;
     }
 
-    char *full_payload = malloc(1024);
+    char *full_payload = malloc(1152);
     if (!full_payload) {
         free(full_topic);
         return false;
     }
-    int len = snprintf(full_payload, 1024,
+    int len = snprintf(full_payload, 1152,
         "{\"t\":%" PRIu32 ",\"v\":%d,\"data\":%s}",
-        timestamp, PROTO_ENVELOPE_VERSION, payload);
-    if (len <= 0 || len >= 1024) {
+        timestamp, version, payload);
+    if (len <= 0 || len >= 1152) {
         free(full_topic);
         free(full_payload);
         return false;
@@ -149,8 +151,10 @@ static bool offline_send_callback(const char *topic, const char *payload,
     int ack_id = -1;
     while (xQueueReceive(g_offline_ack_queue, &ack_id, 0) == pdTRUE) {}
 
-    const int msg_id = esp_mqtt_client_publish(g_mqtt_client, full_topic,
-                                               full_payload, len, 1, 0);
+    /* enqueue copies the message into the SDK outbox. The MQTT task owns TLS
+     * writes; the replay worker only waits for this exact message's PUBACK. */
+    const int msg_id = esp_mqtt_client_enqueue(g_mqtt_client, full_topic,
+                                               full_payload, len, 1, 0, true);
     free(full_topic);
     free(full_payload);
     if (msg_id < 0) return false;
@@ -170,7 +174,7 @@ static bool offline_send_callback(const char *topic, const char *payload,
     }
     acknowledged = acknowledged && atomic_load(&g_mqtt_connected);
 
-    ESP_LOGI(TAG, "[OFFLINE-SEND] topic=%s, ts=%u, msg_id=%d, ack=%d",
+    ESP_LOGD(TAG, "[OFFLINE-SEND] topic=%s, ts=%u, msg_id=%d, ack=%d",
              topic, timestamp, msg_id, acknowledged);
     return acknowledged;
 }
@@ -179,6 +183,8 @@ static void offline_cache_flush_task(void *parameter)
 {
     (void)parameter;
     offline_cache_flush_all(offline_send_callback);
+    const unsigned stack_free=(unsigned)uxTaskGetStackHighWaterMark(NULL);
+    if (stack_free<1024U) ESP_LOGW(TAG, "Cache replay stack low: free=%u", stack_free);
     atomic_store(&g_cache_flush_running, false);
     vTaskDelete(NULL);
 }
@@ -227,7 +233,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             char cmd_topic[64];
             snprintf(cmd_topic, sizeof(cmd_topic), "cs_inv/%s/cmd", g_device_sn);
             esp_mqtt_client_subscribe(g_mqtt_client, cmd_topic, 1);
-            ESP_LOGI(TAG, "Subscribed to: %s", cmd_topic);
+            ESP_LOGD(TAG, "Subscribed to: %s", cmd_topic);
         }
 
         /* 订阅云端 OTA 命令 */
@@ -235,7 +241,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             char ota_topic[64];
             snprintf(ota_topic, sizeof(ota_topic), "cs_inv/%s/ota/cmd", g_device_sn);
             esp_mqtt_client_subscribe(g_mqtt_client, ota_topic, 1);
-            ESP_LOGI(TAG, "Subscribed to: %s", ota_topic);
+            ESP_LOGD(TAG, "Subscribed to: %s", ota_topic);
         }
 
         {
@@ -248,7 +254,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         {
             int cached_count = offline_cache_count();
             if (cached_count > 0) {
-                ESP_LOGI(TAG, "Found %d cached items, will flush", cached_count);
+                ESP_LOGD(TAG, "Found %d cached items, will flush", cached_count);
                 atomic_store(&g_flush_pending, true);
             }
             g_last_cache_flush = esp_timer_get_time() / 1000;
@@ -292,7 +298,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             if (strstr(g_rx_topic, "/binding/state") != NULL) {
                 cloud_binding_receive(g_rx_topic,g_rx_payload,(size_t)g_rx_expected);
             } else if (strstr(g_rx_topic, "/ota/cmd") != NULL) {
-                ESP_LOGI(TAG, "OTA cmd topic=%s len=%u", g_rx_topic, g_rx_expected);
+                ESP_LOGD(TAG, "OTA cmd topic=%s len=%u", g_rx_topic, g_rx_expected);
                 mqtt_ota_handle_delivery(g_rx_topic,
                                         (const uint8_t *)g_rx_payload,
                                         (unsigned int)g_rx_expected,g_rx_retained);
@@ -414,7 +420,7 @@ bool mqtt_init(MQTTMessageHandler msg_handler)
         ESP_LOGE(TAG, "SN not set");
         return false;
     }
-    ESP_LOGI(TAG, "Loaded SN: %s", g_device_sn);
+    ESP_LOGD(TAG, "Loaded SN: %s", g_device_sn);
 
     if (!g_device_key[0]) {
         ESP_LOGE(TAG, "MQTT device key is not provisioned");
@@ -431,7 +437,7 @@ bool mqtt_init(MQTTMessageHandler msg_handler)
         atomic_load(&g_use_broker_ip_fallback));
     snprintf(g_mqtt_uri, sizeof(g_mqtt_uri), "mqtts://%s:%u",
              connect_host, broker_port);
-    ESP_LOGI(TAG, "Broker: %s", g_mqtt_uri);
+    ESP_LOGD(TAG, "Broker: %s", g_mqtt_uri);
     if (connect_host != broker_host) {
         ESP_LOGW(TAG, "Using default broker IP fallback for this boot");
     }
@@ -481,7 +487,7 @@ bool mqtt_init(MQTTMessageHandler msg_handler)
         ESP_LOGW(TAG, "MQTT task memory reservation unavailable; start will retry");
     }
 
-    ESP_LOGI(TAG, "MQTT client initialized: %s", g_mqtt_uri);
+    ESP_LOGD(TAG, "MQTT client initialized: %s", g_mqtt_uri);
     return true;
 }
 
@@ -601,6 +607,13 @@ void mqtt_disconnect(void)
  * 不该挤占离线缓存里遥测的补传槽位)。
  * 注意: 这里不碰遥测计时器 —— 心跳周期只由 telemetry_tick 管理; 曾经"任何上行
  * 都重置心跳计时器"会让 90s 在线上报不断推后 180s 心跳, 正常周期下心跳永不发出。 */
+static bool cache_message(const char *topic,const char *data,uint32_t timestamp,uint16_t version)
+{
+    char route[64];
+    return cache_route_encode(topic,version,route,sizeof(route)) &&
+           offline_cache_add(route,data,timestamp);
+}
+
 static int publish_core(const char *sub_topic, const char *data, int qos,
                         int retain, bool allow_cache, uint16_t version)
 {
@@ -620,9 +633,8 @@ static int publish_core(const char *sub_topic, const char *data, int qos,
         if (!allow_cache) {
             return -1;
         }
-        bool stored = offline_cache_add(sub_topic, data, 0);
-        ESP_LOGW(TAG, "Not connected, cache %s: topic=%s",
-                 stored ? "stored" : "failed", sub_topic);
+        bool stored = cache_message(sub_topic, data, 0, version);
+        if (!stored) ESP_LOGW(TAG, "Cache rejected: %s", sub_topic);
         return stored ? 1 : -1;
     }
 
@@ -647,7 +659,7 @@ static int publish_core(const char *sub_topic, const char *data, int qos,
     if (!allow_cache) {
         return -4;
     }
-    return offline_cache_add(sub_topic, data, timestamp) ? 1 : -4;
+    return cache_message(sub_topic, data, timestamp, version) ? 1 : -4;
 }
 
 /* 清掉指定 SN 的 retained status (空载荷 + retain=1 = 让 broker 删除该保留消息)。
@@ -684,16 +696,13 @@ int mqtt_publish_volatile(const char *sub_topic, const char *data, int len,
     return publish_core(sub_topic, data, qos, 0, false, PROTO_ENVELOPE_VERSION);
 }
 
-/* heartbeat v3: ARM 运行参数原样转发专用 (信封版本 3, 不走离线缓存)。
- * 不缓存的理由: ① 心跳是周期状态快照, 补传过期快照价值低;
- * ② 离线缓存项 payload 上限 512B, 87 值结构体 payload ≈530B 会被拒;
- * ③ 缓存补传固定按 v2 重组信封, 会把 v3 内容包成 v2 导致服务端按错版本解析。 */
+/* V3 run snapshots retain their original envelope version in offline storage. */
 int mqtt_publish_heartbeat_raw(const char *sub_topic, const char *data, int len)
 {
     if (len < 0) {
         return -2;
     }
-    return publish_core(sub_topic, data, 0, 0, false,
+    return publish_core(sub_topic, data, 0, 0, true,
                         PROTO_HEARTBEAT_ENVELOPE_VERSION);
 }
 
@@ -778,7 +787,7 @@ void mqtt_flush_offline_cache(void)
     }
 
     if (atomic_exchange(&g_flush_pending, false)) {
-        ESP_LOGI(TAG, "Flushing %d cached items (priority)...", cached);
+        ESP_LOGD(TAG, "Flushing %d cached items (priority)...", cached);
     }
 
     bool expected = false;

@@ -71,15 +71,18 @@ typedef struct {
 typedef struct {
     uint8_t address;
     int32_t current_10ma;
-    uint16_t voltage_10mv;
+    uint32_t voltage_10mv;
     uint16_t soc_percent;
     uint16_t soh_percent;
-    /* Preserve wire values for DSP forwarding. BBJ uses 0.1%, Modbus 1%.
+    /* Preserve wire values. BBJ and CSERGY use 0.1%, legacy Modbus uses 1%.
      * Zero keeps legacy/manual whole-percent snapshots compatible. */
     uint8_t percent_divisor;
     uint16_t warning;
     uint16_t protection;
-    uint16_t cell_mv[16];
+    uint16_t cell_mv[32];
+    /* Optional pack limits, available only when the battery protocol supplies
+     * all three values. Zero means no limits were acquired. */
+    uint16_t charge_max_deciamp, charge_max_decivolt, discharge_min_decivolt;
 } direct_bms_measurement_t;
 
 static inline uint16_t direct_bms_percent(const direct_bms_measurement_t *m,

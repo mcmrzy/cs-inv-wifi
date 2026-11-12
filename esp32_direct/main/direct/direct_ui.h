@@ -12,9 +12,15 @@
 #define DIRECT_UI_CONFIG_ROWS 6U
 #define DIRECT_UI_SUBMENU_ROWS 6U
 #define DIRECT_UI_GROUPS 13U
+typedef struct {
+    uint32_t context, sample_ms;
+    uint16_t values[6]; /* Voltage, current, SOC, temperature, fault, warning. */
+    uint8_t valid;
+    bool online;
+} direct_inverter_battery_t;
 typedef enum { UI_HOME, UI_MENU, UI_CONFIG, UI_PARAMETERS, UI_ALARM,
                UI_BMS, UI_HELP, UI_TIME, UI_FACTORY, UI_APPEARANCE, UI_SUBMENU, UI_REVIEW, UI_UPGRADE, UI_PRODUCTION, UI_PHONE_SETUP,
-               UI_BATTERY, UI_BATTERY_REVIEW } direct_ui_page_t;
+               UI_BATTERY, UI_BATTERY_REVIEW, UI_WIFI, UI_WEATHER, UI_BMS_PROTOCOL } direct_ui_page_t;
 typedef enum { UI_ACT_NONE, UI_ACT_REFRESH, UI_ACT_WRITE, UI_ACT_LCD_RESET,
                UI_ACT_RESTART, UI_ACT_LOCAL_RESET, UI_ACT_SET_TIME,
                UI_ACT_APPEARANCE_PREVIEW, UI_ACT_APPEARANCE_SAVE,
@@ -24,11 +30,18 @@ typedef struct {
     direct_dsp_status_t status;
     direct_bms_measurement_t bms;
     bool dsp_online, status_valid, bms_online;
+    bool bms_received; /* Independent UART1 sample exists, even if now stale. */
+    bool bms_no_reply;
+    uint8_t bms_protocol;
+    uint8_t bms_detection;
+    direct_inverter_battery_t inverter_battery;
+    uint32_t bms_age_ms;
     uint32_t measurement_age_ms; /* LCD last actual 04 reception age, UINT32_MAX if none. */
     bool dsp_display_held; /* Last real LCD measurement retained while DSP is stale. */
     bool dsp_status_held; /* Last 03 status for display only; status_valid stays fresh. */
     bool network_online; /* WiFi has IP and MQTT is connected to the server. */
     bool wifi_connected, wifi_rssi_valid; /* AP link, independent of MQTT. */
+    bool bluetooth_connected; /* A real phone connection, not advertising/readiness. */
     int16_t wifi_rssi_dbm;
     uint8_t home_flow_phase; /* 0..15, awake home with real current/held power. */
     bool ota_busy;
@@ -90,6 +103,7 @@ typedef struct {
     char rows[DIRECT_UI_ROWS][48];
     char footer[48];
     int selected;
+    uint8_t key_labels[6]; /* Optional override for local screens with their own editor. */
 } direct_ui_view_t;
 void direct_ui_init(direct_ui_state_t *ui);
 direct_ui_event_t direct_ui_key(direct_ui_state_t *ui, uint8_t key,

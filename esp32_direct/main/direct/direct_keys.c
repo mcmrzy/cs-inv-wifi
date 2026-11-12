@@ -65,7 +65,11 @@ static void keys_task(void *arg)
             }
             uint8_t key = direct_key_update(&state,sample,now_ms);
             key_event_t event = {.key = key, .timestamp_ms = now_ms};
+#ifdef PANEL_FULL_DIRECT
+            if(key){
+#else
             if(key && key!=DIRECT_KEY_ENTER_BACK){
+#endif
                 /* Repeats must not fill all slots while rendering is busy.
                  * Reserve four slots for physical presses, with a bounded send
                  * wait for those edges. Dropped edges are explicitly logged. */

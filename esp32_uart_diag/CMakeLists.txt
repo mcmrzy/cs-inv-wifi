@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+set(IDF_TARGET "esp32c3")
+set(PROJECT_VER "0.1.1-uart-diag")
+set(COMPONENTS main)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(cs_inv_uart_diag)

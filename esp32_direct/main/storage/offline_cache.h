@@ -7,7 +7,7 @@
 
 typedef struct {
     char topic[64];
-    char payload[512];
+    char payload[1024];
     uint32_t timestamp;
     uint32_t index;
 } OfflineCacheItem;

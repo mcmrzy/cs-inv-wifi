@@ -1,0 +1,5 @@
+# Additional interrupt headroom for the diagnostic UART/USB workload.
+CONFIG_FREERTOS_ISR_STACKSIZE=4096
+# Retain both hardware stack bounds and the FreeRTOS stack canary.
+CONFIG_ESP_SYSTEM_HW_STACK_GUARD=y
+CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y

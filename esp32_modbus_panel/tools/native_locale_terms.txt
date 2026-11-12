@@ -1,0 +1,438 @@
+通信配置已变更，请重新打开参数|Link changed; reopen setting
+未取得操作回执，请核对当前配置|Receipt lost; verify current setup
+方向键调整  确认复核  返回取消|Arrows change  ENTER review  BACK
+其他操作正在进行，请稍后再试|Another operation; retry later
+其他操作进行中，可浏览或返回|Busy; browsing and BACK available
+电池电流: 正为放电，负为充电|Battery A: + discharge / - charge
+上下选择  确认修改  返回分类|UP/DN select  ENTER edit  BACK
+左右调整  确认复核  返回取消|L/R change  ENTER review  BACK
+上下选择  左右翻页  确认进入|Up/down select  L/R page  ENTER
+逆变器将退出远程开关机模式|Exits remote power control mode
+机型已保存，请重新选择参数|Model saved; reopen setting
+先在维护诊断确认逆变器机型|Confirm model in Service first
+此页仅读取，不发送升级命令|Read only; no update is sent
+历史数据，不能作为当前告警|Historical data; alarms may differ
+确认保存本机配置  返回编辑|ENTER save  BACK edit
+确认菜单  右键参数  *为旧值|ENTER menu  RIGHT data  * stale
+确认机型设置  返回参数列表|ENTER model setup  BACK list
+确认或返回关闭  方向键继续|ENTER/BACK close  arrows browse
+协议已确认，实际值未核对|Accepted; actual value unverified
+结果未知，请检查实际状态|Unknown result; check inverter
+通信中断，本次修改已取消|Link lost. Edit discarded.
+搜索中，运行数据暂停更新|Searching. Live data paused.
+当前值已失效，请重新编辑|Value is stale. Edit again.
+并机设置仅可在待机时修改|Parallel changes need standby
+均衡充电仅适用于铅酸电池|Equalization: lead-acid only
+当前值已变化，请重新编辑|Current value changed; reopen
+候选型号不等于已确认机型|Candidate is not a confirmed model
+请核对逆变器铭牌后再选择|Check the inverter nameplate
+识别地址定义存在版本差异|Model register differs by revision
+请核对逆变器本机实际设置|Verify the inverter's own setting
+未自动重发，请核对后再试|No auto retry; verify before retry
+逆变器机型与选定配置不符|Inverter model mismatch
+此机型仅可读取|Read-only on this model
+缺少最新运行模式数据|Fresh operating mode unavailable
+当前模式使用固定值|Fixed in current mode
+上下翻页  确认目录  返回|Up/down page  ENTER index  BACK
+配置保存失败，查看诊断|Save failed; see diagnostics
+连接已恢复，可继续操作|Connection restored
+按当前波特率和校验搜索|Uses current baud and parity
+此电池类型使用固定参数|Fixed for this battery type
+此机型电池定义尚未确认|Battery definition unconfirmed
+状态已改变，设置未发送|State changed; nothing sent
+请先用方向键选择拟设值|Use arrow keys to select a value
+已到此机型可设置的边界|Allowed limit reached
+条件恢复后可以重新尝试|Retry when conditions recover
+左减右加，上加下减快调|L -  R +   UP +10  DN -10
+请核对铭牌，再确认机型|Check nameplate; confirm model
+主控升级包格式尚未明确|Inverter image format unspecified
+请联系安装人员确认机型|Ask installer to confirm model
+确认重试  返回参数列表|ENTER retry  BACK list
+返回参数列表|BACK to settings
+确认发送  返回取消操作|ENTER send  BACK cancel
+左右切换诊断  返回退出|L/R diagnostics  BACK exit
+搜索结束，未找到从机|No inverter found
+请检查连接和运行状态|Check link and inverter status
+搜索期间暂停实时监测|Live data pauses during search
+当前运行状态禁止设置|Current state blocks changes
+缺少最新电池类型数据|Fresh battery type unavailable
+此机型不支持这一设置|Setting unsupported on this model
+数值未改变，无需发送|Value unchanged; nothing sent
+请按铭牌选择实际机型|Select the model on the nameplate
+修改只影响这一项参数|Only this setting will change
+按用途选择，确认进入|Select a group; press ENTER
+正在搜索，返回键停止|Searching; BACK to stop
+本页无条目，向上翻页|No entries here; scroll up
+按用途浏览逆变器参数|Browse settings by function
+命令失败，查看诊断|Request failed; see diagnostics
+本机通信配置已保存|Local communication saved
+搜索结束，找到地址|Search found address 
+开启后负载可能通电|Loads may energize
+关闭后负载可能断电|Loads may lose power
+同时启用远程开关机|Also enables remote power control
+部分告警数据已过期|Some alarm data is stale
+当前告警状态待确认|Current alarm status unknown
+请求未提交，请重试|Not submitted; retry
+未向逆变器发送设置|No setting sent to the inverter
+命令处理中，请等待|Request in progress; please wait
+部分告警数据未收到|Some alarm data is unavailable
+确认搜索  返回取消|ENTER search  BACK cancel
+上下翻页  返回退出|UP/DN pages  BACK exit
+确认进入  返回退出|ENTER open  BACK exit
+返回取消  确认保存|BACK cancel  ENTER save
+上下选择  左右调值|Up/down select  L/R change
+正在发送，请等待|Sending request
+已应答，等待处理|Acknowledged; processing
+实际值已回读确认|Actual value confirmed
+搜索中断，请重试|Search interrupted. Try again.
+逆变器无有效应答|No inverter response
+请先确认实际机型|Confirm the inverter model first
+只读搜索从机地址|Search address (read only)
+主控升级只读诊断|Inverter update diagnostics
+不支持此写入命令|Write command unsupported
+该地址不支持设置|Register is not writable
+逆变器拒绝参数值|Inverter rejected this value
+未报告故障或告警|No fault or warning reported
+尚未收到告警数据|No alarm data received
+自动检测市电频率|Auto grid frequency
+确认查看参数分类|Enter to view setting groups
+机型已由出厂锁定|Factory model locked
+已保存并读回确认|Saved and verified
+等待逆变器数据|Waiting for inverter data
+请先选择拟设值|Select a target value first
+确认逆变器机型|Confirm inverter model
+逆变器处理失败|Inverter processing failed
+停用远程开关机|Disable remote power control
+逆变器控制面板|Inverter control panel
+发电机额定功率|Generator rated power
+发电机最大功率|Generator power limit
+消除发电机告警|Clear generator warning
+电池低压告警点|Battery low warning
+双输出截止电压|Output 2 cutoff voltage
+逆变器自动熄屏|Inverter screen sleep
+继电器后软启动|Relay soft start
+逆变器蜂鸣静音|Inverter buzzer mute
+主输入变化警告|Input change warning
+来自电池，确认后应用|From battery; press OK to apply
+电池参数已变化，请重新进入|Battery limits changed; reopen
+电池型号|Battery model
+方向键切换选项|Arrows change option
+调整后确认保存|Adjust, then press ENTER
+正在停止搜索|Stopping search
+等待开始搜索|Waiting to start search
+通信未初始化|Communication unavailable
+当前运行设置|Current operating settings
+均衡充电使能|Equalization enable
+均衡充电时间|Equalization duration
+均衡延时时间|Equalization timeout
+均衡间隔天数|Equalization interval
+立即均衡充电|Equalize now
+市电充电电流|AC charge current
+最大充电电流|Total charge current
+输出视在功率|Output apparent power
+电池开路警告|Battery open warning
+双输出截止SOC|Output 2 cutoff SOC
+自动返回首页|Auto return home
+光伏今日电量|PV energy today
+光伏累计电量|PV energy total
+正在读取|Reading
+设备未返回当前值|Not returned
+设备不支持读取|Read unsupported
+设备返回值|Device value
+读取状态|Read status
+读取超时|Read timeout
+设备读取失败|Read failed
+读回值与目标不一致|Read value differs from target
+当前实际值已显示，请核对后重试|Check displayed value before retry
+未返回|No value
+已断联|Offline
+不支持|Unsupported
+上次数据|Last data
+历史仅供参考|History only
+上下翻页  返回  历史仅供参考|UP/DN pages  BACK  History only
+历史 |History 
+显示上次读取值，正在刷新|Last values; refreshing
+通信已断开，显示上次数据|Disconnected; last values
+设备已受理|Inverter accepted
+设置已生效|Settings applied
+设置未生效|Settings not applied
+设置应答超时|Setting response timed out
+选择分类，确认进入|Choose a category
+逆变器当前值与目标不同|Device returned a different value
+未收到有效完成应答，请稍后重试|No completion reply. Try again.
+返回后可以重新设置|Close to edit again
+正在保存并检查结果|Saving and checking settings
+电池状态|Battery status
+逆变器已返回完成应答|Inverter reported completion
+自动 / 待确认|Auto / unconfirmed
+市电软启失败|Grid soft-start failed
+电池软启故障|Battery soft-start fault
+逆变软启故障|Inverter soft-start fault
+并机序号异常|Parallel ID fault
+并机通信异常|Parallel link fault
+并机电池压差|Parallel battery mismatch
+并机市电压差|Parallel grid mismatch
+并机设置缺相|Parallel phase missing
+并机同步丢失|Parallel sync lost
+逆变负载异常|Inverter load fault
+并机压差频差|Parallel V/f mismatch
+电池低于启动|Battery below startup limit
+电表通信失败|Meter link failed
+古瑞瓦特 GRO|Growatt GRO
+命令排队中|Request queued
+命令未发送|Command was not sent
+已停止搜索|Search stopped
+暂不能修改|Cannot change now
+开启逆变器|Power on inverter
+关闭逆变器|Power off inverter
+市电与负载|Grid and load
+电池与充电|Battery and charging
+充电与电池|Charging and battery
+电量与输出|Energy and output
+输出与模式|Output and mode
+发电机使能|Generator enable
+发电机功能|Generator enable
+发电机电压|Generator voltage
+发电机电流|Generator current
+发电机频率|Generator frequency
+发电机功率|Generator power
+输出优先级|Output priority
+充电优先级|Charge priority
+电池关机点|Battery cutoff
+电池转市电|Battery to grid
+市电转电池|Grid to battery
+双输出时间|Output 2 duration
+过载转旁路|Overload bypass
+低功耗省电|Power saving
+光伏总功率|PV total power
+开关机操作|Power control
+通信已断开|Link offline
+机型待确认|Model unconfirmed
+可烧录类型|Image target
+请手动选择| select manually
+充电与供电|Charging and supply
+机型不匹配|Model mismatch
+无引导程序|Bootloader missing
+程序烧录中|Firmware writing
+并机频率差|Parallel frequency mismatch
+充电器短路|Charger short circuit
+发电机波形|Generator waveform
+发电机过载|Generator overload
+发电机欠压|Generator undervoltage
+发电机过压|Generator overvoltage
+市电不稳定|Grid unstable
+逆变器设置|Inverter settings
+向电网送电|Grid export
+从电网取电|Grid import
+故障与告警|Faults and warnings
+CT连接异常|CT connection fault
+充电2温度|Charger 2 temperature
+未知/自动|Unknown / auto
+功能开关2|Feature flags 2
+日月元 VOL|Voltronic VOL
+操作结果|Operation result
+光伏输入|PV inputs
+逆变器BMS|Inverter BMS
+温度监测|Temperatures
+全部参数|All settings
+均衡充电|Equalization
+均衡电压|Equalization voltage
+发电通路|Generator path
+运行模式|Operating mode
+输出电压|Output voltage
+市电低压点|Grid low limit
+市电高压点|Grid high limit
+充电功能|Charging
+最大放电电流|Max discharge current
+并机无电池运行|Parallel without battery
+电池未接检测|Battery presence check
+温度降额策略|Thermal derating
+充电优先|Charge first
+标准|Standard
+输出频率|Output frequency
+输出电流|Output current
+输出功率|Output power
+电池类型|Battery type
+电池电压|Battery voltage
+电池电流|Battery current
+电池电量|Battery SOC
+电池功率|Battery power
+恒压目标|Bulk target
+浮充目标|Float target
+并机模式|Parallel mode
+并机序号|Parallel ID
+并机设置|Parallel settings
+双路输出|Secondary output
+低SOC关机|Low SOC shutdown
+转电池SOC|Return to battery SOC
+转市电SOC|Return to grid SOC
+过温重启|Overtemp restart
+过载重启|Overload restart
+系统功能|System functions
+市电电压|Grid voltage
+市电电流|Grid current
+市电频率|Grid frequency
+市电功率|Grid power
+负载电压|Load voltage
+负载功率|Load power
+负载比例|Load ratio
+母线电压|Bus voltage
+逆变温度|Inverter temperature
+充电温度|Charger temperature
+环境温度|Ambient temperature
+放电温度|Discharge temperature
+参数分类|Setting groups
+参数设置|Settings
+运行参数|Operating data
+故障告警|Faults and warnings
+通信配置|Communication setup
+通信诊断|Link diagnostics
+从机地址|Slave address
+候选机型|Model candidate
+未知类型|Unknown type
+升级状态|Update state
+升级能力|Update capability
+运行状态|Run state
+功能状态|Function state
+能流状态|Energy flow state
+功能开关|Feature flags
+搜索结束|Search ended
+找到地址|Found address 
+搜索地址|Searching address 
+连接异常|Connected; abnormal
+连接正常|Connected; normal
+负载供电|Supplying load
+注水铅酸|Flooded lead-acid
+磷酸铁锂|LiFePO4
+不限时间|Unlimited
+母线过压|Bus overvoltage
+母线欠压|Bus undervoltage
+电池过流|Battery overcurrent
+电池过压|Battery overvoltage
+母线短路|Bus short circuit
+逆变过压|Inverter overvoltage
+逆变欠压|Inverter undervoltage
+逆变短路|Inverter short circuit
+负功保护|Reverse power protection
+过载故障|Overload fault
+光伏反接|PV reverse polarity
+电池未接|Battery disconnected
+电池欠压|Battery undervoltage
+电池低压|Battery low voltage
+电池过充|Battery overcharge
+过温预留|Reserved temperature bit
+风扇堵转|Fan blocked
+存储故障|Storage fault
+并机版本|Parallel version mismatch
+低SOC告警|Low SOC warning
+电池短路|Battery short circuit
+出厂机型|Factory model
+运行数据|Live data
+充电功率|Charge power
+放电功率|Discharge power
+常用设置|Quick settings
+PV能量弱|PV energy low
+派能 PYL|Pylontech PYL
+铁塔 IRF|IRF
+沛城 PAC|PACE PAC
+发电机|Generator
+恒压点|Bulk voltage
+浮充点|Float voltage
+逆变器电池协议|Inverter battery protocol
+BMS地址|BMS address
+BMS通信|BMS link
+BMS电压|BMS voltage
+BMS电流|BMS current
+BMS电量|BMS SOC
+BMS温度|BMS temperature
+BMS故障|BMS fault
+BMS告警|BMS warning
+PV1电压|PV1 voltage
+PV1电流|PV1 current
+PV1功率|PV1 power
+PV2电压|PV2 voltage
+PV2电流|PV2 current
+PV2功率|PV2 power
+PV1温度|PV1 temperature
+PV2温度|PV2 temperature
+开关机|Power control
+主菜单|Main menu
+波特率|Baud rate
+6KU并机|6KU parallel
+未连接|Not connected
+未定义|Undefined
+未启用|Inactive
+三元锂|NMC
+锂电池|Lithium
+自定义|User-defined
+初始化|Initializing
+应答码|Response code
+待确认|unconfirmed
+MCU故障|MCU fault
+保留位|Reserved bit
+BMS丢失|BMS link lost
+当前值|Current value
+拟设值|Proposed value
+PV过压|PV overvoltage
+串口|Serial
+铅酸|Lead-acid
+胶体|Gel
+自动|Auto
+循环|Cycle
+开启|On
+关闭|Off
+上电|Power-up
+待机|Standby
+市电|Grid
+光伏|PV
+电池|Battery
+负载|Load
+充电|Charging
+电量|SOC
+故障|Fault
+告警|Warning
+关机|Shutdown
+测试|Test
+升级|Update
+在线|Online
+离线|Offline
+未知|Unknown
+当前|Current
+当前待确认|Current unknown
+上次|Previous
+拟设|Target
+目标|Target
+操作|Action
+输入|Input
+运行|Run
+机型|Model
+软件|Software
+版本|Version
+写入|Write 
+异常| exception 
+轮询|Reads 
+错误| errors 
+搜索|Search 
+找到| found 
+原始|Raw 
+确认|Confirm
+过温|Overtemperature
+过载|Overload
+地址|Addr 
+节| cells 
+，|; 
+项| items
+母线软启故障|Bus soft-start fault
+硬件过流 DC/DC|DC/DC overcurrent
+母线IP软启故障|Bus IP start fault
+认证错误|Authentication fault
+屏幕Flash故障|Panel flash fault
+光伏硬件过流|PV hardware overcurrent
+并机输出参数不同|Parallel output mismatch
+热敏电阻开路|NTC open
+逆变硬件过流|Inverter overcurrent
+发电机掉电|Generator power lost
+并机配置不兼容|Parallel config mismatch
+电池辅助电源故障|Battery auxiliary supply fault
+仅可在待机或市电模式修改|Edit in standby or grid mode
+仅可在待机、市电或电池模式修改|Edit in standby, grid or battery mode

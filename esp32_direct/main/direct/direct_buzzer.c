@@ -8,6 +8,7 @@
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static esp_timer_handle_t s_timer;
 static bool s_enabled = true;
+static uint16_t s_duration_ms = 70;
 static int64_t s_off_at;
 
 static void output(bool on)
@@ -48,7 +49,7 @@ esp_err_t direct_buzzer_init(void)
     if (err != ESP_OK) return err;
     /* Independent deadline check: overlapping key/alarm pulses extend the beep
        safely. No callback can switch off a newer pulse using an old deadline.
-       Nominal duration 70ms, timer resolution adds at most 5ms when scheduled. */
+       Timer resolution adds at most 5ms when scheduled. */
     err = esp_timer_start_periodic(timer, 5000);
     if (err != ESP_OK) { esp_timer_delete(timer); return err; }
     s_timer = timer;
@@ -63,10 +64,18 @@ void direct_buzzer_set_enabled(bool enabled)
     portEXIT_CRITICAL(&s_mux);
 }
 
+void direct_buzzer_set_duration_ms(uint16_t duration_ms)
+{
+    if (!duration_ms) return;
+    portENTER_CRITICAL(&s_mux);
+    s_duration_ms = duration_ms;
+    portEXIT_CRITICAL(&s_mux);
+}
+
 void direct_buzzer_pulse(void)
 {
-    const int64_t off_at = esp_timer_get_time() + 70000;
+    const int64_t now = esp_timer_get_time();
     portENTER_CRITICAL(&s_mux);
-    if (s_enabled && s_timer) { s_off_at = off_at; output(true); }
+    if (s_enabled && s_timer) { s_off_at = now + s_duration_ms * 1000; output(true); }
     portEXIT_CRITICAL(&s_mux);
 }

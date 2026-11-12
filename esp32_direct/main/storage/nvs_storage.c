@@ -34,16 +34,33 @@ bool storage_init(void) {
     return true;
 }
 
+#ifdef PANEL_FULL_DIRECT
+#define KEY_WIFI_PROFILES "wifi_profiles1"
+enum { WIFI_PROFILES=3 };
+typedef struct {char ssid[33],pass[65];} saved_wifi_t;
+static bool read_wifi_profiles(saved_wifi_t profiles[WIFI_PROFILES])
+{
+    size_t size=sizeof(saved_wifi_t)*WIFI_PROFILES;
+    if(nvs_get_blob(s_nvs_handle,KEY_WIFI_PROFILES,profiles,&size)!=ESP_OK || size!=sizeof(saved_wifi_t)*WIFI_PROFILES)return false;
+    for(unsigned i=0;i<WIFI_PROFILES;i++)
+        if(!memchr(profiles[i].ssid,0,sizeof(profiles[i].ssid)) || !memchr(profiles[i].pass,0,sizeof(profiles[i].pass)))return false;
+    return profiles[0].ssid[0]!=0;
+}
+#endif
+
 bool storage_has_wifi_config(void) {
     size_t len = 0;
+#ifdef PANEL_FULL_DIRECT
+    saved_wifi_t profiles[WIFI_PROFILES];
+    if(read_wifi_profiles(profiles))return true;
+#endif
     esp_err_t ret = nvs_get_str(s_nvs_handle, KEY_WIFI_SSID, NULL, &len);
     return (ret == ESP_OK && len > 1);
 }
 
-bool storage_get_wifi(char *ssid, size_t ssid_len, char *pass, size_t pass_len) {
-    if (!storage_has_wifi_config()) return false;
+static bool read_legacy_wifi(char *ssid,size_t ssid_len,char *pass,size_t pass_len) {
     size_t s_len = ssid_len;
-    if (nvs_get_str(s_nvs_handle, KEY_WIFI_SSID, ssid, &s_len) != ESP_OK) return false;
+    if (!ssid || !ssid_len || !pass || !pass_len || nvs_get_str(s_nvs_handle, KEY_WIFI_SSID, ssid, &s_len) != ESP_OK || s_len<=1) return false;
     size_t p_len = pass_len;
     if (nvs_get_str(s_nvs_handle, KEY_WIFI_PASS, pass, &p_len) != ESP_OK) {
         pass[0] = '\0';
@@ -51,12 +68,51 @@ bool storage_get_wifi(char *ssid, size_t ssid_len, char *pass, size_t pass_len) 
     return true;
 }
 
+#ifdef PANEL_FULL_DIRECT
+bool storage_get_wifi_at(unsigned index,char *ssid,size_t ssid_len,char *pass,size_t pass_len)
+{
+    if(index>=WIFI_PROFILES || !ssid || !pass)return false;
+    saved_wifi_t profiles[WIFI_PROFILES];
+    if(!read_wifi_profiles(profiles))return index==0 && read_legacy_wifi(ssid,ssid_len,pass,pass_len);
+    const saved_wifi_t *entry=&profiles[index];
+    size_t s=strlen(entry->ssid),p=strlen(entry->pass);
+    if(!s || s>=ssid_len || p>=pass_len)return false;
+    memcpy(ssid,entry->ssid,s+1);memcpy(pass,entry->pass,p+1);
+    return true;
+}
+#endif
+
+bool storage_get_wifi(char *ssid,size_t ssid_len,char *pass,size_t pass_len)
+{
+#ifdef PANEL_FULL_DIRECT
+    return storage_get_wifi_at(0,ssid,ssid_len,pass,pass_len);
+#else
+    return read_legacy_wifi(ssid,ssid_len,pass,pass_len);
+#endif
+}
+
 bool storage_set_wifi(const char *ssid, const char *pass) {
     if (!ssid || !ssid[0] || strlen(ssid) > 32) return false;
     if (!pass) pass = "";
     if (strlen(pass) > 64) return false;
+#ifdef PANEL_FULL_DIRECT
+    saved_wifi_t profiles[WIFI_PROFILES];
+    bool loaded=read_wifi_profiles(profiles);
+    if(!loaded){
+        memset(profiles,0,sizeof(profiles));
+        read_legacy_wifi(profiles[0].ssid,sizeof(profiles[0].ssid),profiles[0].pass,sizeof(profiles[0].pass));
+    }
+    unsigned position=0;
+    while(position<WIFI_PROFILES-1 && strcmp(profiles[position].ssid,ssid))position++;
+    if(loaded && position==0 && !strcmp(profiles[0].pass,pass))return true;
+    memmove(profiles+1,profiles,position*sizeof(*profiles));
+    memset(profiles,0,sizeof(*profiles));
+    strcpy(profiles[0].ssid,ssid);strcpy(profiles[0].pass,pass);
+    if(nvs_set_blob(s_nvs_handle,KEY_WIFI_PROFILES,profiles,sizeof(profiles))!=ESP_OK)return false;
+#else
     if (nvs_set_str(s_nvs_handle, KEY_WIFI_SSID, ssid) != ESP_OK) return false;
     if (nvs_set_str(s_nvs_handle, KEY_WIFI_PASS, pass) != ESP_OK) return false;
+#endif
     return nvs_commit(s_nvs_handle) == ESP_OK;
 }
 
@@ -65,6 +121,10 @@ bool storage_clear_wifi(void) {
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return false;
     err = nvs_erase_key(s_nvs_handle, KEY_WIFI_PASS);
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) return false;
+#ifdef PANEL_FULL_DIRECT
+    err=nvs_erase_key(s_nvs_handle,KEY_WIFI_PROFILES);
+    if(err!=ESP_OK && err!=ESP_ERR_NVS_NOT_FOUND)return false;
+#endif
     return nvs_commit(s_nvs_handle) == ESP_OK;
 }
 

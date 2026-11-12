@@ -50,10 +50,10 @@ def flash_transport(port,baud,expected_mac,override):
  if expected_mac is not None or override is _DEFAULT_COMMAND:return flash_session(port,baud,expected_mac)
  return contextlib.nullcontext(override)
 
-def validate_manifest(manifest):
+def validate_manifest(manifest,model='CS-L10-6K2'):
  if 'profile' in manifest and manifest['profile'] not in ('device','factory','production'):
   raise RuntimeError('unsupported firmware profile')
- if 'model' in manifest and manifest['model']!='CS-L10-6K2':raise RuntimeError('firmware model does not match this tool')
+ if manifest.get('model', 'CS-L10-6K2')!=model:raise RuntimeError('firmware model does not match the selected product')
  if 'chip' in manifest and str(manifest['chip']).lower().replace('-','')!='esp32c3':raise RuntimeError('firmware chip mismatch')
  if 'factory_partition' in manifest and manifest['factory_partition']!={'offset':0x3f8000,'size':0x8000}:
   raise RuntimeError('unexpected factory partition')
@@ -65,7 +65,8 @@ def validate_release_images(images):
  if len(images['bootloader.bin'])>0x8000 or len(images['partition-table.bin'])>0x1000 or len(images['ota_data_initial.bin'])!=0x2000 or len(images['app.bin'])>0x1a0000:
   raise RuntimeError('firmware segment does not fit the expected layout')
  entries=partitions(images['partition-table.bin'])
- required={(1,2,0x9000,0x6000),(1,0,0x10000,0x2000),(0,16,0x20000,0x1a0000),(1,2,0x3f8000,0x8000)}
+ required={(1,2,0x9000,0x6000),(1,0,0x10000,0x2000),(0,16,0x20000,0x1a0000),
+           (0,17,0x1c0000,0x1a0000),(1,2,0x3f8000,0x8000)}
  actual={(e['type'],e['subtype'],e['offset'],e['size']) for e in entries}
  if not required<=actual:raise RuntimeError('firmware partition layout is not supported')
 
@@ -79,9 +80,13 @@ def validate_release_metadata(manifest,images):
  if 'model' in manifest and descriptor[8:].split(b'\0',1)[0]!=manifest['model'].encode('ascii'):
   raise RuntimeError('firmware model differs from manifest')
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port',required=True);p.add_argument('--release',type=Path,required=True);p.add_argument('--backup-dir',type=Path,default=Path('factory_backups'));p.add_argument('--first-install',action='store_true');p.add_argument('--expected-mac');p.add_argument('--baud',type=int,choices=BAUD_RATES,default=DEFAULT_BAUD);args=p.parse_args()
+ p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port');p.add_argument('--release',type=Path,required=True);p.add_argument('--backup-dir',type=Path,default=Path('factory_backups'));p.add_argument('--first-install',action='store_true');p.add_argument('--expected-mac');p.add_argument('--baud',type=int,choices=BAUD_RATES,default=DEFAULT_BAUD)
+ p.add_argument('--model',choices=('CS-L10-6K2','CS-MB-PANEL'),default='CS-L10-6K2')
+ p.add_argument('--check',action='store_true',help='validate the release without opening USB')
+ args=p.parse_args()
+ if not args.check and not args.port:p.error('--port is required when flashing')
  manifest=json.loads((args.release/'flash_manifest.json').read_text(encoding='utf-8'))
- validate_manifest(manifest)
+ validate_manifest(manifest,args.model)
  images={}
  for _,name in SEGMENTS+((0x10000,'ota_data_initial.bin'),):
   path=args.release/name
@@ -89,6 +94,9 @@ def main():
   if hashlib.sha256(images[name]).hexdigest()!=manifest['sha256'][name]:raise RuntimeError(f'hash mismatch {name}')
  validate_release_images(images)
  validate_release_metadata(manifest,images)
+ if args.check:
+  print(f'Validated {args.model} release, hashes and flash layout.')
+  return
  # Unique directory each run; backup never overwritten by an FF result from a retry.
  stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
  backup=args.backup_dir/(args.port+'_'+stamp);backup.mkdir(parents=True,exist_ok=False)
@@ -106,6 +114,12 @@ def flash_validated(args,images,backup,staged,command):
  # Existing layout must already describe our factory NVS; otherwise tail bytes
  # belong to old SPIFFS, not identity. Explicit first-install permits migration.
  same=old_table[:len(new_table)]==new_table
+ if args.model=='CS-MB-PANEL':
+  for offset in (0x20000,0x1c0000):
+   descriptor=full[offset+288:offset+352]
+   if full[offset]==0xe9 and (descriptor[:6]!=b'CSIV\1\0' or
+       descriptor[8:].split(b'\0',1)[0]!=b'CS-MB-PANEL'):
+    raise RuntimeError('existing ESP image belongs to another or unknown product; backup saved')
  if not same and not args.first_install:raise RuntimeError('partition layout differs: full backup saved; use reviewed first-install migration')
  old_factory=full[0x3f8000:0x400000]
  (backup/'factory_before.bin').write_bytes(old_factory)

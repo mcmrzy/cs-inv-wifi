@@ -24,6 +24,9 @@
 #include "arm_poll.h"
 #include "telemetry.h"
 #include "direct_protocol.h"
+#ifdef PANEL_FULL_DIRECT
+#include "full_modbus_map.h"
+#endif
 extern bool direct_dsp_get_measurement(RunParamDef *measurement, uint32_t *received_ms);
 extern bool direct_bms_get_summary(direct_bms_summary_t *summary);
 extern bool direct_config_snapshot_wire(uint16_t values[CTRL_PARAM_COUNT],
@@ -33,6 +36,7 @@ extern bool direct_config_snapshot_wire(uint16_t values[CTRL_PARAM_COUNT],
  * heartbeat JSON 构造 / 告警判断纯逻辑。固件构建不定义 HOST_TEST, 以下代码
  * 不参与编译, 目标码行为不变; mqtt/arm_poll/BLE 外部符号由宿主测试程序提供桩。 */
 #define ESP_LOGI(...)  do { } while (0)
+#define ESP_LOGD(...)  do { } while (0)
 #define ESP_LOGW(...)  do { } while (0)
 #define ESP_LOGE(...)  do { } while (0)
 #define SN_MAX_LEN          32
@@ -145,6 +149,12 @@ static atomic_uint s_info_revision_sent;
 static atomic_uint s_info_revision_attempted;
 static atomic_uint s_info_last_attempt;
 static atomic_bool s_info_pending = true;
+#ifdef PANEL_FULL_DIRECT
+static _Atomic(const char *) s_info_model_sent;
+static atomic_bool s_info_model_repeat;
+static atomic_bool s_info_model_enabled;
+static uint32_t s_last_model_probe;
+#endif
 static uint32_t s_last_config_ms;    /* 上次 config 发布时刻 (arm 时间戳) */
 static volatile bool s_hb_requested; /* query_telemetry 请求补报 */
 static volatile bool s_config_requested; /* query_config/写入生效 请求补报 */
@@ -229,7 +239,7 @@ static uint32_t hb_clamp0(int32_t v)
  * (device-communication/internal/telemetry/heartbeat_v3.go)。
  * 动机: 量纲知识集中到服务端一处 —— DSP/ARM 量纲调整只改服务端, 固件不再
  * 承担换算风险 (09-21/09-22 两次 ESP 侧换算结论错误均源于此)。
- * 信封版本 3 且不走离线缓存 (原因见 mqtt_publish_heartbeat_raw 注释)。 */
+ * 信封版本 3，离线时保留原始运行快照与版本，重连后续传。 */
 static void publish_heartbeat(const RunParamDef *p, const direct_bms_summary_t *bms)
 {
     const uint16_t *w = (const uint16_t *)p;
@@ -262,15 +272,16 @@ static void publish_heartbeat(const RunParamDef *p, const direct_bms_summary_t *
     }
     buf[pos] = '\0';
     int result = mqtt_publish_heartbeat_raw(TOPIC_HEARTBEAT, buf, (int)pos);
-    if (result != 0) {
+    if (result < 0) {
         ESP_LOGW(TAG, "heartbeat queue failed (%d)", result);
     } else {
-        ESP_LOGI(TAG, "heartbeat queued (%d bytes, raw run struct, bms=%s age_ms=%" PRIu32 ")",
+        ESP_LOGD(TAG, "heartbeat queued (%d bytes, raw run struct, bms=%s age_ms=%" PRIu32 ")",
                  (int)pos, bms->acquired ? "present" : "absent", bms_age_ms);
     }
 }
 
 /* ---- BLE 通道遥测（核心子集, 对齐协议 §6.1 + App InverterRealtime.fromJson） ---- */
+#ifndef PANEL_FULL_DIRECT
 /* 字段名以 App 解析器为准（ac/battery/pv/sys_status/energy/load_power）,
  * 单位换算为工程单位（V / A / W / Hz / %）。 */
 static void publish_ble_telemetry(const RunParamDef *p)
@@ -352,6 +363,7 @@ static void publish_ble_telemetry(const RunParamDef *p)
     }
 }
 
+#endif
 /* ---- info (V2.0 §7, QoS1) ---- */
 static void publish_info(const OnlyReadDataDef *o)
 {
@@ -369,11 +381,31 @@ static void publish_info(const OnlyReadDataDef *o)
     snprintf(mac,sizeof(mac),"%02X:%02X:%02X:%02X:%02X:%02X",
              raw_mac[0],raw_mac[1],raw_mac[2],raw_mac[3],raw_mac[4],raw_mac[5]);
     char saved_sn[17]={0};
-    bool override_pending=factory_identity_admin_sn(saved_sn,sizeof(saved_sn)) && strcmp(saved_sn,g_device_sn);
+    bool have_admin_sn=factory_identity_admin_sn(saved_sn,sizeof(saved_sn));
+    bool override_pending=have_admin_sn && strcmp(saved_sn,g_device_sn);
     cJSON *obj=factory_info_json(g_device_sn,FIRMWARE_VERSION,mac,status,
                                status==FACTORY_OK ? &identity : NULL,
                                factory_identity_runtime_generation(),override_pending);
     if(!obj)return;
+#ifdef PANEL_FULL_DIRECT
+    bool actual_sn=(have_admin_sn && !override_pending) ||
+                   (status==FACTORY_OK && !strcmp(identity.sn,g_device_sn));
+    atomic_store(&s_info_model_enabled,actual_sn);
+    const char *registry_model=actual_sn?full_modbus_registry_model():NULL;
+    /* The factory record describes this controller. The registry model is
+     * the verified inverter on the current Modbus address. */
+    cJSON_DeleteItemFromObjectCaseSensitive(obj,"model");
+    cJSON_DeleteItemFromObjectCaseSensitive(obj,"manufacturer");
+    cJSON_DeleteItemFromObjectCaseSensitive(obj,"firmware_dsp");
+    cJSON_DeleteItemFromObjectCaseSensitive(obj,"rated_power");
+    cJSON_DeleteItemFromObjectCaseSensitive(obj,"device_type");
+    cJSON_DeleteItemFromObjectCaseSensitive(obj,"dsp_protocol");
+    if((registry_model && !cJSON_AddStringToObject(obj,"model",registry_model)) ||
+       !cJSON_AddStringToObject(obj,"device_type","inverter") ||
+       !cJSON_AddStringToObject(obj,"dsp_protocol","modbus_rtu_v1.27")){
+        cJSON_Delete(obj);return;
+    }
+#endif
     char *json=cJSON_PrintUnformatted(obj);cJSON_Delete(obj);
     if(!json)return;
     /* INFO exceeds the 512-byte offline item limit. Retry online; never cache
@@ -382,6 +414,12 @@ static void publish_info(const OnlyReadDataDef *o)
     cJSON_free(json);
     if(result<0)ESP_LOGW(TAG,"controller identity info queue failed (%d)",result);
     else {
+#ifdef PANEL_FULL_DIRECT
+        if(registry_model){
+            const char *previous=atomic_exchange(&s_info_model_sent,registry_model);
+            atomic_store(&s_info_model_repeat,previous!=registry_model);
+        }
+#endif
         atomic_store(&s_info_revision_sent,revision);
         atomic_store(&s_info_pending,factory_identity_revision()!=revision);
     }
@@ -390,6 +428,18 @@ static void publish_info(const OnlyReadDataDef *o)
 static void publish_identity_changes(void)
 {
     if(!mqtt_is_connected())return;
+#ifdef PANEL_FULL_DIRECT
+    uint32_t now=now_ms();
+    if(atomic_load(&s_info_model_enabled) && now-s_last_model_probe>=500U &&
+       now-atomic_load(&s_info_last_attempt)>=1500U){
+        s_last_model_probe=now;
+        const char *model=full_modbus_registry_model();
+        if(model && (model!=atomic_load(&s_info_model_sent) || atomic_load(&s_info_model_repeat))){
+            publish_info(NULL);
+            return;
+        }
+    }
+#endif
     if(factory_identity_revision()!=atomic_load(&s_info_revision_attempted) ||
        ((atomic_load(&s_info_pending) || factory_identity_revision()!=atomic_load(&s_info_revision_sent)) &&
         now_ms()-atomic_load(&s_info_last_attempt)>=5000U))
@@ -498,12 +548,15 @@ static void publish_config(const uint16_t *ctrl, const bool *valid, uint32_t rev
     buf[n++] = '}';
     buf[n] = '\0';
     mqtt_publish(TOPIC_CONFIG, buf, 0, 1, 0);
-    ESP_LOGI(TAG, "config published (rev=%lu, %d bytes)", (unsigned long)rev, n);
+    ESP_LOGD(TAG, "config published (rev=%lu, %d bytes)", (unsigned long)rev, n);
 }
 
 /* ---- ARM 通信故障告警 (source=2 ESP, code=1 comm_timeout) ---- */
 static void publish_arm_fault_alarm(void)
 {
+#if defined(PANEL_FULL_DIRECT) && PANEL_FULL_DIRECT
+    return; /* Full Modbus build owns raw alarms and communication lifecycle. */
+#endif
     char buf[128];
     int n = snprintf(buf, sizeof(buf),
         "{\"source\":2,\"code\":1,\"level\":2,\"state\":1}");
@@ -515,6 +568,9 @@ static void publish_arm_fault_alarm(void)
 
 static void publish_arm_recovery_alarm(void)
 {
+#if defined(PANEL_FULL_DIRECT) && PANEL_FULL_DIRECT
+    return;
+#endif
     char buf[128];
     int n = snprintf(buf, sizeof(buf),
         "{\"source\":2,\"code\":1,\"level\":2,\"state\":0}");
@@ -535,6 +591,9 @@ typedef struct {
 
 static void check_alarm(const RunParamDef *p)
 {
+#if defined(PANEL_FULL_DIRECT) && PANEL_FULL_DIRECT
+    (void)p;return; /* Never emit a translated DSP bitmask as a Modbus alarm. */
+#endif
     /* 告警位量程护栏: L10 告警/故障码为低位位掩码。App(10) Warning 为 u64,
      * bit0~15 = warningCode1 (bit0 合并风扇告警), bit16+ 已由 ARM memset 恒 0;
      * 高 48 位非全 0 仍视为异常值, 跳过该项判断且不刷新基线, 防止垃圾位触发
@@ -628,6 +687,12 @@ void telemetry_init(void)
     atomic_store(&s_info_revision_attempted,0);
     atomic_store(&s_info_last_attempt,0);
     atomic_store(&s_info_pending,true);
+#ifdef PANEL_FULL_DIRECT
+    atomic_store(&s_info_model_sent,NULL);
+    atomic_store(&s_info_model_repeat,false);
+    atomic_store(&s_info_model_enabled,false);
+    s_last_model_probe=0;
+#endif
     s_last_config_ms = 0;
     s_hb_requested = false;
     s_config_requested = false;
@@ -637,7 +702,7 @@ void telemetry_init(void)
     s_last_bms = 0;
     s_arm_fail_count = 0;
     s_fault_reported = false;
-    ESP_LOGI(TAG, "init done");
+    ESP_LOGD(TAG, "init done");
 }
 
 void telemetry_on_mqtt_connected(void)
@@ -669,7 +734,7 @@ bool telemetry_debug_set(bool enabled, uint32_t interval_s, uint32_t duration_s,
         if (out_effective_interval_s) *out_effective_interval_s = (uint32_t)TELEMETRY_PERIOD_MS / 1000U;
         if (out_expires_at_unix) *out_expires_at_unix = (int64_t)time(NULL);
         telemetry_request_heartbeat();
-        ESP_LOGI(TAG, "debug telemetry disabled, revert default period");
+        ESP_LOGD(TAG, "debug telemetry disabled, revert default period");
         return true;
     }
     if (interval_s < 5U)    interval_s = 5U;
@@ -682,7 +747,7 @@ bool telemetry_debug_set(bool enabled, uint32_t interval_s, uint32_t duration_s,
     if (out_expires_at_unix) *out_expires_at_unix = (int64_t)time(NULL) + (int64_t)duration_s;
     /* 立即按新周期补报一帧, 云端据此确认切换已生效 */
     telemetry_request_heartbeat();
-    ESP_LOGI(TAG, "debug telemetry enabled: interval=%luus duration=%luus",
+    ESP_LOGD(TAG, "debug telemetry enabled: interval=%luus duration=%luus",
              (unsigned long)interval_s, (unsigned long)duration_s);
     return true;
 }
@@ -765,7 +830,7 @@ void telemetry_tick(void)
         (int32_t)(s_now_ms - s_debug_deadline_ms) >= 0) {
         s_debug_active = false;
         s_debug_deadline_ms = 0;
-        ESP_LOGI(TAG, "debug telemetry expired, revert default period");
+        ESP_LOGD(TAG, "debug telemetry expired, revert default period");
     }
     uint32_t hb_period_ms = s_debug_active ? s_debug_interval_ms
                                            : (uint32_t)TELEMETRY_PERIOD_MS;
@@ -789,7 +854,9 @@ void telemetry_tick(void)
                 direct_bms_get_summary(&bms);
                 publish_heartbeat(&rp, &bms);
             }
+#ifndef PANEL_FULL_DIRECT
             publish_ble_telemetry(&rp);   /* BLE 通道遥测推送（核心子集） */
+#endif
         } else if (!arm_reachable) {
             s_arm_fail_count++;
             ESP_LOGW(TAG, "DSP no response (%lu/%d)",

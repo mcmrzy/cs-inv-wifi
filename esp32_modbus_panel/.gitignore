@@ -1,0 +1,11 @@
+/build/
+/tmp/
+/dist/
+/sdkconfig
+/sdkconfig.old
+/sdkconfig.full
+/sdkconfig.full.old
+/build_full/
+/build_bms_diag/
+/sdkconfig.bms_diag
+/sdkconfig.bms_diag.old

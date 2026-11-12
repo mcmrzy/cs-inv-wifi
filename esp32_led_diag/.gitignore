@@ -1,0 +1,6 @@
+/build/
+/tmp/
+/dist/
+/sdkconfig
+/sdkconfig.old
+/*_output.log

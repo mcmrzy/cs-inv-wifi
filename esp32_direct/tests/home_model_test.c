@@ -13,6 +13,12 @@ int main(void){
  d.run.BatChgCurr=0;d.run.BatDischgCurr=125;direct_home_values(&d,&v);assert(!strcmp(v.battery_power,"655W"));assert(v.battery_state==DIRECT_HOME_DISCHARGING);
  d.run.BatChgCurr=125;direct_home_values(&d,&v);assert(!strcmp(v.battery_power,"--W"));assert(v.battery_state==DIRECT_HOME_UNKNOWN);
  d.run.BatChgCurr=0;d.run.BatDischgCurr=0;direct_home_values(&d,&v);assert(!strcmp(v.battery_power,"0W"));assert(v.battery_state==DIRECT_HOME_IDLE);assert(!direct_home_animation_active(&u,&d));
+ d.run.BatDisChrWatt=3;direct_home_values(&d,&v);
+ assert(!strcmp(v.battery_power,"3W") && v.battery_state==DIRECT_HOME_DISCHARGING);
+ assert(direct_home_animation_active(&u,&d));
+ d.run.BatDisChrWatt=0;d.run.BatChrWatt=1;direct_home_values(&d,&v);
+ assert(!strcmp(v.battery_power,"1W") && v.battery_state==DIRECT_HOME_CHARGING);
+ d.run.BatChrWatt=0;
  d.run.Ppv=1;assert(direct_home_animation_active(&u,&d));u.page=UI_MENU;assert(!direct_home_animation_active(&u,&d));u.page=UI_HOME;u.main_mode=1;assert(!direct_home_animation_active(&u,&d));u.main_mode=0;
  d.ota_busy=true;assert(!direct_home_animation_active(&u,&d));d.ota_busy=false;
  d.dsp_online=false;d.dsp_display_held=true;direct_home_values(&d,&v);assert(!strcmp(v.pv_voltage,"368V"));assert(v.battery_state==DIRECT_HOME_IDLE);assert(direct_home_animation_active(&u,&d));

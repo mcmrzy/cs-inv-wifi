@@ -30,8 +30,13 @@ void direct_home_values(const direct_ui_data_t *d,direct_home_values_t *v){
   /* Both operands are from this same DSP sample, in 0.1V and 0.1A. */
   uint32_t current=p->BatChgCurr?p->BatChgCurr:p->BatDischgCurr;
   v->battery_watts=((uint32_t)p->BatVolt*current+50U)/100U;
-  power(v->battery_power,(int32_t)v->battery_watts);
   v->battery_state=p->BatChgCurr?DIRECT_HOME_CHARGING:p->BatDischgCurr?DIRECT_HOME_DISCHARGING:DIRECT_HOME_IDLE;
+  /* Preserve real small-watt readings when current resolution rounds to 0A. */
+  if(!current && ((p->BatChrWatt!=0)!=(p->BatDisChrWatt!=0))){
+   v->battery_watts=p->BatChrWatt?p->BatChrWatt:p->BatDisChrWatt;
+   v->battery_state=p->BatChrWatt?DIRECT_HOME_CHARGING:DIRECT_HOME_DISCHARGING;
+  }
+  power(v->battery_power,(int32_t)v->battery_watts);
  }
 }
 int direct_home_wifi_level(const direct_ui_data_t *d){
@@ -45,6 +50,7 @@ bool direct_home_animation_active(const direct_ui_state_t *u,const direct_ui_dat
  if(u->page!=UI_HOME || u->main_mode || !(d->dsp_online || d->dsp_display_held) || d->ota_busy)return false;
  const RunParamDef *p=&d->run;
  return p->Ppv || p->ACInWatt || p->OutputWatt ||
+  (!(p->BatChgCurr && p->BatDischgCurr) && ((p->BatChrWatt!=0)!=(p->BatDisChrWatt!=0))) ||
   (p->BatVolt && ((p->BatChgCurr!=0)!=(p->BatDischgCurr!=0)));
 }
 uint8_t direct_home_animation_phase(const direct_ui_state_t *u,const direct_ui_data_t *d,uint32_t now_ms){

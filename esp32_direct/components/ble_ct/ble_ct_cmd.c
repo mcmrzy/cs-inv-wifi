@@ -45,6 +45,7 @@ typedef struct {
 } Request;
 typedef struct {
     bool active;
+    bool panel;
     uint32_t token;
     uint32_t started_ms;
     Request request;
@@ -69,6 +70,10 @@ static ble_cmd_write_fn s_write_fn;
 static ble_cmd_read_fn s_read_fn;
 static ble_cmd_battery_write_fn s_battery_write_fn;
 static ble_cmd_battery_read_fn s_battery_read_fn;
+static ble_cmd_panel_read_fn s_panel_read_fn;
+static ble_cmd_panel_write_fn s_panel_write_fn;
+static bool s_battery_supported=true;
+void ble_ct_cmd_set_battery_supported(bool supported){s_battery_supported=supported;}
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -79,6 +84,12 @@ void ble_ct_cmd_set_executors(ble_cmd_write_fn write_fn, ble_cmd_read_fn read_fn
 
 void ble_ct_cmd_set_battery_executors(ble_cmd_battery_write_fn write_fn, ble_cmd_battery_read_fn read_fn) {
     s_battery_write_fn=write_fn;s_battery_read_fn=read_fn;
+}
+
+void ble_ct_cmd_set_panel_executors(ble_cmd_panel_read_fn read_fn,
+                                    ble_cmd_panel_write_fn write_fn) {
+    s_panel_read_fn=read_fn;
+    s_panel_write_fn=write_fn;
 }
 
 static const char *battery_error(int rc) {
@@ -283,12 +294,38 @@ static void complete_write(const char *error, double value, uint32_t revision,
     s_pending.active = false;
 }
 
+void ble_ct_cmd_on_panel_write_result(uint32_t token, const char *param_id,
+    const char *error, bool observed, bool submitted, double value) {
+    if (!s_pending.active || !s_pending.panel || token!=s_pending.token ||
+        !param_id || strcmp(param_id,s_pending.param_id) || (observed && !isfinite(value))) return;
+    cJSON *actual=write_actual(param_id,observed,value,-1,submitted);
+    if(!actual)return;
+    cJSON *flag=cJSON_GetObjectItemCaseSensitive(actual,"observed");
+    if(observed)cJSON_SetBoolValue(flag,true);
+    const char *status=error?"failed":observed?"applied":"submitted";
+    cJSON *body=make_body(&s_pending.request,status,error,actual,0);
+    if(body){
+        cache_put(&s_pending.request,NULL,body);
+        send_body(&s_pending.request,body);
+        cJSON_Delete(body);
+    }
+    s_pending.active=false;
+}
+
 void ble_ct_cmd_on_write_ack(uint32_t token, const char *param_id, int err) {
     if (!s_pending.active || token != s_pending.token || !param_id ||
         strcmp(param_id, s_pending.param_id) != 0 || err == 0) return;
     bool save_failed=err==BLE_WRITE_SAVE_FAILED || err==-2;
     complete_write(save_failed ? "STORAGE_FAILED" : err==BLE_WRITE_SUBMIT_FAILED ? "SUBMIT_FAILED" : err==-1 ? "SYNC_TIMEOUT" : "RESULT_UNAVAILABLE",
         0, 0, save_failed ? 0 : 1, err == -3 ? 1 : 0);
+}
+
+void ble_ct_cmd_on_write_protocol_accepted(uint32_t token, const char *param_id) {
+    if (!s_pending.active || token != s_pending.token || !param_id ||
+        strcmp(param_id, s_pending.param_id) != 0) return;
+    /* Use the existing unconfirmed result envelope for legacy clients.
+     * The protocol receipt supplies no persisted or observed scalar value. */
+    complete_write("PROTOCOL_ACCEPTED", 0, 0, -1, 1);
 }
 
 void ble_ct_cmd_on_write_saved(uint32_t token, const char *param_id, double actual,
@@ -351,6 +388,12 @@ static void dispatch(const QueuedCommand *queued) {
     cJSON *value = cJSON_GetObjectItemCaseSensitive(params, "value");
     bool battery_write=!strcmp(action,"set_battery_config");
     bool battery_read=!strcmp(action,"get_battery_config");
+    bool panel_read=s_panel_read_fn && !strncmp(action,"panel_",6);
+    bool panel_write=s_panel_write_fn && !strcmp(action,"set_param") &&
+        cJSON_IsString(pid) && !strncmp(pid->valuestring,"panel_",6);
+    if((battery_write || battery_read) && !s_battery_supported){
+        reject(&r,"PROTOCOL_UNSUPPORTED");cJSON_Delete(root);return;
+    }
     cJSON *battery_config=params;
     if (battery_write) {
         cJSON *wrapped=cJSON_GetObjectItemCaseSensitive(params,"config");
@@ -380,7 +423,7 @@ static void dispatch(const QueuedCommand *queued) {
     if (!strcmp(action, "power_on") || !strcmp(action, "power_off")) {
         reject(&r, "UNSUPPORTED_ACTION"); goto done;
     }
-    if (!strcmp(action, "set_param") || battery_write) {
+    if (!strcmp(action, "set_param") || battery_write || panel_read) {
         bool enabled;
         portENTER_CRITICAL(&s_rx_lock); enabled = s_direct_control && r.epoch == s_epoch; portEXIT_CRITICAL(&s_rx_lock);
         if (!r.v2 || !enabled || !ble_ct_framing_enabled()) { reject(&r, "UPDATE_APP_REQUIRED"); goto done; }
@@ -428,10 +471,16 @@ static void dispatch(const QueuedCommand *queued) {
     if (opening) {
         if (!cJSON_AddBoolToObject(actual, "framing_v1", true) ||
             !cJSON_AddBoolToObject(actual, "direct_control_v1", cJSON_IsTrue(control_flag)) ||
-            !cJSON_AddNumberToObject(actual,"battery_config_max_message_bytes",COMMAND_CAPACITY)) {
+            !cJSON_AddBoolToObject(actual,"battery_config_supported",s_battery_supported) ||
+            !cJSON_AddNumberToObject(actual,"battery_config_max_message_bytes",s_battery_supported?COMMAND_CAPACITY:0) ||
+            (s_panel_read_fn && s_panel_write_fn && !cJSON_AddBoolToObject(actual,"panel_api_v1",true))) {
             cJSON_Delete(actual); goto done;
         }
         body = make_body(&r, "applied", NULL, actual, 0);
+    } else if(panel_read) {
+        const char *error=s_panel_read_fn(action,params,actual);
+        if(error){cJSON_Delete(actual);reject(&r,error);goto done;}
+        body=make_body(&r,"applied",NULL,actual,0);
     } else if (!strcmp(action, "get_param")) {
         double read_value;
         if (!valid_token(pid) || !s_read_fn) { cJSON_Delete(actual); reject(&r, "INVALID_ARGS"); goto done; }
@@ -455,7 +504,8 @@ static void dispatch(const QueuedCommand *queued) {
         if (body && r.v2) cJSON_DeleteItemFromObjectCaseSensitive(body,"parameter_revision");
     } else if (!strcmp(action, "set_param") || battery_write) {
         cJSON_Delete(actual);
-        if (!battery_write && (!valid_token(pid) || !cJSON_IsNumber(value) || !isfinite(value->valuedouble) || !s_write_fn)) {
+        if (!battery_write && (!valid_token(pid) || !cJSON_IsNumber(value) ||
+            !isfinite(value->valuedouble) || (!panel_write && !s_write_fn))) {
             reject(&r, "INVALID_ARGS"); goto done;
         }
         if (s_pending.active) { reject(&r, "BUSY"); goto done; }
@@ -476,6 +526,7 @@ static void dispatch(const QueuedCommand *queued) {
             cJSON_Delete(body); reject(&r, "RESULT_TOO_LARGE"); goto done;
         }
         s_pending.active = true;
+        s_pending.panel = panel_write;
         s_pending.request = r;
         s_pending.started_ms = now_ms();
         if (++s_next_token == 0) ++s_next_token;
@@ -486,18 +537,22 @@ static void dispatch(const QueuedCommand *queued) {
          * allocate again between admission and the executor. */
         if (current_request(&r)) ble_ct_cmd_notify_result(preflight, (uint16_t)strlen(preflight));
         cJSON_Delete(body);
-        int rc = battery_write ? s_battery_write_fn(battery_config,false) : s_write_fn(pid->valuestring, value->valuedouble);
+        int rc = battery_write ? s_battery_write_fn(battery_config,false) :
+            panel_write ? s_panel_write_fn(pid->valuestring,value->valuedouble,params,s_pending.token) :
+            s_write_fn(pid->valuestring,value->valuedouble);
         if (rc != BLE_CMD_OK && s_pending.active) {
             const char *error=battery_write || rc<0 ? battery_error(rc) : rc==BLE_CMD_BUSY ? "BUSY" : rc==BLE_CMD_OUT_OF_RANGE ? "OUT_OF_RANGE" :
                 rc==BLE_CMD_UNSUPPORTED ? "UNSUPPORTED_PARAM" : rc==BLE_CMD_UPGRADE_BUSY ? "UPGRADE_BUSY" :
                 rc==BLE_CMD_NOT_READY ? "NOT_READY" : "UNKNOWN_PARAM";
-            complete_write(error, 0, 0, 0, 0);
+            if(panel_write)ble_ct_cmd_on_panel_write_result(s_pending.token,param_id,error,false,false,0);
+            else complete_write(error, 0, 0, 0, 0);
         }
         goto done;
     } else { cJSON_Delete(actual); reject(&r, "UNSUPPORTED_ACTION"); goto done; }
     if (body) {
         char *preflight=canonical;
-        if (encode_result(&r, body, preflight) && cache_put(&r, canonical_digest, body)) {
+        if (encode_result(&r, body, preflight) && (!panel_read || strlen(preflight)<=512U) &&
+            cache_put(&r, canonical_digest, body)) {
             /* Commit negotiation only after validation and a replayable result
              * exist. A rejected open must leave connection state untouched. */
             if (opening) {
@@ -518,8 +573,11 @@ done:
 }
 
 void ble_ct_cmd_tick(void) {
-    if (s_pending.active && now_ms() - s_pending.started_ms >= WRITE_TIMEOUT_MS)
-        complete_write("SYNC_TIMEOUT", 0, 0, -1, -1);
+    if (s_pending.active && now_ms() - s_pending.started_ms >= WRITE_TIMEOUT_MS) {
+        if(s_pending.panel)ble_ct_cmd_on_panel_write_result(s_pending.token,s_pending.param_id,
+            "SYNC_TIMEOUT",false,false,0);
+        else complete_write("SYNC_TIMEOUT", 0, 0, -1, -1);
+    }
     QueuedCommand queued;
     bool available = false;
     portENTER_CRITICAL(&s_rx_lock);

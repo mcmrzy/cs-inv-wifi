@@ -14,16 +14,23 @@ class Test(unittest.TestCase):
   cmd=run.call_args.args[0]
   self.assertIn('--baud',cmd)
   self.assertEqual(cmd[cmd.index('--baud')+1],'2000000')
- def run_flash(self,same=True,first=False,bad_hash=False,changed_identity=False,baud=None):
+ def run_flash(self,same=True,first=False,bad_hash=False,changed_identity=False,baud=None,
+               model=None,check=False,existing_model=None):
   with tempfile.TemporaryDirectory() as folder:
    root=Path(folder);release=root/'release';release.mkdir();calls=[]
    data={'bootloader.bin':b'BOOT','partition-table.bin':b'PARTITIONS','app.bin':b'APP','ota_data_initial.bin':b'OTA'}
    for name,value in data.items():(release/name).write_bytes(value)
    hashes={name:hashlib.sha256(value).hexdigest() for name,value in data.items()}
    if bad_hash:hashes['app.bin']='0'*64
-   (release/'flash_manifest.json').write_text(json.dumps({'sha256':hashes}),encoding='utf-8')
+   manifest={'sha256':hashes}
+   if model:manifest['model']=model
+   (release/'flash_manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
    flash=bytearray(b'\xff'*0x400000);flash[0x3f8000:]=b'K'*0x8000
    if same:flash[0x8000:0x8000+len(data['partition-table.bin'])]=data['partition-table.bin']
+   if existing_model:
+    flash[0x1c0000]=0xe9
+    descriptor=b'CSIV\1\0\1\0'+existing_model.encode('ascii')
+    flash[0x1c0000+288:0x1c0000+352]=descriptor.ljust(64,b'\0')
    self.rates=[]
    def command(port,*args,baud=t.DEFAULT_BAUD):
     self.rates.append(baud)
@@ -37,8 +44,10 @@ class Test(unittest.TestCase):
    argv=['flash_production.py','--port','SIMULATED','--release',str(release),'--backup-dir',str(root/'backup')]
    if first:argv.append('--first-install')
    if baud is not None:argv.extend(('--baud',str(baud)))
+   if model:argv.extend(('--model',model))
+   if check:argv.extend(('--check',))
    error=None
-   with patch.object(sys,'argv',argv),patch.object(t,'command',command),patch.object(t,'validate_release_images'),contextlib.redirect_stdout(io.StringIO()):
+   with patch.object(sys,'argv',argv),patch.object(t,'command',command),patch.object(t,'validate_release_images'),patch.object(t,'validate_release_metadata'),contextlib.redirect_stdout(io.StringIO()):
     try:t.main()
     except RuntimeError as e:error=str(e)
    return calls,error
@@ -64,4 +73,19 @@ class Test(unittest.TestCase):
  def test_routine_update_preserves_identity_and_detects_change(self):
   calls,error=self.run_flash();self.assertIsNone(error);self.assertNotIn('erase_region',[c[0] for c in calls])
   calls,error=self.run_flash(changed_identity=True);self.assertIn('factory bytes changed',error)
+ def test_modbus_manifest_requires_explicit_product(self):
+  manifest={'model':'CS-MB-PANEL','chip':'esp32c3','profile':'device'}
+  with self.assertRaisesRegex(RuntimeError,'selected product'):
+   t.validate_manifest(manifest)
+  t.validate_manifest(manifest,'CS-MB-PANEL')
+ def test_modbus_check_never_opens_serial(self):
+  calls,error=self.run_flash(model='CS-MB-PANEL',check=True)
+  self.assertIsNone(error);self.assertEqual(calls,[])
+ def test_modbus_update_stops_after_backup_if_other_product_exists(self):
+  calls,error=self.run_flash(model='CS-MB-PANEL',existing_model='CS-L10-6K2')
+  self.assertIn('another or unknown product',error)
+  self.assertEqual([c[0] for c in calls],['read_flash'])
+ def test_modbus_update_preserves_existing_matching_product(self):
+  calls,error=self.run_flash(model='CS-MB-PANEL',existing_model='CS-MB-PANEL')
+  self.assertIsNone(error);self.assertIn('verify_flash',[c[0] for c in calls])
 if __name__=='__main__':unittest.main()
