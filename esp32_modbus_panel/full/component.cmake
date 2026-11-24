@@ -38,6 +38,7 @@ idf_component_register(
   "${CMAKE_CURRENT_LIST_DIR}/../main/panel_fonts.c"
   "${BASE}/direct/direct_keys.c"
   "${CMAKE_CURRENT_LIST_DIR}/panel_buzzer.c"
+  "${CMAKE_CURRENT_LIST_DIR}/panel_sound_feedback.c"
   "${BASE}/direct/direct_key_codec.c"
   "${CMAKE_CURRENT_LIST_DIR}/panel_preferences.c"
   "${CMAKE_CURRENT_LIST_DIR}/panel_ble_aux.c"
@@ -74,6 +75,8 @@ idf_component_register(
   "${CMAKE_CURRENT_LIST_DIR}/../main/panel_ui.c"
   "${CMAKE_CURRENT_LIST_DIR}/../main/panel_locale.c"
   "${CMAKE_CURRENT_LIST_DIR}/../main/panel_indicators.c"
+  "${BASE}/direct/status_led.c"
+  "${BASE}/direct/status_led_rmt.c"
   "${CMAKE_CURRENT_LIST_DIR}/panel_indicators_hw.c"
   "${CMAKE_CURRENT_LIST_DIR}/panel_backlight.c"
   "${CMAKE_CURRENT_LIST_DIR}/../main/panel_display_settings.c"
@@ -124,17 +127,8 @@ idf_component_register(
 )
 target_compile_definitions(${COMPONENT_LIB} PUBLIC FIRMWARE_VERSION="${PROJECT_VER}" PANEL_FULL_DIRECT=1)
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}/generated")
-# Preserve space in the existing 4 MB OTA layout for the BLE API.
-set_source_files_properties(
-    "${CMAKE_CURRENT_LIST_DIR}/panel_lvgl.c"
-    "${CMAKE_CURRENT_LIST_DIR}/panel_ble.c"
-    "${CMAKE_CURRENT_LIST_DIR}/panel_ble_aux.c"
-    "${CMAKE_CURRENT_LIST_DIR}/full_alarm_service.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../main/panel_alarm.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../main/panel_catalog.c"
-    "${CMAKE_CURRENT_LIST_DIR}/../main/panel_ui.c"
-    PROPERTIES COMPILE_OPTIONS "-Oz"
-)
+# Preserve application space in the existing 4 MB OTA layout.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Oz)
 if(PANEL_BMS_DIAGNOSTIC)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE PANEL_BMS_DIAGNOSTIC=1)
     target_sources(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/bms_diagnostics.c")

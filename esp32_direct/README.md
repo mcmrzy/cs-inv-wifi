@@ -28,7 +28,13 @@ cd esp32_direct
 idf.py build
 ```
 
-VS Code 中将 `esp32_direct` 作为 ESP-IDF 工程打开，即可执行 Build、Flash 和 Monitor。首次构建从 `sdkconfig.defaults` 生成本地 `sdkconfig`。默认 L10 接线使用 T280C7-C12-26 IPS 初始化，CS 接地时自动选择复位优先启动和 SPI Mode 3。CMake 固定目标为 ESP32-C3，并从 `version.txt` 读取版本。
+VS Code 中将 `esp32_direct` 作为 ESP-IDF 工程打开，即可执行 Build、Flash 和 Monitor。首次构建从 `sdkconfig.defaults` 生成本地 `sdkconfig`。旧板生成的 `sdkconfig` 会覆盖新板默认引脚，有旧配置时可使用独立构建目录和配置文件：
+
+```powershell
+idf.py -B build_l10_pcb -D SDKCONFIG=tmp/sdkconfig.l10_pcb build
+```
+
+默认 L10 接线使用 T280C7-C12-26 IPS 初始化，CS 接地时自动选择复位优先启动和 SPI Mode 3。CMake 固定目标为 ESP32-C3，并从 `version.txt` 读取版本。
 
 默认输出为 `build/cs_inv_direct_c3.bin` 和 `build/cs_inv_direct_c3.elf`。BIN 是应用镜像，不能当作地址 0 的整片镜像使用。默认分区表见 [partitions.csv](partitions.csv)。
 
@@ -59,14 +65,14 @@ VS Code 中将 `esp32_direct` 作为 ESP-IDF 工程打开，即可执行 Build�
 | --- | --- |
 | DSP UART0 | TX 1、RX 0，115200 8N1 |
 | BMS UART1 → RS485 | TX 21、RX 20，默认 BBJ 9600 8N1，自动换向 |
-| ST7789 320×240 | SCK 6、MOSI 7、D/C 9、RESET 10，4 线 SPI。新屏为 [T280C7-C12-26 IPS](docs/T280C7-C12-26_IPS.md) |
-| LCD CS / 背光 | 外部保持有效，不分配 ESP GPIO |
-| BS818A_2 按键 | CLK 2、DAT 3 |
-| 蜂鸣器 | GPIO8，高有效 |
-| CAN 收发器空闲 | GPIO4 固定高；当前 BMS 使用 RS485 |
-| 日志与维护 | USB Serial/JTAG，GPIO18/19 |
+| ST7789 320×240 | SCK 6、MOSI 7、D/C 8、RESET 4，4 线 SPI。[T280C7-C12-26 IPS](docs/T280C7-C12-26_IPS.md) |
+| LCD CS / 背光 | CS 由板上保持低，BL 走 GPIO5，高有效 |
+| BS818A_2 按键 | CLK 3、DAT 2 |
+| 蜂鸣器 | GPIO10，高有效 |
+| WS2812 | GPIO9，GRB，DIN 起依次为 RUN、CHG、NET、ALM，默认亮度 24/255 |
+| 日志与维护 | USB Serial/JTAG，GPIO18 D−、GPIO19 D+ |
 
-GPIO2/8/9 涉及启动配置，GPIO9 同时是 LCD D/C。默认配置的 `CONFIG_BOOT_ROM_LOG_ALWAYS_OFF=y` 会在固件首次运行时永久设置 UART ROM 日志关闭 eFuse；编译不会烧写芯片，恢复旧固件也不会恢复该日志。执行固件前需核对[启动配置说明](docs/ESP32C3_PINOUT.md)。
+GPIO2/8/9 涉及启动配置。GPIO9 保留原理图中的 10 kΩ 上拉，进入应用后才输出 LED 数据。默认配置的 `CONFIG_BOOT_ROM_LOG_ALWAYS_OFF=y` 会在固件首次运行时永久设置 UART ROM 日志关闭 eFuse。执行固件前需核对[启动配置说明](docs/ESP32C3_PINOUT.md)。
 
 ## 验证
 

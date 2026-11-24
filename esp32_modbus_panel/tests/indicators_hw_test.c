@@ -1,4 +1,7 @@
 #define PANEL_INDICATORS_HOST 1
+#include "panel_indicators.h"
+#include "indicator_test_sdk.h"
+#include "../../esp32_direct/main/direct/status_led_rmt.c"
 #include "../full/panel_indicators_hw.c"
 #include <assert.h>
 #include <stdio.h>
@@ -48,29 +51,34 @@ int main(void){
     assert(s_symbols[0].duration0==7 && s_symbols[0].level0==1);
     assert(!s_symbols[96].level0 && !s_symbols[96].level1 && s_symbols[96].duration0==3000);
     panel_led_network_t n={.enabled=true,.cloud=true};full_indicators_tick(&n);
-    assert(sent==2 && s_last[3]==24 && s_last[6]==0);full_indicators_tick(&n);assert(sent==2);
+    assert(sent==2 && s_last[6]==24 && s_last[3]==0);full_indicators_tick(&n);assert(sent==2);
     n.ble=true;stalled=true;full_indicators_tick(&n);assert(sent==3 && s_pending);
     rmt_symbol_word_t live[97];memcpy(live,s_symbols,sizeof(live));
     n.ble=false;n.cloud=false;n.reconnecting=true;full_indicators_tick(&n);
     assert(sent==3 && !memcmp(live,s_symbols,sizeof(live)));
-    stalled=false;full_indicators_tick(&n);assert(sent==4 && !s_pending && s_last[4]==24);
-    n.cloud=true;n.reconnecting=false;fail_stage=4;full_indicators_tick(&n);assert(sent==5 && s_last[4]==24);
-    fail_stage=0;full_indicators_tick(&n);assert(sent==6 && s_last[3]==24 && !s_last[4]);
+    stalled=false;full_indicators_tick(&n);assert(sent==4 && !s_pending && s_last[7]==24);
+    n.cloud=true;n.reconnecting=false;fail_stage=4;full_indicators_tick(&n);assert(sent==5 && s_last[7]==24);
+    fail_stage=0;full_indicators_tick(&n);assert(sent==6 && s_last[6]==24 && !s_last[7]);
     n.cloud=false;n.reconnecting=true;time_ms=1250;full_indicators_tick(&n);
-    assert(sent==7 && s_last[4]>1 && s_last[4]<24);uint8_t fading=s_last[4];
-    time_ms=1750;full_indicators_tick(&n);assert(sent==8 && s_last[4]>0 && s_last[4]<fading);
+    assert(sent==7 && s_last[7]>1 && s_last[7]<24);uint8_t fading=s_last[7];
+    time_ms=1750;full_indicators_tick(&n);assert(sent==8 && s_last[7]>0 && s_last[7]<fading);
     full_indicators_tick(&n);assert(sent==8); /* Same brightness is not retransmitted. */
     inverter_online=true;
     full_indicators_tick(NULL);
-    assert(sent==9 && s_last[9]==12 && s_last[10]==24 && s_last[11]==0);
-    for(unsigned i=0;i<9;i++)assert(!s_last[i]);
+    assert(sent==9 && s_last[0]==12 && s_last[1]==24 && s_last[2]==0);
+    for(unsigned i=3;i<12;i++)assert(!s_last[i]);
     full_indicators_set_brightness(80);full_indicators_tick(NULL);
-    assert(sent==10 && s_last[9]==40 && s_last[10]==80);
+    assert(sent==10 && s_last[0]==40 && s_last[1]==80);
     full_indicators_set_brightness(0);full_indicators_tick(NULL);
     assert(sent==11);
     for(unsigned i=0;i<12;i++)assert(!s_last[i]);
-    /* Board output: third LED is blue for 3KU discharge despite a full flag. */
-    battery_only=true;full_indicators_set_brightness(24);full_indicators_tick(NULL);
-    assert(!s_last[6] && !s_last[7] && s_last[8]>0);
-    puts("PASS indicator hardware: selectable pin, reversed chain order, RMT timing and safe retry");return 0;
+    /* DIN to DOUT: RUN blue, CHG breathing blue, NET green, ALM yellow. */
+    battery_only=true;full_indicators_set_brightness(24);time_ms=1250;
+    n=(panel_led_network_t){.cloud=true,.local_warning=true};full_indicators_tick(&n);
+    assert(s_last[5]>0 && s_last[5]<24);
+    const uint8_t expected[]={0,0,24,0,0,s_last[5],24,0,0,12,24,0};
+    assert(!memcmp(s_last,expected,sizeof(expected)));
+    for(unsigned bit=0;bit<96;bit++)
+        assert(s_symbols[bit].duration0==((expected[bit/8]&(0x80U>>(bit%8)))?14:7));
+    puts("PASS indicator hardware: DIN RUN/CHG/NET/ALM in GRB, RMT timing and safe retry");return 0;
 }

@@ -21,6 +21,8 @@ extern const int WIFI_CONNECTED_BIT;
 
 /* 初始化 (netif/事件循环/wifi 驱动), 由 app_main 调用 */
 void wifi_sta_init(void);
+/* Retryable radio startup for boards that initialize BLE first. */
+bool wifi_sta_try_init(void);
 
 /* Configure STA and request connection; event handler preserves retry intent. */
 bool wifi_sta_connect(const char *ssid, const char *pass);

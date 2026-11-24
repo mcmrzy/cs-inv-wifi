@@ -16,7 +16,7 @@ project=json.loads((build/'project_description.json').read_text(encoding='utf-8'
 assert project['project_name']=='cs_inv_modbus_full'
 version=re.search(r'PROJECT_VER "([0-9.]+)-modbus-full"',(root/'CMakeLists.txt').read_text()).group(1)
 assert project['project_version']==f'{version}-modbus-full'
-release_date='2026-11-12'
+release_date='2026-11-16'
 out=root/f"dist/{release_date.replace('-','')}-v{version}-full"
 assert Path(project['config_file']).resolve()==(root/'sdkconfig.full').resolve()
 config=(root/'sdkconfig.full').read_text(encoding='utf-8-sig')
@@ -170,13 +170,22 @@ code {{overflow-wrap:anywhere}}
 <p><a href="{preview_name}">查看固件渲染的界面预览</a></p>
 <h2>本次更新</h2>
 <ul>
+<li>减少蓝牙设置写入和回执叠加时的主循环栈占用，并增加低栈余量日志。</li>
+<li>天气 HTTPS 连接超时预算从 4 秒调整到 12 秒，记录请求阶段和地址，将连接失败作为超时状态显示。</li>
+<li>面板 MQTT 使用 2 KB 接收和 1 KB 发送缓冲，保留报文分片重组。AES 使用软件实现，避免发送时硬件 DMA 描述符分配失败；TLS 协议及证书配置保持一致。</li>
+<li>USB 工厂命令的 12 KB 校验栈改为收到完整命令时分配，平时解析任务使用 3 KB，释放 9 KB 常驻内存供 Wi-Fi、BLE 和 MQTT TLS 共存。</li>
+<li>针对 BLE 已启动后 Wi-Fi 初始化报 ESP_ERR_NO_MEM，减少常驻接收和管理帧缓冲，堆代码放入 Flash。启动日志增加 Wi-Fi 初始化前的可用内存、最大块和历史最低值。</li>
+<li>BLE 开机启动。Wi-Fi 或 MQTT 断线重连、退出手机连接页和远程升级准备均保留 BLE 服务。</li>
+<li>首页能量流按路径长度匀速移动，方向变化时从新源端开始。云设置按逆变器实际读回区分已生效和仅已受理。</li>
+<li>主菜单和分类入口的压缩位图放大至 34 像素。运行数据统一卡片内的标题、数值和单位。</li>
+<li>修复运行数据在电池状态页中断翻页的问题。温度使用 ℃，3KU 光伏按协议显示单路、正确倍率和光伏温度。</li>
+<li>输入范围、输出优先级、充电优先级和并机模式使用易读名称，覆盖运行数据及参数设置。</li>
 <li>设置页直接显示五项参数和当前值，3KU 输出频率和电压限制按运行模式说明。</li>
 <li>天气刷新保留已连接的 MQTT，资源不足时保留上次预报。中文界面识别长沙，温度使用单个摄氏度字形。</li>
 <li>电池已连接且零功率时 CHG 蓝色常亮，实际放电蓝色呼吸、充电绿色呼吸。灯与测量共用方向判定，3KU 零电流小功率和首页瓦数保留实测值。</li>
 <li>重新整理分类图标、参数编辑卡片、数值基线和中英文对齐，减少重复装饰图。</li>
 <li>修复 SPIFFS 不支持 access 导致新缓存无法读取的问题，使用 stat 检查，保留原文件继续补传。</li>
 <li>修复 CHG 电流归零时误凭充电状态亮绿灯。3KU 按同一采集批次的有符号电池功率补充方向，充电标志单独存在时不再亮绿色呼吸，诊断日志增加电池功率原始值。</li>
-<li>蓝牙低内存启动无法接纳时立即恢复云连接，自动重试退避 5 分钟，重新进入手机连接页面可重试。蓝牙调度等待不再反复关闭 MQTT 重连窗口。蓝牙内存门槛保持不变。</li>
 <li>修复联网后缓存补传任务栈溢出重启。压缩缓冲按需分配，补传交由 MQTT 网络任务发送，补传任务保留 6 KB 栈及低余量诊断。</li>
 <li>运行快照离线保存支持原始 V3 格式与 1023 字节载荷。新批次使用无损压缩，恢复网络后按原采集时间续传，等待 MQTT PUBACK 后移除。</li>
 <li>缓存每 5 条或约 10 秒落盘，使用临时文件提交。保留旧缓存读取能力，挂载失败不会直接清空已有分区，未校时记录不会当作过期数据删除。</li>
@@ -189,7 +198,7 @@ code {{overflow-wrap:anywhere}}
 <li>手机可修改显示、声音、时区、电池协议和逆变器串口配置，也可搜索逆变器地址。</li>
 <li>逆变器设置直接打开全部参数分类，运行参数以整屏图示和数值卡片呈现。</li>
 <li>保存后自动读取设备值、替代参数或协议应答，区分实际生效、设备受理、拒绝和超时。</li>
-<li>显示设置中的 LED 亮度按百分比调整。无源蜂鸣器固定鸣叫 70 ms，支持关闭、低、中、高。</li>
+<li>显示设置中的 LED 亮度按百分比调整。无源蜂鸣器支持开机、按键、确认/返回、操作结果和告警音效，保留关闭、低、中、高；工站测试单音为 70 ms。</li>
 <li>统一 BBJ 和 CSERGY 电池页。无有效 BMS 数据时不显示无效读数，断联后缓存标为上次数据。</li>
 <li>CSERGY 电池可在自定义电池和待机条件下带入充电电压、电流上限和关机电压，确认后逐项保存。也可手动设置电池类型和参数。</li>
 <li>2KU、3KU、6KU、12KU 共用一份固件。请在「维护诊断 → 逆变器通信设置」核对铭牌机型。</li>

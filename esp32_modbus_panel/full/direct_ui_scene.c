@@ -350,7 +350,7 @@ void full_ui_scene_draw_frame(direct_gfx_t *g,const direct_ui_state_t *u,const d
  case UI_HELP:if(u->detail_page)lcd_test(g,u->detail_page==2);else info(g,u,v);break;
  case UI_FACTORY:factory(g,u,v);break;
  case UI_UPGRADE:upgrade(g,d,v);break;
- case UI_TIME:case UI_PRODUCTION:info(g,u,v);break;
+ case UI_TIME:info(g,u,v);break;
  default:title(g,"Information",NULL);center(g,160,100,"Open inverter functions from menu",14,MUTED);break;
  }
  physical_footer(g,u,d);

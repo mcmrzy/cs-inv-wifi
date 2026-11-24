@@ -10,7 +10,7 @@
 static panel_snapshot_t s;
 static unsigned renders;
 static void value(unsigned address,uint16_t raw)
-{s.valid[panel_slot(address)]=true;s.values[panel_slot(address)]=raw;s.updated_ms[panel_slot(address)]=1000;}
+{assert(panel_store(&s,address,raw,1000));}
 static void check_text(const char *text)
 {
     const char *p=text;
@@ -39,8 +39,13 @@ static void render_one(panel_ui_t ui,const char *name)
             assert(*p<128);
         }
         for(unsigned i=0;i<7;i++){
-            for(const unsigned char *p=(const unsigned char *)v.rows[i];*p;p++)assert(*p<128);
-            for(const unsigned char *p=(const unsigned char *)v.values[i];*p;p++)assert(*p<128);
+            const char *p=v.rows[i];
+            while(*p)assert(direct_gfx_utf8_next(&p)<128);
+            p=v.values[i];
+            while(*p){
+                uint32_t cp=direct_gfx_utf8_next(&p);
+                assert(cp<128 || cp==0x2103);
+            }
         }
     }
     uint16_t *full=calloc(320*240+2,sizeof(uint16_t));
@@ -100,7 +105,7 @@ int main(void)
     ui.setting_group=2;ui.selected=(uint16_t)panel_setting_group_index(2,0);render(ui,"settings_battery");
     ui.selected=0;ui.setting_group=0;ui.draft=0xffff;ui.editing=true;render(ui,"setting_unselected");ui.editing=false;
     ui.page=PANEL_PAGE_SETTING_GROUPS;render(ui,"setting_groups");
-    ui.selected=7;render(ui,"setting_groups_more");
+    ui.selected=8;render(ui,"setting_groups_last");
     ui.page=PANEL_PAGE_SETTINGS;
     for(unsigned i=0;i<panel_setting_count();i++){
         ui.selected=(uint16_t)i;render(ui,"catalog_check");

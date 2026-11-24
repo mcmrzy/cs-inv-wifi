@@ -208,28 +208,41 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-void wifi_sta_init(void)
+bool wifi_sta_try_init(void)
 {
-    if (s_wifi_event_group) {
-        return;    /* 已初始化 */
+    static bool started;
+    if (started) return true;
+    if (!s_wifi_event_group) {
+        s_wifi_event_group = xEventGroupCreate();
+        if (!s_wifi_event_group) return false;
+        ESP_ERROR_CHECK(esp_netif_init());
+        ESP_ERROR_CHECK(esp_event_loop_create_default());
+        esp_netif_create_default_wifi_sta();
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                    wifi_event_handler, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                    wifi_event_handler, NULL));
     }
-    s_wifi_event_group = xEventGroupCreate();
-
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                               wifi_event_handler, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                               wifi_event_handler, NULL);
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_err_t err = esp_wifi_init(&cfg);
+    if (err == ESP_OK) {
+        err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err == ESP_OK) err = esp_wifi_start();
+        if (err != ESP_OK) esp_wifi_deinit();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "STA init/start failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    started = true;
     ESP_LOGI(TAG, "init done");
+    return true;
+}
+
+void wifi_sta_init(void)
+{
+    ESP_ERROR_CHECK(wifi_sta_try_init() ? ESP_OK : ESP_FAIL);
 }
 
 bool wifi_sta_connect(const char *ssid, const char *pass)

@@ -5,11 +5,18 @@
 void panel_settings_query_start(panel_settings_query_t *q,panel_snapshot_t *s,const uint16_t *addresses,unsigned count)
 {
     if(count>PANEL_SETTING_READ_SLOTS)count=PANEL_SETTING_READ_SLOTS;
+    panel_setting_read_t previous[PANEL_SETTING_READ_SLOTS];
+    memcpy(previous,s->setting_reads,sizeof(previous));
     memset(q,0,sizeof(*q));memset(s->setting_reads,0,sizeof(s->setting_reads));
     q->context_generation=s->context_generation;
     for(unsigned i=0;addresses && i<count;i++)if(panel_setting_find(addresses[i])){
         unsigned n=q->count++;q->addresses[n]=addresses[i];
         s->setting_reads[n].address=addresses[i];
+        for(unsigned j=0;j<PANEL_SETTING_READ_SLOTS;j++){
+            if(previous[j].address!=addresses[i] ||
+               s->now_ms-previous[j].stamp>PANEL_FRESH_MS)continue;
+            s->setting_reads[n]=previous[j];break;
+        }
     }
 }
 
@@ -21,13 +28,12 @@ bool panel_settings_query_tick(panel_settings_query_t *q,panel_snapshot_t *s,con
         uint16_t addresses[PANEL_SETTING_READ_SLOTS];memcpy(addresses,q->addresses,sizeof(addresses));
         panel_settings_query_start(q,s,addresses,q->count);
     }
-    if(!panel_online(s)){q->was_online=false;return false;}
-    if(!q->was_online){q->cursor=0;q->fallback=false;q->flags_read=false;q->next_round=0;q->was_online=true;}
-    if(q->cursor>=q->count){
-        if((int32_t)(s->now_ms-q->next_round)<0)return false;
-        q->cursor=0;q->fallback=false;q->flags_read=false;
+    if(!panel_online(s))return false;
+    while(q->cursor<q->count && s->setting_reads[q->cursor].state!=PANEL_SETTING_UNREAD){
+        q->cursor++;q->fallback=false;q->flags_read=false;
     }
-    unsigned slot=q->cursor;
+    if(q->cursor>=q->count)return false;
+    unsigned slot=q->last_slot=q->cursor;
     const panel_setting_t *setting=panel_setting_find(q->addresses[slot]);
     uint16_t independent=panel_setting_current_address(s,setting);
     uint16_t reg=q->fallback || independent==0xffff?setting->address:independent;
@@ -58,6 +64,5 @@ bool panel_settings_query_tick(panel_settings_query_t *q,panel_snapshot_t *s,con
         r->state=exception==1 || exception==2?PANEL_SETTING_UNSUPPORTED:PANEL_SETTING_INVALID;
     else r->state=PANEL_SETTING_TIMEOUT;
     q->fallback=false;q->flags_read=false;q->cursor++;
-    if(q->cursor>=q->count)q->next_round=s->now_ms+3000U;
     return true;
 }

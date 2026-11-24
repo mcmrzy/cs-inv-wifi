@@ -23,14 +23,14 @@ class LcdRecoveryTests(unittest.TestCase):
 #include <setjmp.h>
 #include <string.h>
 typedef unsigned TickType_t;
-typedef struct {uint8_t key;uint32_t timestamp_ms;} key_event_t;
+typedef struct {uint8_t key;bool press;uint32_t timestamp_ms;} key_event_t;
 static void *s_events=(void*)1;
 static atomic_bool s_lcd_recovery_requested;
 static const char *TAG="test";
 static unsigned clock_ms,beeps,queued,recovery_logs;
 static jmp_buf stop;
-#define CONFIG_DIRECT_KEY_CLOCK_PIN 18
-#define CONFIG_DIRECT_KEY_DATA_PIN 19
+#define CONFIG_DIRECT_KEY_CLOCK_PIN 3
+#define CONFIG_DIRECT_KEY_DATA_PIN 2
 #define pdTRUE 1
 #define pdMS_TO_TICKS(x) (x)
 #define ESP_LOGI capture
@@ -53,7 +53,8 @@ int main(void){
  assert(beeps==1&&queued==1); /* one normal ENTER after releasing the combo */
  puts("PASS actual scanner ignores >4s ENTER+BACK combo; normal ENTER press still queues and beeps once");
 }
-'''.replace('FUNCTION',function(keys,'keys_task'))
+'''.replace('FUNCTION', keys[keys.index('static void keys_task('):
+                             keys.index('esp_err_t direct_keys_init(')])
         local_mode.LocalModeTests.compile_run(self, code)
 
     def test_actual_owner_bounds_auto_retries_defers_ota_and_keeps_manual_available(self):

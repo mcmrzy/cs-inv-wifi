@@ -7,16 +7,17 @@ root=Path(__file__).resolve().parents[1]
 source=(root/'full/full_panel_runtime.inc').read_text(encoding='utf-8')
 tick=source[source.index('static void full_modbus_panel_tick('):source.index('static void panel_task(')]
 inversion=source[source.index('static bool panel_set_view_inversion('):source.index('static void panel_render(')]
-ota_fn=source[source.index('static bool panel_ota_active('):source.index('static void panel_snapshot(')]
+ota_fn=source[source.index('static bool panel_ota_active('):source.index('static void panel_snapshot_identity(')]
 actions=source[source.index('static void panel_save_appearance('):source.index('static void full_modbus_panel_tick(')]
 config=(root/'sdkconfig.full').read_text(encoding='utf-8')
 assert 'CONFIG_DIRECT_LCD_SPI_CLOCK_HZ=40000000' in config
-assert 's_modbus_active && (panel_ota_active()' in source
+assert 's_modbus_active && panel_ota_active()' in source
 assert 'panel_reset_for_key_page' not in source
 assert 's_ui_data.bms_received=direct_bms_get_snapshot(' in source
 assert 's_ui_data.bms_age_ms<5000U' in source
 test=r'''
 #include "panel_ui.h"
+#include "full_modbus_map.h"
 #include "panel_catalog.h"
 #include "panel_lvgl.h"
 #include "direct_gfx_assets.h"
@@ -29,6 +30,7 @@ test=r'''
 #include "panel_wifi.h"
 #include "panel_key_labels.h"
 #include "panel_preferences.h"
+#include "panel_sound.h"
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -45,6 +47,7 @@ static const char *TAG="test";
 static void log_line(const char *tag,const char *fmt,...){(void)tag;(void)fmt;}
 #define ESP_LOGW log_line
 #define ESP_LOGI log_line
+#define ESP_LOGD(...) ((void)0)
 static atomic_uint s_panel_key_events,s_lcd_tx_errors;
 static atomic_uint s_panel_page,s_panel_frames;
 static atomic_bool s_first_frame_done;
@@ -54,6 +57,7 @@ static panel_ui_t s_modbus_ui;
 static panel_snapshot_t s_modbus_snapshot,live;
 static panel_view_t s_modbus_view,s_modbus_previous;
 static panel_page_t s_modbus_root=PANEL_PAGE_POWER;
+static uint32_t s_power_review_visible_ms;
 static bool s_modbus_active=true,s_modbus_drawn,s_blank,s_have_previous;
 static bool s_lcd_test_inverted=true;
 static direct_ui_state_t s_ui;
@@ -73,6 +77,11 @@ static uint16_t s_local_blank=1;
 static panel_display_settings_t s_saved_display={100,2},s_preview_display={100,2};
 static panel_feedback_settings_t saved_feedback={24,PANEL_BEEP_NORMAL};
 static bool fail_save,s_manual_recovery_pending;
+static unsigned sounds[PANEL_SOUND_COUNT];
+void panel_sound_play(panel_sound_effect_t effect){
+ assert(effect>PANEL_SOUND_NONE && effect<PANEL_SOUND_COUNT);
+ sounds[effect]++;
+}
 static uint8_t backlight=100;
 static void full_backlight_set(uint8_t b,bool off){assert(!off);backlight=b;}
 static void panel_discard_preview(void){
@@ -106,9 +115,11 @@ OtaResult ota_service_cancel(const char *id){(void)id;return OTA_RESULT_OK;}
 static uint16_t s_strip_pixels[320*16];
 static uint16_t framebuffer[320*240];
 static uint16_t incremental_frame[320*240];
-static unsigned bands,flushed_pixels,submits,notes,queries;
+static unsigned bands,flushed_pixels,submits,queries;
 static bool fail_band,bus_unavailable;
 static uint8_t next_key,following_key;
+static bool next_repeated,following_repeated;
+static uint32_t next_key_stamp,following_key_stamp;
 static uint32_t now_ms(void){return live.now_ms;}
 static unsigned inversion_commands;
 static uint8_t last_inversion_command;
@@ -120,13 +131,18 @@ static unsigned setting_queries;
 static void panel_bus_request_settings(const uint16_t *addresses,unsigned count){
  assert(count<=5);for(unsigned i=0;i<count;i++)assert(panel_setting_find(addresses[i]));setting_queries+=count;
 }
-static bool direct_keys_get_timed_event(uint8_t *key,uint32_t *stamp){
- if(!next_key)return false;*key=next_key;*stamp=live.now_ms;next_key=following_key;following_key=0;return true;
+static bool direct_keys_get_event_with_press(uint8_t *key,uint32_t *stamp,bool *press){
+ if(!next_key)return false;
+ *key=next_key;*stamp=next_key_stamp?next_key_stamp:live.now_ms;
+ if(press)*press=!next_repeated;
+ next_key=following_key;next_key_stamp=following_key_stamp;following_key=0;following_key_stamp=0;
+ next_repeated=following_repeated;following_repeated=false;
+ return true;
 }
-static void factory_note_key(uint8_t key){(void)key;notes++;}
 static bool panel_wake_key(void){return false;}
 static uint16_t expected_address=0x4123;
-static bool panel_bus_submit_sequence(const panel_command_t *c,uint32_t *seq){
+static bool panel_bus_submit_in_context(const panel_command_t *c,uint32_t context,uint32_t *seq){
+ assert(context==live.context_generation);
  assert(c->type==PANEL_CMD_WRITE && c->address==expected_address);
  *seq=40+(++submits);live.command_sequence=*seq;return true;
 }
@@ -172,7 +188,9 @@ static lv_obj_t *find_label(lv_obj_t *obj,const char *text,int minimum_y){
  return NULL;
 }
 static lv_area_t label_bounds(const char *text,int minimum_y){
- lv_obj_t *obj=find_label(lv_scr_act(),text,minimum_y);assert(obj);
+ lv_obj_t *obj=find_label(lv_scr_act(),text,minimum_y);
+ if(!obj)fprintf(stderr,"Missing LVGL label %s at y >= %d\n",text,minimum_y);
+ assert(obj);
  lv_area_t a;lv_obj_get_coords(obj,&a);return a;
 }
 static unsigned sprite_colors(unsigned x,unsigned y,unsigned width,unsigned height){
@@ -184,23 +202,124 @@ static unsigned sprite_colors(unsigned x,unsigned y,unsigned width,unsigned heig
  }
  return count;
 }
+static void partial_home(uint32_t now){
+ panel_snapshot_t partial={.now_ms=now};
+ panel_store(&partial,0x50,2315,now);
+ panel_store(&partial,0x53,1385,now);
+ panel_store(&partial,0xa0,4200,now-2100);
+ panel_store(&partial,0x96,3680,now-2100);
+ panel_store(&partial,0x5b,0,now);
+ panel_home_readings_t readings;full_mb_home(&partial,NULL,&readings);
+ RunParamDef sample;uint32_t stamp;
+ assert(!full_mb_measurement(&partial,&sample,&stamp));
+ direct_ui_state_t ui;direct_ui_init(&ui);
+ direct_ui_data_t data={.language_zh=true,.clock_valid=true,.hour=14,.minute=30};
+ direct_ui_view_t legacy;direct_ui_build(&ui,&data,&legacy);
+ panel_lvgl_show_local(&ui,&data,&legacy,NULL,NULL,false,false);panel_lvgl_refresh(now,true);
+ label_bounds("等待数据 14:30",0);save_frame("lvgl_home_partial_legacy");
+ panel_lvgl_show_home(&ui,&data,&readings);panel_lvgl_refresh(now,true);
+ label_bounds("部分实时 14:30",0);label_bounds("* 上次数据",190);
+ label_bounds("1385W",35);label_bounds("231.5V",90);
+ label_bounds("4200W*",35);label_bounds("368.0V*",90);
+ label_bounds("--W",126);label_bounds("0W",126);label_bounds("--V",170);
+ save_frame("lvgl_home_partial");
+ unsigned before=flushed_pixels;
+ panel_lvgl_refresh(now+96,false);
+ assert(flushed_pixels>before && flushed_pixels-before<400);
+ assert_clean_frame(now+96);
+ data.theme_light=true;data.language_zh=false;
+ panel_lvgl_show_home(&ui,&data,&readings);panel_lvgl_refresh(now+96,false);
+ assert(label_bounds("Partial live 14:30",0).x2<270);
+ save_frame("lvgl_home_partial_en_light");
+ data.bms_received=data.bms_online=true;
+ data.bms.voltage_10mv=5220;data.bms.soc_percent=73;
+ panel_lvgl_show_home(&ui,&data,&readings);panel_lvgl_refresh(now+96,false);
+ label_bounds("73%",126);label_bounds("52.2V",178);
+ /* Bypass input keeps its direction even when the master reports negative grid power. */
+ panel_store(&partial,0x44,1U<<1,now+96);
+ panel_store(&partial,0x53,(uint16_t)-1000,now+96);partial.now_ms=now+96;
+ full_mb_home(&partial,NULL,&readings);
+ panel_lvgl_show_home(&ui,&data,&readings);panel_lvgl_refresh(now+96,false);
+ label_bounds("1000W",35);label_bounds("Grid in",35);label_bounds("4200W*",35);
+ assert_clean_frame(now+96);
+ panel_store(&partial,0x44,1U<<7,now+96);
+ full_mb_home(&partial,NULL,&readings);
+ panel_lvgl_show_home(&ui,&data,&readings);panel_lvgl_refresh(now+96,false);
+ label_bounds("-1000W",35);label_bounds("Grid out",35);
+ assert_clean_frame(now+96);
+ partial.config.profile_override=PANEL_PROFILE_3KU;
+ panel_store(&partial,0x53,(uint16_t)-135,now+96);
+ panel_store(&partial,0x5e,135,now+96);
+ panel_store(&partial,0x5b,276,now+96);
+ full_mb_home(&partial,NULL,&readings);
+ panel_lvgl_show_home(&ui,&data,&readings);panel_lvgl_refresh(now+96,false);
+ label_bounds("135W",35);label_bounds("Grid in",35);label_bounds("276W",126);
+ assert_clean_frame(now+96);
+ puts("PASS independent home data: live grid and zero load, stale PV, missing readings, direct BMS and 3KU power");
+}
 static void user_journey(void){
  panel_load_local();
  direct_ui_init(&s_ui);
  s_preview_style=s_saved_style=2;
  s_ui_data.language_zh=true;s_ui_data.valid[15]=true;s_ui_data.config[15]=1;
  bus_unavailable=false;live.now_ms=10000;panel_invalidate(&live,0x42);
- user_key(DIRECT_KEY_UP);full_modbus_panel_tick();
- assert(s_modbus_active&&s_modbus_ui.page==PANEL_PAGE_DETAILS&&strstr(s_modbus_view.subtitle,"等待"));
+ user_key(DIRECT_KEY_DOWN);full_modbus_panel_tick();
+ assert(s_modbus_active&&s_modbus_ui.page==PANEL_PAGE_DETAILS&&s_modbus_ui.detail==0);
+ assert(strstr(s_modbus_view.subtitle,"等待"));
  panel_store(&live,0x42,3,live.now_ms);full_modbus_panel_tick();
  assert(strstr(s_modbus_view.subtitle,"在线"));
- user_key(DIRECT_KEY_DOWN);assert(s_modbus_ui.detail==0);
+ const uint8_t detail_keys[]={KEY_RETURN,KEY_PREV,KEY_PREV,KEY_NEXT,KEY_NEXT,KEY_INDEX};
+ const uint8_t detail_group_keys[]={KEY_RETURN,KEY_ARROW_LEFT,KEY_UPWARD,KEY_DOWNWARD,KEY_ARROW_RIGHT,KEY_OPEN};
+ assert(!memcmp(s_modbus_view.key_labels,detail_keys,sizeof(detail_keys)));
+ user_key(DIRECT_KEY_DOWN);assert(s_modbus_ui.detail==1);
+ user_key(DIRECT_KEY_RIGHT);assert(s_modbus_ui.detail==2);
+ user_key(DIRECT_KEY_LEFT);assert(s_modbus_ui.detail==1);
+ user_key(DIRECT_KEY_UP);assert(s_modbus_ui.detail==0);
  user_key(DIRECT_KEY_ENTER);assert(s_modbus_ui.page==PANEL_PAGE_DETAIL_GROUPS);
- user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_ENTER);
- assert(!s_modbus_active && s_ui.page==UI_BMS);
+ assert(!memcmp(s_modbus_view.key_labels,detail_group_keys,sizeof(detail_group_keys)));
+ user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_ENTER);
+ assert(s_modbus_active && s_modbus_ui.page==PANEL_PAGE_DETAILS && s_modbus_ui.detail==3);
+ assert(strstr(s_modbus_view.title,"4/8") && !strcmp(s_modbus_view.values[0],"--"));
+ s_ui_data.bms_online=true;s_ui_data.bms.voltage_10mv=2617;
+ s_ui_data.bms.current_10ma=-123;s_ui_data.bms.soc_percent=67;
+ full_modbus_panel_tick();
+ assert(!strcmp(s_modbus_view.values[0],"26.17 V") && !strcmp(s_modbus_view.values[1],"-1.23 A"));
+ save_frame("lvgl_detail_battery_status");
+ s_ui_data.bms_online=false;s_ui_data.bms_received=true;
+ full_modbus_panel_tick();
+ assert((s_modbus_view.stale_rows&7)==7);
+ assert(find_label(lv_scr_act(),"BBJ (0x7C)  * 上次数据",29));
+ assert(find_label(lv_scr_act(),"26.17 V*",50));
+ save_frame("lvgl_detail_battery_held");
+ s_ui_data.bms_received=false;
+ live.config.profile_override=PANEL_PROFILE_3KU;
+ panel_store(&live,0x330,37,live.now_ms);
+ panel_store(&live,0x331,(uint16_t)-4,live.now_ms);
+ panel_store(&live,0x140,0,live.now_ms);
+ panel_store(&live,0x142,1,live.now_ms);
+ panel_store(&live,0x143,0,live.now_ms);
+ user_key(DIRECT_KEY_DOWN);
+ assert(s_modbus_active && s_modbus_ui.detail==4);
+ assert(!strcmp(s_modbus_view.rows[0],"光伏温度") && !strcmp(s_modbus_view.values[0],"37℃"));
+ assert(!strcmp(s_modbus_view.values[1],"-4℃") && !s_modbus_view.rows[6][0]);
+ save_frame("lvgl_detail_temperature");
+ user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_RIGHT);
+ assert(s_modbus_active && s_modbus_ui.detail==7);
+ assert(!strcmp(s_modbus_view.values[0],"宽电压范围") && !strcmp(s_modbus_view.values[2],"光伏与市电"));
+ save_frame("lvgl_detail_modes");
+ user_key(DIRECT_KEY_RIGHT);assert(s_modbus_active && s_modbus_ui.detail==7);
+ panel_store(&live,0x97,1050,live.now_ms);
+ panel_store(&live,0x98,210,live.now_ms);
+ for(unsigned i=7;i>2;i--)user_key(DIRECT_KEY_UP);
+ assert(s_modbus_ui.detail==2 && !strcmp(s_modbus_view.values[1],"10.50 A"));
+ assert(!strcmp(s_modbus_view.values[2],"210 W") && !s_modbus_view.rows[3][0]);
+ user_key(DIRECT_KEY_RIGHT);
  user_key(DIRECT_KEY_BACK);assert(s_modbus_ui.page==PANEL_PAGE_DETAIL_GROUPS&&s_modbus_ui.selected==3);
  user_key(DIRECT_KEY_BACK);assert(s_modbus_ui.page==PANEL_PAGE_DETAILS&&s_modbus_ui.detail==0);
  user_key(DIRECT_KEY_BACK);assert(!s_modbus_active&&s_ui.page==UI_HOME);
+ live.config.profile_override=PANEL_PROFILE_UNKNOWN;
+ const uint16_t detail_test_regs[]={0x330,0x331,0x140,0x142,0x143,0x97,0x98};
+ for(unsigned i=0;i<sizeof(detail_test_regs)/sizeof(*detail_test_regs);i++)panel_invalidate(&live,detail_test_regs[i]);
  user_key(DIRECT_KEY_LEFT);full_modbus_panel_tick();
  assert(s_modbus_ui.page==PANEL_PAGE_ALARMS&&strstr(s_modbus_view.rows[0],"尚未收到"));
  panel_store(&live,0x46,1U<<4,live.now_ms);
@@ -216,20 +335,41 @@ static void user_journey(void){
  user_key(DIRECT_KEY_BACK);assert(s_ui.page==UI_HOME);
  user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_ENTER);
  assert(s_modbus_ui.page==PANEL_PAGE_DETAIL_GROUPS&&s_modbus_root==PANEL_PAGE_DETAIL_GROUPS);
+ label_bounds("市电与负载",46);label_bounds("当前运行设置",175);
  save_frame("lvgl_detail_groups");
  const uint16_t grid_regs[]={0x50,0x51,0x52,0x53,0x58,0x5b,0x5e};
  const uint16_t grid_example[]={2310,610,5001,1385,2301,1080,1150};
  for(unsigned i=0;i<7;i++)panel_store(&live,grid_regs[i],grid_example[i],live.now_ms);
  user_key(DIRECT_KEY_ENTER);assert(s_modbus_view.detail_dashboard);
  save_frame("lvgl_detail_dashboard");
+ unsigned before_dashboard=flushed_pixels;
+ panel_lvgl_show_modbus(&s_modbus_view);panel_lvgl_refresh(live.now_ms,false);
+ assert(flushed_pixels==before_dashboard);
+ panel_store(&live,0x51,615,live.now_ms);full_modbus_panel_tick();
+ unsigned dashboard_pixels=flushed_pixels-before_dashboard;
+ assert(dashboard_pixels>0 && dashboard_pixels<=160*48);
+ label_bounds("6.15 A",104);
+ assert_clean_frame(live.now_ms);
+ printf("PASS dashboard: one reading flushes %u pixels, repeat flushes none\n",dashboard_pixels);
+ live.command_busy=true;full_modbus_panel_tick();
+ assert(label_bounds("其他操作进行中，可浏览或返回",29).y2<50);
+ label_bounds("1080 W",179);
+ assert_clean_frame(live.now_ms);
+ save_frame("lvgl_detail_dashboard_busy");
+ live.command_busy=false;full_modbus_panel_tick();
  user_key(DIRECT_KEY_BACK);
- user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_ENTER);assert(s_modbus_ui.detail==4);
+ user_key(DIRECT_KEY_RIGHT);assert(s_modbus_ui.selected==1);
+ user_key(DIRECT_KEY_DOWN);assert(s_modbus_ui.selected==3);
+ user_key(DIRECT_KEY_LEFT);assert(s_modbus_ui.selected==2);
+ user_key(DIRECT_KEY_UP);assert(s_modbus_ui.selected==0);
+ user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_DOWN);
+ user_key(DIRECT_KEY_ENTER);assert(s_modbus_ui.detail==4);
  user_key(DIRECT_KEY_BACK);user_key(DIRECT_KEY_BACK);assert(s_ui.page==UI_MENU&&s_ui.selected==0);
  user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_DOWN);
  user_key(DIRECT_KEY_ENTER);
  assert(s_ui.page==UI_SUBMENU&&s_ui.menu_selected==4);
  user_key(DIRECT_KEY_ENTER);assert(s_ui.page==UI_APPEARANCE);
- user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_LEFT);
+ user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_RIGHT);
  assert(backlight==90&&s_saved_display.brightness==100);
  fail_save=true;user_key(DIRECT_KEY_ENTER);
  assert(backlight==100&&s_ui.time_fields[0]==90&&!strcmp(s_ui.message,"Save failed / retry"));
@@ -238,13 +378,13 @@ static void user_journey(void){
  panel_lvgl_refresh(live.now_ms,false);save_frame("lvgl_appearance_retry");
  fail_save=false;user_key(DIRECT_KEY_ENTER);
  assert(backlight==90&&s_saved_display.brightness==90&&!strcmp(s_ui.message,"Appearance saved"));
- user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_RIGHT);
+ user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_LEFT);
  assert(s_ui.time_fields[2]==36&&saved_feedback.led_brightness==24);
- user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_RIGHT);
+ user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_LEFT);
  assert(s_ui.time_fields[3]==PANEL_BEEP_LONG&&saved_feedback.beep_mode==PANEL_BEEP_NORMAL);
  user_key(DIRECT_KEY_ENTER);
  assert(saved_feedback.led_brightness==36&&saved_feedback.beep_mode==PANEL_BEEP_LONG);
- user_key(DIRECT_KEY_RIGHT);assert(s_ui.time_fields[3]==PANEL_BEEP_OFF);
+ user_key(DIRECT_KEY_LEFT);assert(s_ui.time_fields[3]==PANEL_BEEP_OFF);
  user_key(DIRECT_KEY_BACK);assert(s_ui.page==UI_SUBMENU&&s_ui.selected==0);
  assert(saved_feedback.beep_mode==PANEL_BEEP_LONG);
  user_key(DIRECT_KEY_BACK);assert(s_ui.page==UI_MENU&&s_ui.selected==4);
@@ -252,6 +392,12 @@ static void user_journey(void){
  user_key(DIRECT_KEY_ENTER);
  assert(s_modbus_active&&s_modbus_ui.page==PANEL_PAGE_SETTING_GROUPS&&s_ui.selected==1);
  save_frame("lvgl_settings_groups");
+ const uint8_t group_keys[]={KEY_RETURN,KEY_ARROW_LEFT,KEY_UPWARD,KEY_DOWNWARD,KEY_ARROW_RIGHT,KEY_OPEN};
+ assert(!memcmp(s_modbus_view.key_labels,group_keys,sizeof(group_keys)));
+ user_key(DIRECT_KEY_RIGHT);assert(s_modbus_view.selected==1);
+ user_key(DIRECT_KEY_DOWN);assert(s_modbus_view.selected==4);
+ user_key(DIRECT_KEY_LEFT);assert(s_modbus_view.selected==3);
+ user_key(DIRECT_KEY_UP);assert(s_modbus_view.selected==0);
  user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_DOWN);
  assert(s_modbus_ui.page==PANEL_PAGE_SETTINGS && panel_setting(s_modbus_ui.selected)->address==0x4101);
  panel_store(&live,0x2a1,5000,live.now_ms);
@@ -263,13 +409,15 @@ static void user_journey(void){
  lv_obj_t *setting_value=find_label(lv_scr_act(),"50 Hz",0);
  assert(setting_label);
  assert(setting_value);
+ assert(strstr(s_modbus_view.subtitle,"在线") && find_label(lv_scr_act(),s_modbus_view.subtitle,29));
  assert(s_modbus_view.key_labels[KEY_ENTER]==KEY_EDIT);
- user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_RIGHT);
+ user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_LEFT);
  assert(s_modbus_ui.editing&&!s_modbus_ui.review);
  assert(!strcmp(s_modbus_view.values[1],"50 Hz")&&!strcmp(s_modbus_view.values[2],"60 Hz"));
  assert(s_modbus_view.setting_editor&&strstr(s_modbus_view.footer,"确认保存"));
- assert(s_modbus_view.key_labels[KEY_LEFT]==KEY_MINUS && s_modbus_view.key_labels[KEY_DOWN]==KEY_MINUS);
- assert(s_modbus_view.key_labels[KEY_RIGHT]==KEY_PLUS && s_modbus_view.key_labels[KEY_UP]==KEY_PLUS);
+ assert(s_modbus_view.key_labels[KEY_LEFT]==KEY_PLUS && s_modbus_view.key_labels[KEY_DOWN]==KEY_MINUS);
+ assert(s_modbus_view.key_labels[KEY_RIGHT]==KEY_MINUS && s_modbus_view.key_labels[KEY_UP]==KEY_PLUS);
+ assert(label_bounds("设置交流输出的额定频率",29).y2<58);
  save_frame("lvgl_editor");
  unsigned before=submits;
  live.now_ms+=PANEL_FRESH_MS+1;full_modbus_panel_tick();
@@ -277,24 +425,42 @@ static void user_journey(void){
  user_key(DIRECT_KEY_ENTER);assert(s_modbus_ui.blocked&&!s_modbus_ui.pending);
  panel_store(&live,0x42,3,live.now_ms);panel_store(&live,0x2a1,5000,live.now_ms);
  full_modbus_panel_tick();assert(!s_modbus_ui.blocked&&strstr(s_modbus_view.footer,"已恢复")&&submits==before);
- expected_address=0x4101;
- user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_ENTER);
- assert(submits==before+1&&s_modbus_ui.pending);
+ expected_address=0x4101;unsigned query_before_write=setting_queries;
+ user_key(DIRECT_KEY_ENTER);assert(s_modbus_ui.editing);
+ uint16_t initial_frequency=s_modbus_ui.draft;
+ user_key(DIRECT_KEY_UP);uint16_t adjusted_frequency=s_modbus_ui.draft;
+ assert(adjusted_frequency!=initial_frequency);
+ user_key(DIRECT_KEY_DOWN);assert(s_modbus_ui.draft==initial_frequency);
+ user_key(DIRECT_KEY_LEFT);assert(s_modbus_ui.draft==adjusted_frequency);
+ user_key(DIRECT_KEY_RIGHT);assert(s_modbus_ui.draft==initial_frequency);
+ assert(submits==before&&setting_queries==query_before_write);
+ user_key(DIRECT_KEY_UP);user_key(DIRECT_KEY_ENTER);
+ assert(submits==before+1&&s_modbus_ui.pending&&setting_queries==query_before_write);
+ assert(find_label(lv_scr_act(),"正在保存并检查结果",195));
+ assert(!find_label(lv_scr_act(),"调整后确认保存",0));
+ save_frame("lvgl_setting_pending");
  live.now_ms+=PANEL_FRESH_MS+1;
+ unsigned failed_sounds=sounds[PANEL_SOUND_ERROR];
  panel_result_record(&live,live.command_sequence,PANEL_WRITE_UNCERTAIN,0);full_modbus_panel_tick();
- assert(s_modbus_ui.have_result&&strstr(s_modbus_view.rows[2],"设置应答超时")&&(s_modbus_view.stale_rows&2));
+ assert(sounds[PANEL_SOUND_ERROR]==failed_sounds+1);
+ assert(s_modbus_ui.have_result&&strstr(s_modbus_view.rows[2],"设置结果未确认")&&!s_modbus_view.stale_rows);
  panel_store(&live,0x42,3,live.now_ms);panel_store(&live,0x2a1,5000,live.now_ms);
  full_modbus_panel_tick();
- assert(s_modbus_ui.have_result&&strstr(s_modbus_view.rows[2],"目标不一致")&&submits==before+1);
+ assert(sounds[PANEL_SOUND_ERROR]==failed_sounds+1);
+ assert(s_modbus_ui.have_result&&strstr(s_modbus_view.rows[2],"设置结果未确认")&&submits==before+1);
+ assert(setting_queries==query_before_write);
  user_key(DIRECT_KEY_ENTER);
- user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_ENTER);
+ user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_LEFT);user_key(DIRECT_KEY_ENTER);
  assert(submits==before+2&&s_modbus_ui.pending);
  panel_result_record(&live,live.command_sequence,PANEL_WRITE_REJECTED,3);full_modbus_panel_tick();
+ assert(sounds[PANEL_SOUND_ERROR]==failed_sounds+2);
  assert(s_modbus_ui.have_result&&strstr(s_modbus_view.rows[3],"拒绝"));
  user_key(DIRECT_KEY_ENTER);assert(!s_modbus_ui.have_result&&submits==before+2);
- user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_ENTER);
+ user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_LEFT);user_key(DIRECT_KEY_ENTER);
  panel_store(&live,0x2a1,6000,live.now_ms);
+ unsigned success_sounds=sounds[PANEL_SOUND_SUCCESS];
  panel_result_record(&live,live.command_sequence,PANEL_WRITE_CONFIRMED,0);full_modbus_panel_tick();
+ assert(sounds[PANEL_SOUND_SUCCESS]==success_sounds+1);
  assert(submits==before+3&&s_modbus_ui.have_result&&strstr(s_modbus_view.rows[2],"设置已生效"));
  user_key(DIRECT_KEY_ENTER);user_key(DIRECT_KEY_BACK);
  assert(s_modbus_active&&s_modbus_ui.page==PANEL_PAGE_SETTING_GROUPS&&s_modbus_ui.selected==1);
@@ -303,7 +469,8 @@ static void user_journey(void){
  assert(!panel_ui_can_exit(&s_modbus_ui,&s_modbus_snapshot,s_modbus_root));
  user_key(DIRECT_KEY_BACK);
  assert(s_modbus_active&&s_modbus_ui.page==PANEL_PAGE_SETTING_GROUPS&&s_modbus_ui.selected==2);
- user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_RIGHT);user_key(DIRECT_KEY_ENTER);
+ user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_DOWN);user_key(DIRECT_KEY_LEFT);user_key(DIRECT_KEY_LEFT);
+ user_key(DIRECT_KEY_ENTER);
  assert(s_modbus_ui.page==PANEL_PAGE_SETTINGS&&strstr(s_modbus_view.title,"系统功能"));
  assert(panel_setting(s_modbus_ui.selected)->address==0x4123);
  user_key(DIRECT_KEY_BACK);user_key(DIRECT_KEY_BACK);
@@ -340,11 +507,22 @@ int main(void){
  assert(!s_modbus_drawn);
  full_modbus_panel_tick();assert(flushed_pixels>=after_error+320*240 && s_modbus_drawn);
  unsigned stable=bands;full_modbus_panel_tick();assert(bands==stable);
- press(DIRECT_KEY_ENTER);assert(s_modbus_ui.review && submits==0);
+ assert(s_modbus_view.key_labels[KEY_ENTER]==KEY_REVIEW);save_frame("lvgl_power_choices");
+ next_key=DIRECT_KEY_ENTER;following_key=DIRECT_KEY_ENTER;following_key_stamp=live.now_ms;
+ full_modbus_panel_tick();assert(s_modbus_ui.review && s_modbus_drawn && submits==0);
+ label_bounds("关闭逆变器",53);label_bounds("关闭后负载可能断电",138);
+ assert(s_modbus_view.key_labels[KEY_ENTER]==KEY_SEND && s_modbus_view.key_labels[KEY_BACK]==KEY_CANCEL);
+ assert(!find_label(lv_scr_act(),"开启逆变器",29));
+ save_frame("lvgl_power_review");
  unsigned review_strips=bands-stable;
  assert(review_strips>0);
+ live.now_ms+=20;full_modbus_panel_tick();assert(s_modbus_ui.review && submits==0);
  press(DIRECT_KEY_BACK);assert(!s_modbus_ui.review && s_modbus_active && submits==0);
- press(DIRECT_KEY_ENTER);press(DIRECT_KEY_ENTER);assert(submits==1 && s_modbus_ui.pending);
+ fail_band=true;next_key=DIRECT_KEY_ENTER;following_key=DIRECT_KEY_ENTER;following_key_stamp=live.now_ms;
+ full_modbus_panel_tick();assert(s_modbus_ui.review && submits==0 && !s_modbus_drawn);
+ live.now_ms+=20;full_modbus_panel_tick();assert(s_modbus_ui.review && submits==0 && s_modbus_drawn);
+ live.now_ms+=20;press(DIRECT_KEY_ENTER);assert(submits==1 && s_modbus_ui.pending);
+ label_bounds("关闭逆变器",53);label_bounds("正在检测输出电压",195);
  unsigned pending_pixels=flushed_pixels;
  assert(s_modbus_view.activity_frame!=0);
  live.now_ms+=110;full_modbus_panel_tick();
@@ -353,13 +531,13 @@ int main(void){
  press(DIRECT_KEY_ENTER);press(DIRECT_KEY_BACK);assert(submits==1 && s_modbus_active);
  panel_result_record(&live,41,PANEL_WRITE_CONFIRMED,0);full_modbus_panel_tick();assert(!s_modbus_ui.pending);
  assert(s_modbus_view.result && s_modbus_view.activity_frame==0);
+ label_bounds("关机成功",106);label_bounds("已通过输出电压确认",171);
  live.now_ms+=120;full_modbus_panel_tick();
  save_frame("lvgl_result");
  press(DIRECT_KEY_BACK);assert(s_modbus_active && !s_modbus_ui.have_result);
  press(DIRECT_KEY_BACK);assert(!s_modbus_active && s_ui.dirty && !s_have_previous);
  s_modbus_active=true;bus_unavailable=true;full_modbus_panel_tick();
  assert(!panel_online(&s_modbus_snapshot));press(DIRECT_KEY_BACK);assert(!s_modbus_active&&submits==1);
- assert(atomic_load(&s_panel_key_events)==notes);
  user_journey();
  /* Capture the real voltage editor and truthful mismatched readback result. */
  panel_ui_t voltage_ui;panel_ui_init(&voltage_ui);
@@ -371,8 +549,9 @@ int main(void){
  panel_store(&live,0x177,564,live.now_ms);
  panel_view_t voltage_view;panel_ui_view(&voltage_ui,&live,&voltage_view);
  assert(voltage_view.setting_editor&&!strcmp(voltage_view.values[1],"56.4 V"));
- assert(voltage_view.key_labels[KEY_LEFT]==KEY_MINUS && voltage_view.key_labels[KEY_RIGHT]==KEY_PLUS);
+ assert(voltage_view.key_labels[KEY_LEFT]==KEY_PLUS && voltage_view.key_labels[KEY_RIGHT]==KEY_MINUS);
  assert(voltage_view.key_labels[KEY_DOWN]==KEY_FAST_DOWN && voltage_view.key_labels[KEY_UP]==KEY_FAST_UP);
+ assert(!strcmp(voltage_view.rows[4],"左加右减，上加下减快调"));
  panel_lvgl_show_modbus(&voltage_view);panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_voltage_editor");
  lv_area_t cn=label_bounds(voltage_view.rows[1],45),dn=label_bounds(voltage_view.rows[2],45);
  lv_area_t cv=label_bounds(voltage_view.values[1],80),dv=label_bounds(voltage_view.values[2],80);
@@ -381,14 +560,48 @@ int main(void){
  assert(cn.y2<cv.y1 && dn.y2<dv.y1);
  voltage_view.theme_light=true;panel_lvgl_show_modbus(&voltage_view);
  panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_voltage_editor_light");
+ panel_ui_t paging_ui;panel_ui_init(&paging_ui);
+ paging_ui.page=PANEL_PAGE_SETTINGS;
+ panel_snapshot_t settings_live=live;settings_live.config.profile_override=PANEL_PROFILE_6KU;
+ panel_view_t settings_view;
+ paging_ui.selected=6;
+ assert(panel_ui_view(&paging_ui,&settings_live,&settings_view));
+ panel_lvgl_show_modbus(&settings_view);panel_lvgl_refresh(live.now_ms,true);
+ char page_counter[24];
+ snprintf(page_counter,sizeof(page_counter),"2/%u",(unsigned)(panel_setting_count()+4)/5);
+ assert(label_bounds(page_counter,0).x1>=242);
+ save_frame("lvgl_setting_page_counter");
+ paging_ui.selected=(uint16_t)(panel_setting_find(0x4102)-panel_setting(0));
+ paging_ui.editing=true;paging_ui.draft=3;
+ assert(panel_store(&settings_live,0x142,2,settings_live.now_ms));
+ assert(panel_ui_view(&paging_ui,&settings_live,&settings_view));
+ panel_lvgl_show_modbus(&settings_view);panel_lvgl_refresh(live.now_ms,true);
+ assert(label_bounds("发电机优先，不向市电回馈",29).y2<58);
+ label_bounds("MKS",80);
+ save_frame("lvgl_output_priority_mks");
+ for(unsigned i=0;i<panel_setting_count();i++){
+   paging_ui.selected=i;
+   for(unsigned draft=0;draft<=3;draft++){
+     paging_ui.draft=draft;
+     assert(panel_ui_view(&paging_ui,&settings_live,&settings_view));
+     const char *help=settings_view.subtitle;assert(*help);
+     while(*help)assert(direct_gfx_has_glyph(direct_gfx_utf8_next(&help)));
+   }
+ }
 
- panel_ui_t more;panel_ui_init(&more);more.page=PANEL_PAGE_SETTING_GROUPS;more.selected=6;
- panel_view_t more_view;panel_ui_view(&more,&live,&more_view);panel_lvgl_show_modbus(&more_view);
- panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_settings_groups_more");
- more.language_en=true;panel_ui_view(&more,&live,&more_view);panel_lvgl_show_modbus(&more_view);
- panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_settings_groups_more_en");
- more_view.theme_light=true;panel_lvgl_show_modbus(&more_view);
- panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_settings_groups_more_light");
+ panel_ui_t groups;panel_ui_init(&groups);groups.page=PANEL_PAGE_SETTING_GROUPS;groups.selected=8;
+ panel_view_t groups_view;panel_ui_view(&groups,&live,&groups_view);panel_lvgl_show_modbus(&groups_view);
+ panel_lvgl_refresh(live.now_ms,true);
+ for(unsigned i=0;i<PANEL_SETTING_GROUPS;i++){
+  int x=8+(int)(i%3)*104,y=52+(int)(i/3)*55;
+  lv_area_t area=label_bounds(panel_setting_group_name(i),y);
+  assert(area.x1>=x && area.x2<x+96 && area.y2<y+50);
+  assert(sprite_colors((unsigned)x+35,(unsigned)y+2,26,26)>2);
+ }
+ groups.language_en=true;panel_ui_view(&groups,&live,&groups_view);panel_lvgl_show_modbus(&groups_view);
+ panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_settings_groups_en");
+ groups_view.theme_light=true;panel_lvgl_show_modbus(&groups_view);
+ panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_settings_groups_light");
 
 
  panel_ui_t power_en;panel_ui_init(&power_en);
@@ -405,7 +618,8 @@ int main(void){
  panel_lvgl_show_modbus(&voltage_view);panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_output_editor");
  voltage_ui.have_result=true;voltage_ui.result_address=0x410a;
  voltage_ui.result_value=552;voltage_ui.result_profile=PANEL_PROFILE_6KU;
- voltage_ui.last_result=PANEL_WRITE_PROCESSED;panel_store(&live,0x177,540,live.now_ms);
+ voltage_ui.last_result=PANEL_WRITE_PROCESSED;voltage_ui.result_readback_valid=true;voltage_ui.result_readback=540;
+ panel_store(&live,0x177,552,live.now_ms);
  panel_ui_view(&voltage_ui,&live,&voltage_view);
  assert(voltage_view.alert&&!strcmp(voltage_view.values[1],"54.0 V"));
  panel_lvgl_show_modbus(&voltage_view);panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_mismatch");
@@ -432,6 +646,23 @@ int main(void){
  assert(voltage_view.footer_notice && voltage_view.key_labels[KEY_ENTER]==KEY_INFO);
  assert(strstr(voltage_view.footer,"仅可读取"));
  panel_lvgl_show_modbus(&voltage_view);panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_setting_info");
+ panel_ui_t charge_ui;panel_ui_init(&charge_ui);charge_ui.page=PANEL_PAGE_SETTINGS;charge_ui.setting_group=2;
+ charge_ui.selected=(uint16_t)(panel_setting_find(0x4124)-panel_setting(0));
+ panel_ui_view(&charge_ui,&live,&voltage_view);
+ panel_lvgl_show_modbus(&voltage_view);panel_lvgl_refresh(live.now_ms,true);
+ label_bounds("此机型未定义充电开关",195);save_frame("lvgl_charge_reserved");
+ panel_command_t charge_command;
+ assert(!panel_ui_key(&charge_ui,DIRECT_KEY_ENTER,&live,&charge_command) && charge_ui.blocked);
+ panel_ui_view(&charge_ui,&live,&voltage_view);
+ panel_lvgl_show_modbus(&voltage_view);panel_lvgl_refresh(live.now_ms,true);
+ label_bounds("仅 3KU 协议定义此开关",150);save_frame("lvgl_charge_reserved_info");
+ read_only.detected_profile=PANEL_PROFILE_3KU;
+ charge_ui.blocked=false;
+ assert(!panel_ui_key(&charge_ui,DIRECT_KEY_ENTER,&read_only,&charge_command) && charge_ui.editing);
+ assert(!panel_ui_key(&charge_ui,DIRECT_KEY_LEFT,&read_only,&charge_command));
+ panel_ui_view(&charge_ui,&read_only,&voltage_view);
+ panel_lvgl_show_modbus(&voltage_view);panel_lvgl_refresh(live.now_ms,true);
+ label_bounds("关闭后停止电池充电",29);label_bounds("允许充电",59);save_frame("lvgl_charge_3ku");
  panel_view_t glyph_view={.selected=-1};
  snprintf(glyph_view.title,sizeof(glyph_view.title),"电压，电流，状态");
  snprintf(glyph_view.rows[0],sizeof(glyph_view.rows[0]),"电压，电流，状态");
@@ -439,12 +670,24 @@ int main(void){
  snprintf(glyph_view.rows[1],sizeof(glyph_view.rows[1]),"已断联，上次数据");
  panel_lvgl_show_modbus(&glyph_view);panel_lvgl_refresh(live.now_ms,true);save_frame("lvgl_font_alignment");
  user_key(DIRECT_KEY_DOWN);full_modbus_panel_tick();
+ assert(s_modbus_active && s_modbus_ui.page==PANEL_PAGE_DETAILS && s_modbus_ui.detail==0);
  unsigned frames=atomic_load(&s_panel_frames);
  unsigned previous_inversion_commands=inversion_commands;
  s_lcd_test_inverted=false;s_modbus_drawn=false;
- next_key=DIRECT_KEY_DOWN;following_key=DIRECT_KEY_DOWN;
+ next_key=DIRECT_KEY_RIGHT;following_key=DIRECT_KEY_DOWN;
  full_modbus_panel_tick();
  assert(!next_key && s_modbus_ui.detail==2 && atomic_load(&s_panel_frames)==frames+1);
+ const uint8_t page_directions[]={DIRECT_KEY_UP,DIRECT_KEY_LEFT,DIRECT_KEY_DOWN,DIRECT_KEY_RIGHT};
+ for(unsigned i=0;i<sizeof(page_directions);i++){
+  s_modbus_ui.detail=3;
+  next_key=page_directions[i];following_key=page_directions[i];following_repeated=true;
+  full_modbus_panel_tick();
+  assert(!next_key && s_modbus_ui.detail==(i<2?2:4));
+  live.now_ms+=250;
+  next_key=page_directions[i];next_repeated=true;
+  full_modbus_panel_tick();
+  assert(s_modbus_ui.detail==(i<2?2:4));
+ }
  assert(inversion_commands==previous_inversion_commands+1 && last_inversion_command==0x21 && s_lcd_test_inverted);
  direct_ui_view_t view;direct_ui_init(&s_ui);
  s_ui_data.language_zh=true;s_ui_data.theme_light=false;s_ui_data.dsp_online=true;
@@ -465,6 +708,7 @@ int main(void){
  label_bounds("逆变器",190);
  lv_area_t pv_name=label_bounds("光伏",0),pv_power=label_bounds("4200W",0),pv_voltage=label_bounds("368V",0);
  lv_area_t load_name=label_bounds("负载",120),load_power=label_bounds("3200W",120),load_voltage=label_bounds("230V",120);
+ assert(lv_font_get_line_height(lv_obj_get_style_text_font(find_label(lv_scr_act(),"4200W",0),0))==28);
  assert(pv_name.y1<pv_power.y1 && pv_power.y1<pv_voltage.y1);
  assert(load_name.y1<load_power.y1 && load_power.y1<load_voltage.y1);
  assert(pv_name.x1==load_name.x1 && pv_power.x1==load_power.x1);
@@ -473,6 +717,8 @@ int main(void){
  unsigned menu_hint_pixels=0;
  for(unsigned y=220;y<240;y++)for(unsigned x=267;x<320;x++)menu_hint_pixels+=framebuffer[y*320+x]!=lv_color_hex(0x101113).full;
  assert(menu_hint_pixels>40);
+ assert(framebuffer[233*320+53]==lv_color_hex(0x101113).full);
+ assert(framebuffer[222*320+271]==lv_color_hex(0x101113).full);
  puts("PASS LVGL alignment: home titles, power and voltage form four aligned cards");
  RunParamDef measured_home=s_ui_data.run;
  s_ui_data.run.BatChgCurr=s_ui_data.run.BatDischgCurr=0;
@@ -504,6 +750,18 @@ int main(void){
  live.now_ms+=90;
  panel_lvgl_refresh(live.now_ms+90,false);
  assert(flushed_pixels==held_pixels);
+ panel_lvgl_show_local(&s_ui,&s_ui_data,&view,NULL,NULL,false,false);
+ panel_lvgl_refresh(live.now_ms+90,false);
+ assert(flushed_pixels==held_pixels);
+ s_ui_data.run.Ppv=4300;
+ panel_lvgl_show_local(&s_ui,&s_ui_data,&view,NULL,NULL,false,false);
+ panel_lvgl_refresh(live.now_ms+90,false);
+ label_bounds("4300W",35);
+ unsigned telemetry_pixels=flushed_pixels-held_pixels;
+ assert(telemetry_pixels>0 && telemetry_pixels<=112*56);
+ assert_clean_frame(live.now_ms+90);
+ printf("PASS held home: one power change flushes %u pixels, repeat flushes none\n",telemetry_pixels);
+ s_ui_data.run.Ppv=4200;
  s_ui_data.bms_online=true;s_ui_data.bms.soc_percent=73;s_ui_data.bms.voltage_10mv=5230;
  panel_lvgl_show_local(&s_ui,&s_ui_data,&view,NULL,NULL,false,false);
  panel_lvgl_refresh(live.now_ms+90,false);
@@ -517,6 +775,7 @@ int main(void){
  panel_lvgl_refresh(live.now_ms+90,false);
  label_bounds("电网馈电",30);label_bounds("-1800W",30);
  s_ui_data.run.ACInWatt=1800;
+ partial_home(live.now_ms+90);
  s_ui_data.theme_light=false;
  s_ui.page=UI_BMS;
  s_ui_data.inverter_battery=(direct_inverter_battery_t){.valid=7,.online=true,.values={521,(uint16_t)-16,64}};
@@ -571,6 +830,18 @@ int main(void){
  assert(flushed_pixels>soc_start && flushed_pixels-soc_start<320*90);
  printf("PASS battery refresh: %u pixels on SOC change, complete page transitions\n",flushed_pixels-soc_start);
  assert_clean_frame(live.now_ms+131);
+ s_ui_data.bms.soc_percent=1000;
+ direct_ui_build(&s_ui,&s_ui_data,&view);
+ panel_lvgl_show_local(&s_ui,&s_ui_data,&view,NULL,NULL,false,false);
+ panel_lvgl_refresh(live.now_ms+132,true);
+ lv_obj_t *full_soc=find_label(lv_scr_act(),"100%",0);
+ assert(full_soc);
+ const lv_font_t *soc_font=lv_obj_get_style_text_font(full_soc,0);
+ lv_point_t soc_size;
+ lv_txt_get_size(&soc_size,"100%",soc_font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+ assert(lv_font_get_line_height(soc_font)==36 && soc_size.x<=lv_obj_get_width(full_soc));
+ assert(framebuffer[62*320+111]==lv_color_hex(0x101113).full);
+ save_frame("lvgl_bms_full");
  unsigned battery_submits=submits;
  s_modbus_active=false; /* Render fixtures above set local pages directly. */
  user_key(DIRECT_KEY_ENTER);
@@ -715,7 +986,7 @@ path=root/'tmp/native_runtime_test.c';path.write_text(test,encoding='utf-8')
 shared=root.parent/'esp32_direct/main/direct'
 lvgl=root/'components/lvgl__lvgl'
 conf=root/'full/lv_conf.h'
-obj_dir=root/'tmp/lvgl_host'
+obj_dir=root/'tmp'/('lvgl_host' if sys.platform=='win32' else f'lvgl_host_{sys.platform}')
 obj_dir.mkdir(exist_ok=True)
 lvgl_flags=['-I'+str(lvgl),'-DPANEL_LVGL_HOST_TEST=1','-DLV_CONF_PATH='+conf.as_posix()]
 def compile_lvgl(source):
@@ -730,9 +1001,47 @@ subprocess.run([sys.argv[1],'-std=c11','-Wall','-Wextra','-Werror','-Wno-mislead
  *lvgl_flags,'-I'+str(shared.parent/'onboarding'),'-I'+str(root.parent/'esp32_direct/components/qrcodegen'),
  '-I'+str(root/'main'),'-I'+str(root/'full'),'-I'+str(shared),'-I'+str(shared.parent/'ota'),
  '-I'+str(shared.parent/'telemetry'),str(path),str(root/'main/panel_ui.c'),str(root/'main/panel_locale.c'),
- str(root/'main/panel_model.c'),str(root/'main/panel_catalog.c'),str(shared/'direct_gfx.c'),
+ str(root/'main/panel_model.c'),str(root/'main/panel_catalog.c'),str(root/'full/full_modbus_map.c'),str(shared/'direct_gfx.c'),
  str(root/'main/panel_fonts.c'),str(root/'main/panel_display_settings.c'),str(root/'full/direct_ui.c'),
  str(root/'full/panel_lvgl.c'),str(root/'full/panel_home_art.c'),str(root/'full/direct_ui_locale.c'),str(shared/'direct_home.c'),str(shared/'direct_boot_logo.c'),
  str(shared.parent/'onboarding/onboarding_qr.c'),str(root.parent/'esp32_direct/components/qrcodegen/qrcodegen.c'),
  *map(str,objects),'-o',str(exe)],check=True)
 subprocess.run([str(exe)],cwd=root,check=True)
+
+# Check the icon pixels after LVGL applies the palette and converts to RGB565.
+encoding, dimensions, depth, pixels = (root/'tmp/lvgl_settings_groups_light.ppm').read_bytes().split(b'\n', 3)
+assert (encoding, dimensions, depth) == (b'P6', b'320 240', b'255')
+
+
+def pixel(x, y):
+    start = (y * 320 + x) * 3
+    return pixels[start:start+3]
+
+
+def luminance(color):
+    channels = (channel / 255 for channel in color)
+    linear = (c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055)**2.4 for c in channels)
+    return sum(weight * c for weight, c in zip((0.2126, 0.7152, 0.0722), linear))
+
+
+def contrast(first, second):
+    dark, light = sorted((luminance(first), luminance(second)))
+    return (light + 0.05) / (dark + 0.05)
+
+
+selected_background = pixel(8 + 2 * 104 + 35, 52 + 2 * 55 + 2)
+silhouettes = []
+for index in range(9):
+    x, y = 8 + index % 3 * 104 + 35, 52 + index // 3 * 55 + 2
+    background = pixel(x, y)
+    colors = {pixel(x + col, y + row) for row in range(26) for col in range(26)} - {background}
+    assert colors, f'Settings icon {index + 1} is empty'
+    minimum = min(contrast(color, fill) for color in colors for fill in (background, selected_background))
+    assert minimum >= 3, f'Settings icon {index + 1} has only {minimum:.2f}:1 contrast on light tiles'
+    silhouettes.append({(col, row) for row in range(26) for col in range(26)
+                        if pixel(x + col, y + row) != background})
+
+parallel, dual_output = silhouettes[7:9]
+assert len(parallel & dual_output) * 4 < len(parallel | dual_output) * 3, \
+    'Parallel and dual output must have visibly different silhouettes'
+print('PASS settings icons: light-tile contrast and distinct parallel/dual-output silhouettes')

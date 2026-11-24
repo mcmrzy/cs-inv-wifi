@@ -37,6 +37,7 @@
 #include "arm_poll.h"
 #include "direct_link.h"
 #include "full_write_result.h"
+#include "full_modbus_map.h"
 #include "mqtt_handler.h"
 #include "cs_protocol_defs.h"
 #include "telemetry.h"
@@ -52,7 +53,14 @@ typedef struct {
     uint16_t    scale;  /* 值缩放: 实际写入 = value * scale */
 } cmd_map_t;
 
+static const cmd_map_t s_ac_on = { "ac_on", FULL_MB_AC_POWER_INDEX, 1 };
+static const cmd_map_t s_ac_off = { "ac_off", FULL_MB_AC_POWER_INDEX, 1 };
+
 static const cmd_map_t s_cmd_map[] = {
+    { "set_modbus_power_saving", FULL_MB_POWER_SAVING, 1 },
+    { "set_modbus_auto_frequency", FULL_MB_AUTO_FREQUENCY, 1 },
+    { "set_modbus_battery_open_alarm", FULL_MB_BATTERY_OPEN_ALARM, 1 },
+    { "set_modbus_inverter_mute", FULL_MB_INVERTER_MUTE, 1 },
     /* V2.1: 与 config 上报的 42 个键及云端 command_code 保持一致。 */
     { "set_output_priority",       INDEX_OUTPUT_PRIORITY,         1   },
     { "set_max_charge_current",    INDEX_MAX_CHARGE_CURRENT_ALL,  10  },
@@ -70,6 +78,7 @@ static const cmd_map_t s_cmd_map[] = {
     { "set_charge_priority",       INDEX_BAT_CHARGE_PRIORITY,     1   },
     { "set_alarm_control",         INDEX_ALARM_CONTROL,           1   },
     { "set_backlight_ctrl",        INDEX_BACKLIGHT_CTRL,          1   },
+    { "set_modbus_input_change_alarm", INDEX_POWER_SHUTDOWN_ALARM, 1 },
     { "set_power_shutdown_alarm", INDEX_POWER_SHUTDOWN_ALARM,    1   },
     { "set_overload_use_city_power", INDEX_OVERLOAD_USE_CITY_POWER, 1 },
     { "set_max_discharge_current", INDEX_PARA_MAX_DISCHG_CURR,   10  },
@@ -163,7 +172,7 @@ static const cmd_map_t s_cmd_map[] = {
 #define CLOUD_CMD_MAX 47
 /* Scalar receipts only: escaped command/task IDs plus <=128 bytes of extras. */
 #define CLOUD_RESPONSE_SIZE 512
-typedef enum {CLOUD_ACK, CLOUD_COMPLETED, CLOUD_FAILED, CLOUD_SUBMITTED, CLOUD_DEBUG} cloud_stage_t;
+typedef enum {CLOUD_ACK, CLOUD_COMPLETED, CLOUD_FAILED, CLOUD_SUBMITTED, CLOUD_DEBUG, CLOUD_APPLIED} cloud_stage_t;
 typedef struct {
     const char *result; /* Internal static result strings only. */
     int err;
@@ -234,7 +243,7 @@ static void send_receipt(const char *cmd, const char *task_id,
     char escaped_cmd[CLOUD_CMD_MAX * 2 + 1];
     char escaped_task[CLOUD_TASK_MAX * 2 + 1];
     char body[CLOUD_RESPONSE_SIZE];
-    static const char *const stages[]={"acknowledged","completed","failed","submitted","completed"};
+    static const char *const stages[]={"acknowledged","completed","failed","submitted","completed","applied"};
     if (!escape_json_string(escaped_cmd, sizeof(escaped_cmd), cmd) ||
         !escape_json_string(escaped_task, sizeof(escaped_task), task_id)) return;
     int n = snprintf(body, sizeof(body),
@@ -251,6 +260,8 @@ static void send_receipt(const char *cmd, const char *task_id,
         else
             snprintf(extras,sizeof(extras),",\"submitted_args\":[%.17g]",receipt->value);
     }
+    else if(receipt->stage==CLOUD_APPLIED)
+        snprintf(extras,sizeof(extras),",\"applied_args\":[%.17g],\"reported_revision\":%lu",receipt->value,(unsigned long)receipt->revision);
     else if(receipt->stage==CLOUD_DEBUG)
         snprintf(extras,sizeof(extras),",\"effective_interval_seconds\":%lu,\"expires_at\":%lld",(unsigned long)receipt->effective,(long long)receipt->expires_at);
     if (extras[0] && strlen(extras) + (size_t)n < sizeof(body)) {
@@ -268,7 +279,9 @@ static void send_receipt(const char *cmd, const char *task_id,
         }
         portEXIT_CRITICAL(&s_cloud_lock);
     }
-    mqtt_publish(PROTO_TOPIC_CMD_RESP,body,0,1,0);
+    if(!strcmp(cmd,PROTO_CMD_QUERY_CONFIG))
+        ESP_LOGW(TAG,"query_config response task=%s result=%s err=%d",escaped_task,receipt->result,receipt->err);
+    mqtt_publish_volatile(PROTO_TOPIC_CMD_RESP,body,0,1);
 }
 
 
@@ -290,7 +303,7 @@ static void send_response_submitted(const char *cmd, double value, const char *t
         arm_poll_give_param();
     }
 
-    cloud_receipt_t receipt={.result=PROTO_ERR_OK,.stage=CLOUD_SUBMITTED,.value=value,.revision=rev};
+    cloud_receipt_t receipt={.result=PROTO_ERR_OK,.stage=confirmed?CLOUD_APPLIED:CLOUD_SUBMITTED,.value=value,.revision=rev};
     send_receipt(cmd,task_id,&receipt,true);
 }
 
@@ -468,7 +481,17 @@ static void on_arm_write_done(uint8_t cmd, uint16_t param1, uint16_t param2,
     }
     if (cloud_finished.active) {
         pending_cmd_t finished = cloud_finished;
-        if (err == FULL_WRITE_PROTOCOL_ACCEPTED) {
+        if (finished.addr == FULL_MB_AC_POWER_INDEX) {
+            if (err == 0) {
+                send_response(finished.cmd, PROTO_ERR_OK, 0, finished.task_id);
+                telemetry_request_heartbeat();
+            } else {
+                bool unconfirmed = err == FULL_WRITE_UNCONFIRMED ||
+                                   err == FULL_WRITE_PROTOCOL_ACCEPTED;
+                send_response(finished.cmd, unconfirmed ? "VALUE_UNCONFIRMED" : PROTO_ERR_EXEC_FAILED,
+                              err, finished.task_id);
+            }
+        } else if (err == FULL_WRITE_PROTOCOL_ACCEPTED) {
             /* The existing submitted stage records intent without claiming
              * application or publishing a synthetic reported value. */
             send_response_submitted(finished.cmd, finished.value, finished.task_id, false);
@@ -498,22 +521,9 @@ static bool scalar_raw(const cmd_map_t *entry,double value,uint16_t *out)
     return true;
 }
 
-static void handle_cmd(const char *cmd_name, double value, const char *task_id)
+static void handle_cmd(const cmd_map_t *entry, double value, const char *task_id)
 {
-    const cmd_map_t *entry = NULL;
-    int i;
-    for (i = 0; i < (int)CMD_MAP_SIZE; i++) {
-        if (strcmp(s_cmd_map[i].name, cmd_name) == 0) {
-            entry = &s_cmd_map[i];
-            break;
-        }
-    }
-    if (!entry) {
-        ESP_LOGW(TAG, "unknown cmd: %s", cmd_name);
-        send_response(cmd_name, PROTO_ERR_NOT_SUPPORTED, -4, task_id);
-        return;
-    }
-
+    const char *cmd_name = entry->name;
     uint16_t raw;
     if (!scalar_raw(entry,value,&raw)) {
         ESP_LOGW(TAG, "cmd %s value out of range: %f", cmd_name, value);
@@ -754,6 +764,8 @@ static void process_cloud_command(const char *payload,unsigned int len,bool reta
                !strcmp(jcmd->valuestring,PROTO_CMD_QUERY_INFO) ||
                !strcmp(jcmd->valuestring,PROTO_CMD_QUERY_CONFIG) ||
                !strcmp(jcmd->valuestring,"get_battery_config");
+    if(!strcmp(jcmd->valuestring,PROTO_CMD_QUERY_CONFIG))
+        ESP_LOGW(TAG,"query_config received task=%s retained=%u",task_id,(unsigned)retained);
     if(retained && !query){
         portENTER_CRITICAL(&s_cloud_lock);s_cloud_stats.retained_rejected++;portEXIT_CRITICAL(&s_cloud_lock);
         cloud_receipt_t rejected={.result="RETAINED_REJECTED",.err=-9,.stage=CLOUD_FAILED};
@@ -769,6 +781,21 @@ static void process_cloud_command(const char *payload,unsigned int len,bool reta
         send_receipt(jcmd->valuestring,task_id,&rejected,false);
         cJSON_Delete(root);return;
     }
+    const cmd_map_t *power = NULL;
+    if (!strcmp(jcmd->valuestring, s_ac_on.name)) power = &s_ac_on;
+    if (!strcmp(jcmd->valuestring, s_ac_off.name)) power = &s_ac_off;
+    if (power) {
+        const cJSON *args = cJSON_GetObjectItemCaseSensitive(root, "args");
+        if (!task_id[0] || cJSON_GetObjectItemCaseSensitive(root, "value") ||
+            cJSON_GetObjectItemCaseSensitive(root, "param") ||
+            (args && (!cJSON_IsArray(args) || cJSON_GetArraySize(args) != 0))) {
+            cloud_receipt_t rejected={.result=PROTO_ERR_INVALID_ARGS,.err=-2,.stage=CLOUD_FAILED};
+            send_receipt(jcmd->valuestring,task_id,&rejected,false);
+            cJSON_Delete(root);
+            return;
+        }
+    }
+
     unsigned char digest[32]={0};
     if(task_id[0]){
         if(!cloud_digest(jcmd->valuestring,root,jval,digest)){
@@ -778,6 +805,13 @@ static void process_cloud_command(const char *payload,unsigned int len,bool reta
         if(cloud_replay(jcmd->valuestring,task_id,digest)){cJSON_Delete(root);return;}
     }
     if (!command_deadline_valid(root, jcmd->valuestring, task_id)) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (power) {
+        if (cloud_admit(power->name, task_id, digest))
+            handle_cmd(power, power == &s_ac_on ? 1 : 2, task_id);
         cJSON_Delete(root);
         return;
     }
@@ -815,7 +849,7 @@ static void process_cloud_command(const char *payload,unsigned int len,bool reta
     if(!entry)send_response(jcmd->valuestring,PROTO_ERR_NOT_SUPPORTED,-4,task_id);
     else if(!scalar_raw(entry,jval->valuedouble,NULL))
         send_response(jcmd->valuestring,"OUT_OF_RANGE",-5,task_id);
-    else if(cloud_admit(jcmd->valuestring,task_id,digest))handle_cmd(jcmd->valuestring, jval->valuedouble, task_id);
+    else if(cloud_admit(jcmd->valuestring,task_id,digest))handle_cmd(entry, jval->valuedouble, task_id);
     cJSON_Delete(root);
 }
 

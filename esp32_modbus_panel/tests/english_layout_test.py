@@ -21,9 +21,19 @@ static void check_labels(lv_obj_t *obj){
    fprintf(stderr,"ELLIPSIS view=%u %s\n",views,s);failures++;
   }
   const lv_font_t *font=lv_obj_get_style_text_font(obj,0);
-  lv_txt_get_size(&needed,s,font,lv_obj_get_style_text_letter_space(obj,0),0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
-  if(*s && needed.x>lv_obj_get_width(obj)){
-   fprintf(stderr,"CLIP view=%u %s need=%d width=%d\n",views,s,needed.x,lv_obj_get_width(obj));failures++;
+  bool wrapped=lv_label_get_long_mode(obj)==LV_LABEL_LONG_WRAP;
+  int width=lv_obj_get_width(obj);
+  lv_txt_get_size(&needed,s,font,lv_obj_get_style_text_letter_space(obj,0),
+     lv_obj_get_style_text_line_space(obj,0),wrapped?width:LV_COORD_MAX,LV_TEXT_FLAG_NONE);
+  if(*s && needed.x>width){
+   fprintf(stderr,"CLIP view=%u %s need=%d width=%d\n",views,s,needed.x,width);failures++;
+  }
+  if(wrapped && *s){
+   lv_area_t label_area,parent_area;
+   lv_obj_get_coords(obj,&label_area);lv_obj_get_coords(lv_obj_get_parent(obj),&parent_area);
+   if(needed.y>lv_obj_get_height(obj) || label_area.y1<parent_area.y1 || label_area.y2>parent_area.y2){
+    fprintf(stderr,"WRAP CLIP view=%u %s\n",views,s);failures++;
+   }
   }
  }
  for(unsigned i=0;i<lv_obj_get_child_cnt(obj);i++)check_labels(lv_obj_get_child(obj,(int)i));
@@ -40,11 +50,26 @@ static void local_frame(void){
  panel_lvgl_refresh(++live.now_ms,true);views++;check_labels(lv_scr_act());
 }
 static void modbus_frame(panel_ui_t *u){
- panel_view_t v;panel_ui_view(u,&live,&v);panel_lvgl_show_modbus(&v);
+ panel_view_t v;panel_ui_view(u,&live,&v);v.activity_frame=u->pending?1:0;panel_lvgl_show_modbus(&v);
  panel_lvgl_refresh(++live.now_ms,true);views++;check_labels(lv_scr_act());
  if(v.setting_editor){
-  lv_area_t current=label_bounds(v.rows[1],45),draft=label_bounds(v.rows[2],45);
+  const char *current_name=(v.stale_rows&2)?"Last data":v.rows[1];
+  lv_area_t current=label_bounds(current_name,45),draft=label_bounds(v.rows[2],45);
   if(current.y1!=draft.y1){fprintf(stderr,"ALIGN current/draft names view=%u\n",views);failures++;}
+  const char *labels[]={current_name,v.rows[2],v.values[1],v.values[2]};
+  for(unsigned i=0;i<4;i++){
+   if(!labels[i][0])continue;
+   lv_obj_t *obj=find_label(lv_scr_act(),labels[i],i<2?58:95);
+   if(!obj || lv_obj_get_style_text_font(obj,0)!=&panel_lvgl_body_font){
+    fprintf(stderr,"EDITOR FONT view=%u %s\n",views,labels[i]);failures++;
+   }
+  }
+ }
+ if(v.power_action && !v.result){
+  lv_obj_t *obj=find_label(lv_scr_act(),v.rows[0],56);
+  if(!obj || lv_obj_get_style_text_font(obj,0)!=&panel_lvgl_body_font){
+   fprintf(stderr,"POWER FONT view=%u %s\n",views,v.rows[0]);failures++;
+  }
  }
 }
 static unsigned blue_pixels(unsigned x,unsigned y,unsigned w,unsigned h){
@@ -58,6 +83,40 @@ int main(void){
   .hour=23,.minute=59,.sn="MB00001122334455",.version="0.4.11-modbus-full",
   .model="PWR4KL24H1",.hardware="CS-MB-PANEL",.factory_ready=true,.factory_locked=true};
  direct_ui_init(&s_ui);local_frame();
+ panel_snapshot_t partial={.now_ms=live.now_ms};
+ panel_store(&partial,0x53,1385,live.now_ms);
+ panel_store(&partial,0xa0,4200,live.now_ms-2100);
+ panel_home_readings_t home;full_mb_home(&partial,NULL,&home);
+ panel_lvgl_show_home(&s_ui,&s_ui_data,&home);panel_lvgl_refresh(live.now_ms,true);
+ views++;check_labels(lv_scr_act());
+ panel_home_readings_t different={0};
+ const int32_t watts[]={-65400,3210,510,230};
+ const char *power_values[]={"-65.4kW","3210W","510W","230W"};
+ for(unsigned i=0;i<PANEL_HOME_COUNT;i++){
+  different.meter[i]=(panel_home_meter_t){watts[i],2300,
+       PANEL_HOME_POWER|PANEL_HOME_VOLTAGE,PANEL_HOME_POWER|PANEL_HOME_VOLTAGE};
+ }
+ panel_lvgl_show_home(&s_ui,&s_ui_data,&different);panel_lvgl_refresh(++live.now_ms,true);
+ views++;check_labels(lv_scr_act());
+ const lv_font_t *power_font=NULL;
+ for(unsigned i=0;i<PANEL_HOME_COUNT;i++){
+  lv_obj_t *obj=find_label(lv_scr_act(),power_values[i],35);
+  assert(obj);
+  const lv_font_t *font=lv_obj_get_style_text_font(obj,0);
+  if(i)assert(font==power_font);else power_font=font;
+ }
+ different.meter[PANEL_HOME_GRID].watts=-1200;
+ panel_lvgl_show_home(&s_ui,&s_ui_data,&different);panel_lvgl_refresh(++live.now_ms,true);
+ views++;check_labels(lv_scr_act());
+ lv_obj_t *solar=find_label(lv_scr_act(),"3210W",35);
+ assert(solar && lv_obj_get_style_text_font(solar,0)==power_font);
+ different.meter[PANEL_HOME_SOLAR].watts=131070;
+ different.meter[PANEL_HOME_SOLAR].fresh=0;
+ panel_lvgl_show_home(&s_ui,&s_ui_data,&different);panel_lvgl_refresh(++live.now_ms,true);
+ views++;check_labels(lv_scr_act());
+ solar=find_label(lv_scr_act(),"131.1kW*",35);
+ assert(solar && lv_obj_get_style_text_font(solar,0)==power_font);
+ save_frame("english_stable_home");
  direct_ui_event_t event=direct_ui_key(&s_ui,DIRECT_KEY_BACK,live.now_ms,&s_ui_data);
  assert(s_ui.page==UI_WEATHER && event.action==UI_ACT_NONE && s_ui.detail_page==0);
  direct_ui_key(&s_ui,DIRECT_KEY_BACK,live.now_ms,&s_ui_data);assert(s_ui.page==UI_HOME);
@@ -76,7 +135,7 @@ int main(void){
  for(unsigned menu=4;menu<6;menu++)for(unsigned i=0;i<direct_ui_submenu_count(menu);i++){
   s_ui.page=UI_SUBMENU;s_ui.menu_selected=menu;s_ui.selected=i;local_frame();
  }
- static const direct_ui_page_t pages[]={UI_APPEARANCE,UI_HELP,UI_PHONE_SETUP,UI_TIME,UI_PRODUCTION,UI_UPGRADE};
+ static const direct_ui_page_t pages[]={UI_APPEARANCE,UI_HELP,UI_PHONE_SETUP,UI_TIME,UI_UPGRADE};
  for(unsigned i=0;i<sizeof(pages)/sizeof(*pages);i++){
   s_ui.page=pages[i];s_ui.detail_page=0;s_ui.selected=0;local_frame();
  }
@@ -121,7 +180,11 @@ int main(void){
   for(unsigned group=0;group<PANEL_SETTING_GROUPS;group++)
    if(panel_setting_group_index(group,panel_setting_group_position(group,i))==i){u.setting_group=group;break;}
   modbus_frame(&u);
-  u.editing=true;u.draft=12345;modbus_frame(&u);u.editing=false;
+  u.editing=true;u.draft=12345;modbus_frame(&u);
+  if(panel_setting(i)->address==0x4102){
+   for(unsigned value=0;value<=3;value++){u.draft=value;modbus_frame(&u);}
+  }
+  u.editing=false;
   u.have_result=true;u.result_address=panel_setting(i)->address;u.result_value=12345;
   u.result_profile=PANEL_PROFILE_6KU;u.last_result=PANEL_WRITE_UNCERTAIN;modbus_frame(&u);u.have_result=false;
  }
@@ -132,6 +195,64 @@ int main(void){
   unsigned steps=page==PANEL_PAGE_DETAILS?PANEL_DETAIL_PAGES:page==PANEL_PAGE_ALARMS?6:1;
   for(unsigned i=0;i<steps;i++){u.detail=i;u.selected=i;modbus_frame(&u);}
  }
+ panel_ui_init(&u);u.language_en=true;u.page=PANEL_PAGE_DETAIL_GROUPS;u.selected=PANEL_DETAIL_PAGES-1;
+ modbus_frame(&u);save_frame("lvgl_detail_groups_en");
+ panel_ui_init(&u);u.language_en=true;u.page=PANEL_PAGE_POWER;
+ for(unsigned action=0;action<3;action++){
+  u.selected=action;u.draft=(action+1)%3;u.review=true;u.pending=false;modbus_frame(&u);
+  if(action==2)save_frame("lvgl_power_review_en");
+  u.review=false;u.pending=true;u.pending_type=PANEL_CMD_WRITE;
+  u.result_address=0x4123;u.result_value=u.draft;modbus_frame(&u);
+  u.pending=false;u.have_result=true;
+  u.last_result=PANEL_WRITE_CONFIRMED;modbus_frame(&u);
+  u.last_result=PANEL_WRITE_UNCERTAIN;modbus_frame(&u);
+  u.have_result=false;
+ }
+ panel_ui_init(&u);u.language_en=true;u.page=PANEL_PAGE_DETAILS;
+ live.now_ms+=PANEL_FRESH_MS+1;
+ modbus_frame(&u);
+ /* Capture the live priority editor with a long English option and a short one. */
+ panel_store(&live,0x42,3,live.now_ms);
+ panel_store(&live,0x142,2,live.now_ms);
+ panel_ui_init(&u);u.language_en=true;u.page=PANEL_PAGE_SETTINGS;u.editing=true;u.draft=3;
+ for(unsigned i=0;i<panel_setting_count();i++)
+  if(panel_setting(i)->address==0x4102)u.selected=i;
+ modbus_frame(&u);save_frame("english_uniform_priority_editor");
+ panel_store(&live,0x140,1,live.now_ms);
+ panel_store(&live,0x143,2,live.now_ms);
+ panel_store(&live,0x150,3,live.now_ms);
+ panel_store(&live,0x141,0,live.now_ms);
+ panel_store(&live,0x351,2,live.now_ms);
+ panel_ui_init(&u);u.language_en=true;u.page=PANEL_PAGE_DETAILS;u.detail=7;
+ modbus_frame(&u);save_frame("english_uniform_modes");
+ lv_obj_t *mode_caption=find_label(lv_scr_act(),"Input range",45);
+ lv_obj_t *mode_value=find_label(lv_scr_act(),"Narrow range",68);
+ assert(mode_caption && mode_value);
+ assert(lv_obj_get_style_text_font(mode_caption,0)==&panel_lvgl_body_font);
+ assert(lv_obj_get_style_text_font(mode_value,0)==&panel_lvgl_body_font);
+ panel_view_t comparison={.selected=-1,.language_en=true,.setting_editor=true,
+  .title="Output priority",.rows={[1]="Current value",[2]="Proposed value"},
+  .values={[1]="MKS",[2]="Solar, battery, then utility"}};
+ panel_lvgl_show_modbus(&comparison);panel_lvgl_refresh(++live.now_ms,true);
+ lv_obj_t *option=find_label(lv_scr_act(),comparison.values[2],95);
+ assert(option && lv_label_get_long_mode(option)==LV_LABEL_LONG_WRAP);
+ assert(lv_obj_get_style_text_letter_space(option,0)==0);
+ assert(lv_obj_get_height(option)>lv_font_get_line_height(&panel_lvgl_body_font));
+ views++;check_labels(lv_scr_act());
+
+ panel_store(&live,0x42,3,live.now_ms);panel_store(&live,0x53,920,live.now_ms);
+ panel_ui_init(&u);u.language_en=true;u.page=PANEL_PAGE_DETAILS;
+ modbus_frame(&u);
+ lv_obj_t *hero=find_label(lv_scr_act(),"920 W",68);
+ assert(hero);
+ const lv_font_t *hero_font=lv_obj_get_style_text_font(hero,0);
+ assert(hero_font!=&panel_lvgl_body_font);
+ assert(lv_label_get_long_mode(hero)==LV_LABEL_LONG_CLIP);
+ live.now_ms+=PANEL_FRESH_MS+1;
+ modbus_frame(&u);
+ hero=find_label(lv_scr_act(),"920 W*",68);
+ assert(hero && lv_obj_get_style_text_font(hero,0)==hero_font);
+ save_frame("english_stable_dashboard");
  assert(!failures);
  printf("PASS English layout: %u actual LVGL local and parameter views fit their text bounds\n",views);
 }
@@ -139,7 +260,8 @@ int main(void){
 path=root/'tmp/english_layout_test.c';path.write_text(test,encoding='utf-8')
 shared=root.parent/'esp32_direct/main/direct'
 lvgl=root/'components/lvgl__lvgl';conf=root/'full/lv_conf.h'
-objects=sorted(p for p in (root/'tmp/lvgl_host').glob('*.o') if not p.name.endswith('qrcodegen.c.o'))
+obj_dir=root/'tmp'/('lvgl_host' if sys.platform=='win32' else f'lvgl_host_{sys.platform}')
+objects=sorted(p for p in obj_dir.glob('*.o') if not p.name.endswith('qrcodegen.c.o'))
 assert objects,'Run native_runtime_test.py first to prepare LVGL host objects'
 exe=path.with_suffix('.exe')
 subprocess.run([sys.argv[1],'-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
@@ -147,7 +269,7 @@ subprocess.run([sys.argv[1],'-std=c11','-Wall','-Wextra','-Werror','-Wno-mislead
  '-I'+str(shared.parent/'onboarding'),'-I'+str(root.parent/'esp32_direct/components/qrcodegen'),
  '-I'+str(root/'main'),'-I'+str(root/'full'),'-I'+str(shared),'-I'+str(shared.parent/'ota'),
  '-I'+str(shared.parent/'telemetry'),str(path),str(root/'main/panel_ui.c'),str(root/'main/panel_locale.c'),
- str(root/'main/panel_model.c'),str(root/'main/panel_catalog.c'),str(shared/'direct_gfx.c'),
+ str(root/'main/panel_model.c'),str(root/'main/panel_catalog.c'),str(root/'full/full_modbus_map.c'),str(shared/'direct_gfx.c'),
  str(root/'main/panel_fonts.c'),str(root/'main/panel_display_settings.c'),str(root/'full/direct_ui.c'),
  str(root/'full/panel_lvgl.c'),str(root/'full/panel_home_art.c'),str(root/'full/direct_ui_locale.c'),
  str(shared/'direct_home.c'),str(shared/'direct_boot_logo.c'),str(shared.parent/'onboarding/onboarding_qr.c'),

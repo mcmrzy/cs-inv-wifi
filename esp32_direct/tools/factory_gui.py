@@ -122,7 +122,7 @@ class App:
    if operation in backend.MUTATIONS:
     if not self.snapshot or self.peer_port!=job['port']:raise ValueError('请先识别本台设备；空白芯片请使用“ROM 芯片识别”')
     job['expected_mac']=backend.require_mac(self.snapshot.get('mac'))
-    job['expected_model']=(self.snapshot.get('identity') or {}).get('model') or self.snapshot.get('model')
+    job['expected_model']=self.snapshot.get('model') or (self.snapshot.get('identity') or {}).get('model')
    if operation=='identify-rom' and not self.message.askyesno('ROM 芯片识别','将重启本台芯片进入下载模式，只读取芯片、MAC 和 Flash。设备运行会中断，请确认当前允许重启。继续？'):return
    if operation in ('provision','verify'):
     job['profile']=self.current_profile()
@@ -132,15 +132,21 @@ class App:
    if operation=='lock' and not self.message.askyesno('锁定身份','请确认实际硬件版本和校准/测试报告已完成审核。锁定后不能通过普通设置改写身份。继续？'):return
    if operation=='flash':
     release=Path(self.release.get()).resolve();m=backend.load_json(release/'flash_manifest.json')
+    backend.validate_flash_model(job.get('expected_model'),m)
     job.update(release=str(release),backup_dir=str(data/'backups'),first_install=self.first_install.get(),baud=int(self.baud.get()))
     extra='\n首次迁移：旧 cache 区会在备份后清除。' if job['first_install'] else '\n常规更新：保留 factory 身份和用户 NVS。'
     if m.get('profile')=='device':extra+='\nDevice 优先使用管理员已设置的 SN，其次使用有效生产身份；空白设备才使用开发默认 SN。'
-    if not self.message.askyesno('备份并烧录',f"串口：{job['port']}\n传输波特率：{job['baud']}\n版本：{m.get('version')}\n配置：{m.get('profile')}\n目录：{release}{extra}\n\n开始备份、烧录和校验？"):return
+    if not self.message.askyesno('备份并烧录',f"串口：{job['port']}\n传输波特率：{job['baud']}\n型号：{m.get('model')}\n版本：{m.get('version')}\n配置：{m.get('profile')}\n目录：{release}{extra}\n\n开始备份、烧录和校验？"):return
    if operation=='flash-bin':
     import flash_single_bin
     kind='merged' if self.bin_type.get()=='完整 4MB 合并固件' else 'app'
     info=flash_single_bin.describe(self.bin_file.get(),kind)
-    job.update(bin_file=str(Path(self.bin_file.get()).resolve()),bin_kind=kind,bin_sha256=info['sha256'],baud=int(self.baud.get()),backup_dir=str(data/'backups'),layout=str(application_dir()/'firmware'/'device'))
+    if job['expected_model'] and info['model']!=job['expected_model']:
+     raise ValueError('固件型号与当前 USB 设备不一致')
+    layout=Path(self.release.get()).resolve() if info['model']=='CS-MB-PANEL' else application_dir()/'firmware'/'device'
+    if kind=='app' and info['model']=='CS-MB-PANEL':
+     backend.validate_flash_model(info['model'],backend.load_json(layout/'flash_manifest.json'))
+    job.update(bin_file=str(Path(self.bin_file.get()).resolve()),bin_kind=kind,bin_sha256=info['sha256'],baud=int(self.baud.get()),backup_dir=str(data/'backups'),layout=str(layout))
     if not self.message.askyesno('确认单个 BIN 烧录',f"串口：{job['port']}\n文件：{job['bin_file']}\n类型：{self.bin_type.get()}\n地址：{hex(info['offset'])}\n大小：{info['bytes']} 字节\n波特率：{job['baud']}\nSHA256：{info['sha256']}\n\n{info['scope']}\n\n先整片备份，再写入并校验。继续？"):return
    if operation=='test':
     reverse={v:k for k,v in STATUS.items()}

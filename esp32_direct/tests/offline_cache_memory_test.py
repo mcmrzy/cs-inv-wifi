@@ -207,9 +207,12 @@ class OfflineCacheMemoryTests(unittest.TestCase):
     def setUpClass(cls):
         source = (ROOT / "main/storage/offline_cache.c").read_text(encoding="utf-8")
         header = (ROOT / "main/storage/offline_cache.h").read_text(encoding="utf-8")
-        batch_define = re.search(r"^#define MAX_BATCH_ITEMS\s+.*$", source, re.M)
+        batch_config = re.search(
+            r"^#ifndef PANEL_FULL_DIRECT\n#define MAX_BATCH_ITEMS\b.*?^#endif",
+            source, re.M | re.S,
+        )
         item_type = re.search(r"typedef struct\s*\{.*?\}\s*OfflineCacheItem;", header, re.S)
-        harness = HARNESS.replace("__BATCH_DEFINE__", batch_define.group())
+        harness = HARNESS.replace("__BATCH_DEFINE__", batch_config.group())
         harness = harness.replace("__ITEM_TYPE__", item_type.group())
         harness = harness.replace("__ADD__", function(source, "offline_cache_add"))
         harness = harness.replace("__FLUSH_ALL__", function(source, "offline_cache_flush_all"))
@@ -217,18 +220,20 @@ class OfflineCacheMemoryTests(unittest.TestCase):
         cls.addClassCleanup(cls.folder.cleanup)
         path = Path(cls.folder.name)
         cls.exe = path / "cache_test.exe"
+        cls.panel_exe = path / "panel_cache_test.exe"
         target = path / "cache_test.c"
         target.write_text(harness, encoding="utf-8")
         cls.env = os.environ.copy()
         cls.env["PATH"] = str(Path(GCC).parent) + os.pathsep + cls.env.get("PATH", "")
-        subprocess.run(
-            [GCC, "-std=c11", "-Wall", "-Wextra", "-Werror", str(target), "-o", str(cls.exe)],
-            check=True, env=cls.env, timeout=30,
-        )
+        for exe, defines in ((cls.exe, []), (cls.panel_exe, ["-DPANEL_FULL_DIRECT=1"])):
+            subprocess.run(
+                [GCC, "-std=c11", "-Wall", "-Wextra", "-Werror", *defines, str(target), "-o", str(exe)],
+                check=True, env=cls.env, timeout=30,
+            )
 
-    def run_case(self, case):
+    def run_case(self, case, exe=None):
         result = subprocess.run(
-            [str(self.exe), case], capture_output=True, text=True,
+            [str(exe or self.exe), case], capture_output=True, text=True,
             env=self.env, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -250,6 +255,11 @@ class OfflineCacheMemoryTests(unittest.TestCase):
 
     def test_flush_all_lock_timeout_does_not_touch_another_owner_batch(self):
         self.run_case("flush_lock")
+
+    def test_panel_releases_heap_after_each_record_and_preserves_failed_writes(self):
+        for case in ("normal", "failed_flush", "flush_lock"):
+            with self.subTest(case=case):
+                self.run_case(case, self.panel_exe)
 
 
 if __name__ == "__main__":

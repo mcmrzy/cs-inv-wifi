@@ -24,7 +24,7 @@ def make_app(base,field_labels):
    ct.CTkLabel(side,text='辰烁科技 / 设备服务',text_color='#9bcfff').pack(anchor='w',padx=22,pady=(6,32))
    body=ct.CTkFrame(root,fg_color='transparent');body.pack(side='left',fill='both',expand=True,padx=24,pady=22)
    self.title=ct.CTkLabel(body,text='设备概览',font=('Microsoft YaHei UI',26,'bold'),text_color='#123d6b');self.title.pack(anchor='w')
-   ct.CTkLabel(body,text='CS-L10-6K2 · 查询、维护与出厂检测',text_color='#32618d').pack(anchor='w',pady=(4,18))
+   ct.CTkLabel(body,text='USB 设备查询、固件维护与出厂检测',text_color='#32618d').pack(anchor='w',pady=(4,18))
    bar=self.card(body);bar.pack(fill='x',pady=(0,16));self.port=tk.StringVar()
    self.ports=ct.CTkComboBox(bar,variable=self.port,values=[],state='readonly',width=140,command=lambda _:self.selected_port_changed());self.ports.pack(side='left',padx=16,pady=16)
    self.port.trace_add('write',self.selected_port_changed)
@@ -63,7 +63,7 @@ def make_app(base,field_labels):
    else:self.log_panel.pack(fill='x',pady=4)
   def build_device(self):
    f=self.tabs['device'];grid=ct.CTkFrame(f,fg_color='transparent');grid.pack(fill='x');grid.columnconfigure((0,1),weight=1);self.stats={}
-   for i,(key,label) in enumerate([('sn','运行设备序列号'),('firmware','运行固件'),('diagnostics','诊断能力'),('identity','身份权限'),('configuration','持久身份 / 重启状态')]):
+   for i,(key,label) in enumerate([('product','USB 设备 / MAC'),('inverter','连接的逆变器'),('sn','运行设备序列号'),('firmware','运行固件'),('diagnostics','诊断能力'),('identity','身份权限'),('configuration','持久身份 / 重启状态')]):
     c=self.card(grid);c.grid(row=i//2,column=i%2,sticky='ew',padx=5,pady=6)
     ct.CTkLabel(c,text=label,text_color='#32618d').pack(anchor='w',padx=20,pady=(17,6))
     v=self.tk.StringVar(value='等待识别');self.stats[key]=v;ct.CTkLabel(c,textvariable=v,text_color='#123d6b',font=('Microsoft YaHei UI',19,'bold'),wraplength=380,justify='left').pack(anchor='w',padx=20,pady=(0,20))
@@ -150,6 +150,11 @@ def make_app(base,field_labels):
   def render_report(self,report,operation,port):
    if 'firmware' in report or operation=='identify-rom' or operation in ('provision','verify','lock','pairing') and report.get('mac'):
     self.snapshot=report;self.peer_port=port;caps=backend.capabilities(report)
+    attached=report.get('model')
+    self.stats['product'].set(f"{attached or '型号未知'}\n{report.get('mac') or 'MAC 未读取'}")
+    self.stats['inverter'].set(backend.inverter_summary(report))
+    if operation=='inspect' and attached and not self.fields['sn'].get().strip():
+     self.fields['model'].set(attached)
     self.stats['sn'].set((report.get('runtime_sn') or '尚无运行身份') if 'runtime_sn' in report else '固件未提供运行 SN')
     identity=report.get('identity') or {}
     if identity:

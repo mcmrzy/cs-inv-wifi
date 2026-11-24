@@ -127,7 +127,7 @@ extra=r'''
  panel_result_record(&native_live,native_live.command_sequence,PANEL_WRITE_CONFIRMED,0);
  native_live.command_busy=false;
  panel_ble_tick();
- const panel_profile_t models[]={PANEL_PROFILE_2KU,PANEL_PROFILE_3KU,PANEL_PROFILE_6KU,PANEL_PROFILE_12KU};
+ const panel_profile_t models[]={PANEL_PROFILE_2KU,PANEL_PROFILE_3KU,PANEL_PROFILE_6KU,PANEL_PROFILE_6KU_PARALLEL,PANEL_PROFILE_12KU};
  for(unsigned m=0;m<sizeof(models)/sizeof(models[0]);m++){
   native_live.config.profile_override=models[m];
   for(unsigned i=0;i<panel_setting_count();i++){
@@ -140,7 +140,7 @@ extra=r'''
    for(const unsigned char *p=(const unsigned char *)result;*p;p++)assert(*p<128);
   }
  }
- puts("PASS native panel BLE: four-model catalog, current/step, stale context, applied/submitted/mismatch, power, OTA guard, and replay");
+ puts("PASS native panel BLE: 6KU-family catalog, current/step, stale context, applied/submitted/mismatch, power, OTA guard, and replay");
 '''
 marker=' printf("PASS actual dispatcher:'
 assert marker in script

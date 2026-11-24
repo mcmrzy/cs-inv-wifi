@@ -30,6 +30,9 @@ idf_component_register(
         "direct/direct_display_events.c"
         "direct/direct_lcd_codec.c"
         "direct/direct_panel.c"
+        "direct/direct_indicators.c"
+        "direct/status_led.c"
+        "direct/status_led_rmt.c"
         "direct/direct_ui.c"
         "direct/direct_ui_scene.c"
         "direct/direct_home.c"
@@ -81,6 +84,7 @@ idf_component_register(
     REQUIRES
         nvs_flash
         esp_driver_usb_serial_jtag
+        esp_driver_rmt
         vfs
         spi_flash
         esp_wifi

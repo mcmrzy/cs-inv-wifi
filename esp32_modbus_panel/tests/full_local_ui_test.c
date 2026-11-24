@@ -3,6 +3,7 @@
 #include "direct_gfx.h"
 #include "direct_gfx_assets.h"
 #include "direct_ui_locale.h"
+#include "direct_key_codec.h"
 #include "full_ui_bridge.h"
 #include <assert.h>
 #include <stdio.h>
@@ -59,9 +60,9 @@ int main(void){
  int good[]={2024,2,29,23,59,59,480};int64_t seconds;
  assert(direct_ui_time_utc(good,&seconds));good[0]=2023;assert(!direct_ui_time_utc(good,&seconds));
  direct_ui_init(&u);u.page=UI_TIME;int end_month[]={2024,1,31,12,0,0,480};memcpy(u.time_fields,end_month,sizeof(end_month));u.selected=1;
- direct_ui_key(&u,6,0,&d);assert(u.time_fields[1]==2 && u.time_fields[2]==29);
- u.selected=0;direct_ui_key(&u,4,0,&d);assert(u.time_fields[0]==2023 && u.time_fields[2]==28);
- u.selected=2;direct_ui_key(&u,6,0,&d);assert(u.time_fields[2]==28 && strstr(u.message,"limit"));
+ direct_ui_key(&u,DIRECT_KEY_LEFT,0,&d);assert(u.time_fields[1]==2 && u.time_fields[2]==29);
+ u.selected=0;direct_ui_key(&u,DIRECT_KEY_RIGHT,0,&d);assert(u.time_fields[0]==2023 && u.time_fields[2]==28);
+ u.selected=2;direct_ui_key(&u,DIRECT_KEY_LEFT,0,&d);assert(u.time_fields[2]==28 && strstr(u.message,"limit"));
  direct_ui_view_t zone_view;direct_ui_build(&u,&d,&zone_view);assert(strstr(zone_view.rows[6],"UTC+08:00"));
  for(unsigned language=0;language<2;language++)for(unsigned theme=0;theme<2;theme++){
   zh=language!=0;light=theme!=0;d=data();direct_ui_init(&u);
@@ -102,7 +103,6 @@ int main(void){
   for(unsigned group=0;group<3;group++)for(unsigned confirm=0;confirm<2;confirm++){
    u.group=group;u.confirm=confirm;render(group==2?"lcd_reset":group==1?"restart":confirm?"factory_yes":"factory_no",&u,&d);
   }
-  u.page=UI_PRODUCTION;render("production_pending",&u,&d);d.factory_ready=true;d.factory_locked=true;render("production_written",&u,&d);
   u.page=UI_UPGRADE;u.confirm=false;
   for(unsigned state=0;state<=OTA_STATE_ROLLED_BACK;state++){
    d.ota.state=(OtaState)state;d.ota_busy=state>0 && state<=OTA_STATE_CANCELLING;

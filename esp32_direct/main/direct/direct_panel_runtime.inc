@@ -373,7 +373,7 @@ static void panel_task(void *arg) {
         if(change==ONBOARDING_CLOSED)panel_onboarding_close();
         if(s_onboarding.visible)onboarding_qr_update(&s_onboarding_qr,g_device_sn,s_pair_pin);
         if(factory_testing){
-            if(s_blank){command(0x29);s_blank=false;s_have_previous=false;}
+            if(s_blank){direct_panel_enable_display();s_blank=false;s_have_previous=false;}
             s_ui.page=UI_HELP;s_ui.detail_page=1;
             if(!previous_factory_test)s_ui.dirty=true;
         }else if(previous_factory_test){s_ui.page=UI_HOME;s_ui.detail_page=0;s_ui.dirty=true;}
@@ -400,7 +400,7 @@ static void panel_task(void *arg) {
             last_input=now_ms();
             /* Diagnostic key presses are evidence only; never issue inverter actions. */
             if(factory_testing){panel_beep();s_ui.dirty=true;continue;}
-            if(s_blank){command(0x29);s_blank=false;s_have_previous=false;continue;}
+            if(s_blank){direct_panel_enable_display();s_blank=false;s_have_previous=false;continue;}
             if(s_onboarding.visible){
              panel_beep();
              if(key==1){
@@ -423,8 +423,12 @@ static void panel_task(void *arg) {
         bool alarm=direct_ui_has_alarm(&s_ui_data);
         if(alarm && !previous_alarm && s_local_alarm)panel_beep();
         previous_alarm=alarm;
-        if(s_blank && (alarm || s_ui_data.ota_busy)){command(0x29);s_blank=false;s_have_previous=false;}
-        if(!s_blank && s_local_blank && !alarm && !s_ui_data.ota_busy && !s_onboarding.visible && now_ms()-last_input>=120000){command(0x28);s_blank=true;}
+        if(s_blank && (alarm || s_ui_data.ota_busy)){direct_panel_enable_display();s_blank=false;s_have_previous=false;}
+        if(!s_blank && s_local_blank && !alarm && !s_ui_data.ota_busy && !s_onboarding.visible && now_ms()-last_input>=120000){
+            if (CONFIG_DIRECT_LCD_BL_PIN >= 0) gpio_set_level(CONFIG_DIRECT_LCD_BL_PIN, 0);
+            command(0x28);
+            s_blank=true;
+        }
         atomic_store(&s_panel_page,s_ui.page);
         panel_stage(PANEL_RENDER);
         direct_ui_build(&s_ui,&s_ui_data,&s_view);

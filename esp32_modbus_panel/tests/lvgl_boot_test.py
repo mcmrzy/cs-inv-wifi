@@ -18,6 +18,7 @@ test = r'''
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include "panel_sound.h"
 #define LCD_W 320
 #define LCD_H 240
 #define CONFIG_DIRECT_LCD_GPIO_SPI 0
@@ -29,6 +30,10 @@ enum {PANEL_SPLASH_DURATION_MS=1700};
 static bool s_panel_initialized=true;
 static unsigned s_saved_style=2,frames,pixel_bytes,display_on,backlight,fail_band,enable_failure;
 static unsigned window_bytes;
+static unsigned boot_sounds;
+void panel_sound_play(panel_sound_effect_t effect){
+ assert(effect==PANEL_SOUND_BOOT && display_on && backlight);boot_sounds++;
+}
 static uint16_t pixels[LCD_W*16];
 static uint32_t clock_ms=123;
 static uint32_t now_ms(void){return clock_ms;}
@@ -58,16 +63,16 @@ static void panel_lvgl_refresh(uint32_t now,bool full){
 }
 static void startup(void){STARTUP}
 static void reset(void){
- frames=pixel_bytes=display_on=backlight=fail_band=enable_failure=0;
+ frames=pixel_bytes=display_on=backlight=fail_band=enable_failure=boot_sounds=0;
  clock_ms=123;
  s_panel_initialized=true;atomic_store(&s_lcd_tx_errors,0);
 }
 int main(void){
- reset();startup();assert(display_on==1 && backlight==1 && s_panel_initialized);
+ reset();startup();assert(display_on==1 && backlight==1 && s_panel_initialized && boot_sounds==1);
  assert(clock_ms>=143+PANEL_SPLASH_DURATION_MS && clock_ms<143+PANEL_SPLASH_DURATION_MS+30);
  assert(frames>15 && atomic_load(&s_panel_tick)==clock_ms);
- reset();fail_band=3;startup();assert(!display_on && !backlight && !s_panel_initialized);
- reset();enable_failure=1;startup();assert(display_on==1 && !s_panel_initialized);
+ reset();fail_band=3;startup();assert(!display_on && !backlight && !s_panel_initialized && !boot_sounds);
+ reset();enable_failure=1;startup();assert(display_on==1 && !s_panel_initialized && !boot_sounds);
  reset();fail_band=20;startup();assert(display_on==1 && !s_panel_initialized && frames==20);
  reset();s_panel_initialized=false;startup();assert(!frames && !display_on);
  puts("PASS LVGL boot: actual RGB565 flush, complete frame before DISPON/backlight, timed animation, SPI failures retained for recovery");
@@ -77,5 +82,6 @@ path = root / 'tmp/lvgl_boot_test.c'
 path.parent.mkdir(exist_ok=True)
 path.write_text(test, encoding='utf-8')
 exe = path.with_suffix('.exe')
-subprocess.run([sys.argv[1], '-save-temps=obj', '-std=c11', '-Wall', '-Wextra', '-Werror', str(path), '-o', str(exe)], check=True)
+subprocess.run([sys.argv[1], '-save-temps=obj', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                '-I'+str(root/'full'), str(path), '-o', str(exe)], check=True)
 subprocess.run([str(exe)], check=True)

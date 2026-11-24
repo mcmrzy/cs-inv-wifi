@@ -15,6 +15,7 @@
 /* Included by direct_panel.c so rendering has one owner and one SPI stream. */
 #include "direct_keys.h"
 #include "direct_buzzer.h"
+#include "panel_sound_feedback.h"
 #include "direct_link.h"
 #include "direct_display_sample.h"
 #include "direct_display_events.h"
@@ -27,7 +28,6 @@
 #include "app_network.h"
 #include "ota_service.h"
 #include "factory_identity.h"
-#include "factory_service.h"
 #include "onboarding_state.h"
 #include "onboarding_qr.h"
 #include "cloud_binding.h"
@@ -41,9 +41,11 @@
 
 static direct_ui_state_t s_ui;
 static bool s_modbus_active,s_modbus_drawn;
+static uint32_t s_power_review_visible_ms;
 static panel_ui_t s_modbus_ui;
 static panel_page_t s_modbus_root;
 static panel_snapshot_t s_modbus_snapshot;
+static panel_home_readings_t s_home_readings;
 static panel_view_t s_modbus_view,s_modbus_previous;
 static direct_ui_data_t s_ui_data;
 static direct_display_sample_t s_display_sample;
@@ -71,7 +73,7 @@ static uint32_t s_wifi_rssi_ms;
 static bool s_pair_ready,s_pair_loaded;
 static char s_pair_sn[17];
 static uint32_t s_pair_refresh_ms;
-static onboarding_inputs_t panel_onboarding_inputs(bool testing){
+static onboarding_inputs_t panel_onboarding_inputs(void){
  cloud_binding_state_t binding=cloud_binding_get();
  uint32_t now=now_ms();
  /* A changed SN must never leave the prior PIN or QR visible for a poll interval. */
@@ -90,7 +92,7 @@ static onboarding_inputs_t panel_onboarding_inputs(bool testing){
  s_bound=binding==CLOUD_BINDING_BOUND;
  onboarding_inputs_t input={.has_wifi=s_has_wifi,.bound=s_bound,.binding_known=binding!=CLOUD_BINDING_UNKNOWN,
   .identity_ready=s_pair_ready,.dismissed=!strcmp(s_dismissed_sn,g_device_sn),
-  .alarm=direct_ui_has_alarm(&s_ui_data),.ota=s_ui_data.ota_busy,.factory=testing,
+  .alarm=direct_ui_has_alarm(&s_ui_data),.ota=s_ui_data.ota_busy,
   .editing=s_ui.editing||s_ui.pending||s_ui.page==UI_REVIEW||
     (s_ui.page!=UI_HOME&&s_ui.page!=UI_PHONE_SETUP)};
  return input;
@@ -107,11 +109,15 @@ static panel_display_settings_t s_saved_display={PANEL_DISPLAY_DEFAULT_BRIGHTNES
 static int16_t s_timezone=480;
 static DMA_ATTR uint16_t s_strip_pixels[LCD_W*16] __attribute__((aligned(4)));
 
-static void panel_beep(void) { direct_buzzer_pulse(); }
-static bool panel_alarm_feedback(bool *previous) {
-    bool alarm=direct_ui_has_alarm(&s_ui_data);
-    if(alarm && !*previous && s_local_alarm)panel_beep();
-    *previous=alarm;return alarm;
+static bool panel_alarm_feedback(void)
+{
+    static panel_sound_alarm_state_t state;
+    panel_alarm_sample_t sample;
+    bool received = panel_bus_alarm_sample(&sample);
+    panel_sound_play(panel_sound_alarm_update(&state, received ? &sample : NULL,
+        s_ui_data.bms_online, s_ui_data.bms.warning, s_ui_data.bms.protection,
+        s_local_alarm && s_local_buzzer));
+    return direct_ui_has_alarm(&s_ui_data);
 }
 static void panel_set_blank(bool blank) {
     if(s_blank!=blank){
@@ -147,7 +153,6 @@ static void panel_apply_preferences(const panel_preferences_t *p,bool preview) {
     if(!p->buzzer)feedback.beep_mode=PANEL_BEEP_OFF;
     panel_feedback_settings_t previous=panel_feedback_preferences();
     if(!feedback_configured || previous.beep_mode!=feedback.beep_mode){
-        direct_buzzer_set_duration_ms(70);
         direct_buzzer_set_volume((uint8_t)panel_feedback_beep_percent(feedback.beep_mode));
         direct_buzzer_set_enabled(p->buzzer!=0);
     }
@@ -179,8 +184,33 @@ static bool panel_ota_active(void) {
     return (snapshot.state>=OTA_STATE_ACCEPTED && snapshot.state<=OTA_STATE_CANCELLING) ||
            snapshot.state==OTA_STATE_REBOOTING;
 }
+static void panel_snapshot_identity(uint32_t sampled_ms)
+{
+    enum { IDENTITY_RETRY_MS=250 };
+    static uint32_t read_revision,last_attempt_ms;
+    static factory_result_t result;
+    static bool attempted;
+    uint32_t revision=factory_identity_revision();
+    bool retry=(result!=FACTORY_OK && result!=FACTORY_UNPROVISIONED) &&
+        sampled_ms-last_attempt_ms>=IDENTITY_RETRY_MS;
+    if(!attempted || revision!=read_revision || retry){
+        read_revision=revision;
+        last_attempt_ms=sampled_ms;
+        result=factory_identity_read(&s_identity);
+        /* A factory write can complete before the read acquires its lock. */
+        attempted=revision==factory_identity_revision();
+    }
+    s_ui_data.model="CS-MB-PANEL";s_ui_data.hardware="UNSET";
+    if(attempted && result==FACTORY_OK){
+        s_ui_data.model=s_identity.model;s_ui_data.hardware=s_identity.hw_controller;
+#if CONFIG_DIRECT_IDENTITY_PRODUCTION
+        s_ui_data.sn=s_identity.sn;
+#endif
+    }
+}
 static void panel_snapshot(void) {
     static uint32_t context_generation;
+    static bool home_after_pause;
     uint32_t current_context=full_link_context_generation();
     if(context_generation!=current_context){
         context_generation=current_context;
@@ -218,6 +248,7 @@ static void panel_snapshot(void) {
     if(dsp_paused){
         s_display_status_valid=false;s_display_status_waiting=true;
         s_display_status_blocked_ms=now_ms();
+        home_after_pause=true;
     }else{
         direct_dsp_status_t status;uint32_t status_ms;
         if(direct_dsp_get_status_sample(&status,&status_ms) &&
@@ -243,21 +274,21 @@ static void panel_snapshot(void) {
     s_ui_data.bms_no_reply=panel_bms_probe_failed();
     s_ui_data.bms_received=direct_bms_get_snapshot(&s_ui_data.bms,&s_ui_data.bms_age_ms);
     s_ui_data.bms_online=s_ui_data.bms_received && s_ui_data.bms_age_ms<5000U;
-    if(!s_modbus_active && (s_ui.page==UI_HOME || s_ui.page==UI_BMS) && panel_bus_snapshot(&s_modbus_snapshot))
-        full_mb_battery(&s_modbus_snapshot,&s_ui_data.inverter_battery);
+    if(!s_modbus_active && (s_ui.page==UI_HOME || s_ui.page==UI_BMS)){
+        bool sampled=panel_bus_snapshot(&s_modbus_snapshot) && s_modbus_snapshot.context_generation==current_context;
+        if(sampled)full_mb_battery(&s_modbus_snapshot,&s_ui_data.inverter_battery);
+        if(s_ui.page==UI_HOME){
+            if(home_after_pause && now_ms()-s_display_status_blocked_ms>=FULL_MB_MEASUREMENT_FRESH_MS)
+                home_after_pause=false;
+            const uint32_t *after=home_after_pause?&s_display_status_blocked_ms:NULL;
+            full_mb_home(sampled && !dsp_paused?&s_modbus_snapshot:NULL,after,&s_home_readings);
+        }
+    }
     const unsigned local[]={14,15,41};const uint16_t values[]={s_local_alarm,s_local_blank,s_local_buzzer};
     for(unsigned i=0;i<3;i++){s_ui_data.config[local[i]]=values[i];s_ui_data.valid[local[i]]=true;}
     s_ui_data.version=FIRMWARE_VERSION;s_ui_data.sn=g_device_sn;
     ota_service_get_snapshot(&s_ui_data.ota);s_ui_data.ota_busy=panel_ota_active();
-    s_ui_data.model="CS-MB-PANEL";s_ui_data.hardware="UNSET";
-    s_ui_data.factory_keys=factory_key_mask();s_ui_data.factory_write_enabled=CONFIG_DIRECT_FACTORY_WRITES;
-    s_ui_data.factory_ready=factory_identity_read(&s_identity)==FACTORY_OK;
-    if(s_ui_data.factory_ready){
-        s_ui_data.model=s_identity.model;s_ui_data.hardware=s_identity.hw_controller;s_ui_data.factory_locked=s_identity.locked;
-#if CONFIG_DIRECT_IDENTITY_PRODUCTION
-        s_ui_data.sn=s_identity.sn;
-#endif
-    }
+    panel_snapshot_identity(sampled_ms);
     time_t utc=time(NULL);struct tm local_time={0};
     if(utc>1577836800){
         s_ui_data.clock_valid=true;
@@ -302,7 +333,8 @@ static void panel_render(void) {
     bool ok=panel_set_view_inversion(!(s_ui.page==UI_HELP && s_ui.detail_page==1));
     if(!ok){s_have_previous=false;s_ui.dirty=true;return;}
     unsigned errors=atomic_load(&s_lcd_tx_errors);
-    panel_lvgl_show_local(&s_ui,&s_ui_data,&s_view,&s_onboarding_qr,s_pair_pin,s_has_wifi,s_bound);
+    if(s_ui.page==UI_HOME)panel_lvgl_show_home(&s_ui,&s_ui_data,&s_home_readings);
+    else panel_lvgl_show_local(&s_ui,&s_ui_data,&s_view,&s_onboarding_qr,s_pair_pin,s_has_wifi,s_bound);
     panel_lvgl_refresh(now_ms(),!s_have_previous);
     ok=atomic_load(&s_lcd_tx_errors)==errors;
     s_have_previous=ok;s_ui.dirty=!ok;
@@ -336,6 +368,7 @@ static void panel_service_recovery(void) {
     s_recovery.baseline_errors=atomic_load(&s_lcd_tx_errors);
     if(ok)atomic_store(&s_recovery_error_baseline,s_recovery.baseline_errors);
     if(manual){
+        panel_sound_play(ok ? PANEL_SOUND_SUCCESS : PANEL_SOUND_ERROR);
         snprintf(s_ui.message,sizeof(s_ui.message),"%s",ok?"Screen restored":"Screen reset failed");
         s_ui.dirty=true;
     }
@@ -372,6 +405,7 @@ static void panel_save_appearance(direct_ui_event_t event) {
     if(edits&PANEL_FEEDBACK_LED_EDIT)fields|=PANEL_PREF_LED_BRIGHTNESS;
     if(edits&PANEL_FEEDBACK_BEEP_EDIT)fields|=PANEL_PREF_BEEP_MODE;
     if(!panel_preferences_update(&next,fields)){
+        panel_sound_play(PANEL_SOUND_ERROR);
         panel_discard_preview();
         snprintf(s_ui.message,sizeof(s_ui.message),"Save failed / retry");
         s_ui.dirty=true;
@@ -392,30 +426,18 @@ static void panel_save_appearance(direct_ui_event_t event) {
     s_ui.time_fields[2]=feedback.led_brightness;
     s_ui.time_fields[3]=feedback.beep_mode;
     s_ui.time_fields[4]=0;
+    panel_sound_play(PANEL_SOUND_SUCCESS);
     snprintf(s_ui.message,sizeof(s_ui.message),"Appearance saved");
     s_ui.dirty=true;
 }
-static panel_page_t s_bms_return_root;
-static direct_ui_page_t s_bms_return_page;
-static uint8_t s_bms_return_detail;
-static bool s_bms_return_pending;
-
 static void panel_action(direct_ui_event_t event) {
     if(event.action==FULL_UI_OPEN_MODBUS){
         if(panel_ota_active())return;
         panel_ui_init(&s_modbus_ui);
         s_modbus_root=(panel_page_t)event.index;s_modbus_ui.page=s_modbus_root;
         if(s_modbus_root==PANEL_PAGE_DETAILS)s_modbus_ui.detail=(uint8_t)(event.value%PANEL_DETAIL_PAGES);
-        if(s_modbus_root==PANEL_PAGE_DETAIL_GROUPS){
+        if(s_modbus_root==PANEL_PAGE_DETAIL_GROUPS)
             s_modbus_ui.selected=(uint16_t)(event.value%PANEL_DETAIL_PAGES);
-            if(event.value==3 && s_bms_return_pending){
-                s_bms_return_pending=false;
-                s_ui.page=s_bms_return_page;
-                s_modbus_root=s_bms_return_root;
-                s_modbus_ui.detail_index_from_page=s_modbus_root==PANEL_PAGE_DETAILS;
-                s_modbus_ui.detail_origin=s_bms_return_detail;
-            }
-        }
         if(s_modbus_root==PANEL_PAGE_SETTINGS){
             s_modbus_ui.setting_group=event.value<PANEL_SETTING_GROUPS?(uint8_t)event.value:0;
             s_modbus_ui.selected=(uint16_t)panel_setting_group_index(s_modbus_ui.setting_group,0);
@@ -430,6 +452,7 @@ static void panel_action(direct_ui_event_t event) {
     }
     if(ota_service_is_busy() && (event.action==UI_ACT_RESTART || event.action==UI_ACT_LOCAL_RESET || event.action==UI_ACT_LCD_RESET ||
             event.action==UI_ACT_APPEARANCE_SAVE || event.action==UI_ACT_SET_TIME || event.action==FULL_UI_SAVE_BMS_PROTOCOL)){
+        panel_sound_play(PANEL_SOUND_ERROR);
         snprintf(s_ui.message,sizeof(s_ui.message),"Settings busy / retry");s_ui.dirty=true;return;
     }
     if(event.action==UI_ACT_OTA_CANCEL){
@@ -444,6 +467,7 @@ static void panel_action(direct_ui_event_t event) {
         s_ui.dirty=true;
     }else if(event.action==FULL_UI_SAVE_BMS_PROTOCOL){
         bool saved=panel_bms_protocol_set((panel_bms_protocol_t)event.value);
+        panel_sound_play(saved ? PANEL_SOUND_SUCCESS : PANEL_SOUND_ERROR);
         snprintf(s_ui.message,sizeof(s_ui.message),"%s",saved?"":"Save failed / retry");
         s_ui.dirty=true;
     }else if(event.action==UI_ACT_APPEARANCE_PREVIEW){s_preview_style=(uint8_t)(event.value&3);
@@ -454,13 +478,16 @@ static void panel_action(direct_ui_event_t event) {
     else if(event.action==UI_ACT_LCD_RESET)s_manual_recovery_pending=true;
     else if(event.action==UI_ACT_RESTART)esp_restart();
     else if(event.action==UI_ACT_LOCAL_RESET){
-        if(panel_preferences_reset()){
+        bool saved=panel_preferences_reset();
+        if(saved){
             full_ui_reload_local_preferences();panel_load_local();direct_ui_init(&s_ui);
             snprintf(s_ui.message,sizeof(s_ui.message),"Local settings restored");
         }else snprintf(s_ui.message,sizeof(s_ui.message),"Save failed / retry");
+        panel_sound_play(saved ? PANEL_SOUND_SUCCESS : PANEL_SOUND_ERROR);
         s_ui.dirty=true;
     }else if(event.action==UI_ACT_SET_TIME){
         bool saved=panel_set_time(event.value!=0);
+        panel_sound_play(saved ? PANEL_SOUND_SUCCESS : PANEL_SOUND_ERROR);
         if(saved)s_ui.editing=false;
         snprintf(s_ui.message,sizeof(s_ui.message),"%s",saved?(event.value?"Time saved":"Time zone saved"):"Invalid date / save failed");
         s_ui.dirty=true;
@@ -487,15 +514,40 @@ static void full_modbus_panel_tick(void)
         s_modbus_ui.battery_charge_decivolt=fresh?b->charge_max_decivolt:0;
         s_modbus_ui.battery_discharge_decivolt=fresh?b->discharge_min_decivolt:0;
     }
+    bool was_pending = s_modbus_ui.pending;
     panel_ui_sync(&s_modbus_ui,&s_modbus_snapshot);
-    uint8_t key;uint32_t timestamp;
-    while(direct_keys_get_timed_event(&key,&timestamp)){
+    if (was_pending && !s_modbus_ui.pending) {
+        if (s_modbus_ui.pending_type == PANEL_CMD_CONFIG) {
+            const panel_result_t *receipt = panel_result_find(&s_modbus_snapshot, s_modbus_ui.pending_sequence);
+            panel_sound_play(receipt && receipt->state == PANEL_WRITE_IDLE ? PANEL_SOUND_SUCCESS : PANEL_SOUND_ERROR);
+        } else if (s_modbus_ui.pending_type == PANEL_CMD_WRITE && s_modbus_ui.have_result) {
+            switch (s_modbus_ui.last_result) {
+            case PANEL_WRITE_CONFIRMED: panel_sound_play(PANEL_SOUND_SUCCESS); break;
+            case PANEL_WRITE_PROTOCOL_ACCEPTED: panel_sound_play(PANEL_SOUND_CONFIRM); break;
+            case PANEL_WRITE_PROCESSED:
+            case PANEL_WRITE_UNCERTAIN:
+            case PANEL_WRITE_REJECTED: panel_sound_play(PANEL_SOUND_ERROR); break;
+            default: break;
+            }
+        }
+    }
+    uint8_t key;uint32_t timestamp;bool press;
+    while(direct_keys_get_event_with_press(&key,&timestamp,&press)){
         if(!panel_key_current(timestamp))continue;
+        bool page_turn=s_modbus_ui.page==PANEL_PAGE_DETAILS || s_modbus_ui.page==PANEL_PAGE_ALARMS ||
+            s_modbus_ui.page==PANEL_PAGE_DIAG ||
+            (s_modbus_ui.page==PANEL_PAGE_SETTINGS && !s_modbus_ui.editing &&
+             (key==DIRECT_KEY_LEFT || key==DIRECT_KEY_RIGHT));
+        if(!press && page_turn)continue;
         unsigned sequence=atomic_fetch_add(&s_panel_key_events,1)+1;
         ESP_LOGW(TAG,"LCD_MB_KEY seq=%u key=%u page=%u edit=%u review=%u pending=%u",
                  sequence,key,s_modbus_ui.page,s_modbus_ui.editing,s_modbus_ui.review,s_modbus_ui.pending);
-        factory_note_key(key);
         if(panel_wake_key())continue;
+        bool power=s_modbus_ui.page==PANEL_PAGE_POWER;
+        bool reviewing=s_modbus_ui.review;
+        /* A second press buffered before the confirmation frame cannot send. */
+        if(power && reviewing && key==DIRECT_KEY_ENTER &&
+           (!s_modbus_drawn || (int32_t)(timestamp-s_power_review_visible_ms)<=0))continue;
         if(key==DIRECT_KEY_BACK && panel_ui_can_exit(&s_modbus_ui,&s_modbus_snapshot,s_modbus_root)){
             panel_bus_request_settings(NULL,0);
             s_modbus_active=false;s_have_previous=false;s_ui.dirty=true;
@@ -504,31 +556,52 @@ static void full_modbus_panel_tick(void)
         panel_command_t command={0};
         if(panel_ui_key(&s_modbus_ui,key,&s_modbus_snapshot,&command)){
             uint32_t sequence;
-            if(panel_bus_submit_sequence(&command,&sequence))panel_ui_submitted(&s_modbus_ui,sequence,command.type);
-            else panel_ui_submit_failed(&s_modbus_ui,command.type);
+            if(panel_bus_submit_in_context(&command,s_modbus_snapshot.context_generation,&sequence))panel_ui_submitted(&s_modbus_ui,sequence,command.type);
+            else {
+                panel_ui_submit_failed(&s_modbus_ui,command.type);
+                panel_sound_play(PANEL_SOUND_ERROR);
+            }
         }
         const panel_setting_t *item=s_modbus_ui.page==PANEL_PAGE_SETTINGS?panel_setting(s_modbus_ui.selected):NULL;
         ESP_LOGW(TAG,"LCD_MB_APPLY seq=%u page=%u item=%u reg=%04X edit=%u review=%u pending=%u blocked=%u reason=%s",
                  sequence,s_modbus_ui.page,s_modbus_ui.selected,item?item->address:0,
                  s_modbus_ui.editing,s_modbus_ui.review,s_modbus_ui.pending,s_modbus_ui.blocked,s_modbus_ui.message);
-    }
-    if(s_modbus_ui.page==PANEL_PAGE_DETAILS && s_modbus_ui.detail==3){
-        panel_bus_request_settings(NULL,0);
-        s_modbus_active=false;s_have_previous=false;
-        s_bms_return_root=s_modbus_root;s_bms_return_page=s_ui.page;
-        s_bms_return_detail=s_modbus_ui.detail_index_from_page?s_modbus_ui.detail_origin:2;
-        s_bms_return_pending=true;
-        s_ui.page=UI_BMS;s_ui.parent_page=UI_PARAMETERS;s_ui.detail_page=0;s_ui.dirty=true;
-        return;
+        if(s_modbus_ui.page==PANEL_PAGE_DETAILS)
+            ESP_LOGD(TAG,"LCD_DETAIL page=%u/%u key=%u",(unsigned)s_modbus_ui.detail+1U,PANEL_DETAIL_PAGES,key);
+        if(power && !reviewing && s_modbus_ui.review){
+            s_modbus_drawn=false;
+            break;
+        }
     }
     panel_ui_view(&s_modbus_ui,&s_modbus_snapshot,&s_modbus_view);
+    if(s_modbus_view.detail_dashboard && s_modbus_view.illustration==3){
+        const direct_bms_measurement_t *b=&s_ui_data.bms;
+        panel_view_t *v=&s_modbus_view;
+        bool valid=full_battery_sample_valid(&s_ui_data);
+        bool online=valid && s_ui_data.bms_online;
+        snprintf(v->subtitle,sizeof(v->subtitle),"%s",
+                 s_ui_data.bms_protocol==PANEL_BMS_CSERGY?"CSERGY Modbus":"BBJ (0x7C)");
+        snprintf(v->values[3],sizeof(v->values[3]),"%s",v->language_en?
+                 (online?"Connected":"Disconnected"):(online?"已连接":"未连接"));
+        if(valid){
+            unsigned voltage=b->voltage_10mv;
+            int32_t current=b->current_10ma;
+            unsigned magnitude=current<0?0U-(unsigned)current:(unsigned)current;
+            snprintf(v->values[0],sizeof(v->values[0]),"%u.%02u V",voltage/100,voltage%100);
+            snprintf(v->values[1],sizeof(v->values[1]),"%s%u.%02u A",current<0?"-":"",magnitude/100,magnitude%100);
+            snprintf(v->values[2],sizeof(v->values[2]),"%u%%",direct_bms_percent(b,b->soc_percent));
+            if(!online)v->stale_rows|=7;
+        }
+    }
     if(s_modbus_view.detail_dashboard && s_modbus_view.illustration==7 &&
        full_battery_sample_valid(&s_ui_data)){
         snprintf(s_modbus_view.values[3],sizeof(s_modbus_view.values[3]),"%s",
                  s_ui_data.bms_protocol==PANEL_BMS_CSERGY?"CSERGY":"BBJ");
         if(!s_ui_data.bms_online)s_modbus_view.stale_rows|=1U<<3;
     }
-    panel_bus_request_settings(s_modbus_view.setting_addresses,s_modbus_view.setting_count);
+    if(!s_modbus_ui.editing && !s_modbus_ui.review && !s_modbus_ui.pending &&
+       !s_modbus_ui.blocked && !s_modbus_ui.have_result)
+        panel_bus_request_settings(s_modbus_view.setting_addresses,s_modbus_view.setting_count);
     s_modbus_view.activity_frame=s_modbus_ui.pending?1:0;
     atomic_store(&s_panel_page,0x100U+s_modbus_ui.page);
     s_modbus_view.theme_light=(s_preview_style&1)!=0;
@@ -541,6 +614,8 @@ static void full_modbus_panel_tick(void)
         panel_lvgl_refresh(now_ms(),!s_modbus_drawn);
         bool ok=atomic_load(&s_lcd_tx_errors)==errors;
         if(ok){
+            if(!s_modbus_drawn && s_modbus_ui.page==PANEL_PAGE_POWER && s_modbus_ui.review)
+                s_power_review_visible_ms=now_ms();
             s_modbus_previous=s_modbus_view;s_modbus_drawn=true;
             if(changed)atomic_fetch_add(&s_panel_frames,1);
             atomic_store(&s_first_frame_done,true);
@@ -575,6 +650,7 @@ static void panel_task(void *arg) {
         if(atomic_load(&s_lcd_tx_errors)==errors)direct_panel_enable_display();
         s_panel_initialized=atomic_load(&s_lcd_tx_errors)==errors;
         if(s_panel_initialized){
+            panel_sound_play(PANEL_SOUND_BOOT);
             uint32_t started=now_ms();
             while(now_ms()-started<PANEL_SPLASH_DURATION_MS){
                 vTaskDelay(pdMS_TO_TICKS(30));
@@ -589,8 +665,6 @@ static void panel_task(void *arg) {
     ESP_LOGW(TAG,"LCD_UI_TASK entering refresh loop");
     uint32_t last_render=0;s_last_input=now_ms();
     uint32_t last_signature=0;
-    bool previous_alarm=false;
-    bool previous_factory_test=false;
     s_recovery.last_attempt_ms=now_ms();
     s_recovery.baseline_errors=atomic_load(&s_recovery_error_baseline);
     panel_stage(PANEL_SNAPSHOT);
@@ -619,24 +693,20 @@ static void panel_task(void *arg) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        if(s_modbus_active && (panel_ota_active() || factory_test_display_requested())){
+        if(s_modbus_active && panel_ota_active()){
             s_modbus_active=false;s_have_previous=false;s_ui.dirty=true;
         }
         if(s_modbus_active){
             panel_snapshot();
             full_modbus_panel_tick();
-            panel_idle_tick(panel_alarm_feedback(&previous_alarm) || s_ui_data.ota_busy || s_modbus_snapshot.command_busy);
+            panel_idle_tick(panel_alarm_feedback() || s_ui_data.ota_busy || s_modbus_snapshot.command_busy);
             panel_stage(PANEL_WAIT);
             atomic_store(&s_panel_stack_free,uxTaskGetStackHighWaterMark(NULL));
             if(s_modbus_active)vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
         bool handled_key=false;
-#if CONFIG_DIRECT_IDENTITY_PRODUCTION
-        if(!g_device_sn[0]){s_ui.page=UI_PRODUCTION;}
-#endif
-        bool factory_testing=factory_test_display_requested();
-        onboarding_inputs_t inputs=panel_onboarding_inputs(factory_testing);
+        onboarding_inputs_t inputs=panel_onboarding_inputs();
         if(s_ui.page==UI_PHONE_SETUP&&!s_onboarding.visible){
          /* Manual settings entry: preserve navigation, allow missing PIN guidance. */
          inputs.editing=false;s_phone_return=UI_SUBMENU;
@@ -646,27 +716,20 @@ static void panel_task(void *arg) {
         if(change==ONBOARDING_OPENED){s_phone_return=UI_HOME;s_ui.page=UI_PHONE_SETUP;s_ui.dirty=true;}
         if(change==ONBOARDING_CLOSED)panel_onboarding_close();
         if(s_onboarding.visible)onboarding_qr_update(&s_onboarding_qr,g_device_sn,s_pair_pin);
-        if(factory_testing){
-            if(s_ui.page==UI_APPEARANCE)panel_discard_preview();
-            panel_set_blank(false);s_last_input=now_ms();
-            s_ui.page=UI_HELP;s_ui.detail_page=1;
-            if(!previous_factory_test)s_ui.dirty=true;
-        }else if(previous_factory_test){s_ui.page=UI_HOME;s_ui.detail_page=0;s_ui.dirty=true;}
-        previous_factory_test=factory_testing;
         if(s_ui_data.ota_busy && s_ui.page!=UI_UPGRADE){
             if(s_ui.page==UI_APPEARANCE)panel_discard_preview();
             s_ui.page=UI_UPGRADE;s_ui.confirm=false;s_ui.message[0]=0;s_ui.dirty=true;
         }
-        uint8_t key;uint32_t sampled;
-        while(direct_keys_get_timed_event(&key,&sampled)){
+        uint8_t key;uint32_t sampled;bool press;
+        while(direct_keys_get_event_with_press(&key,&sampled,&press)){
             if(!panel_key_current(sampled))continue;
+            if(!press && (s_ui.page==UI_BMS || s_ui.page==UI_UPGRADE ||
+                          (s_ui.page==UI_SUBMENU && (key==DIRECT_KEY_LEFT || key==DIRECT_KEY_RIGHT))))continue;
             unsigned key_sequence=atomic_fetch_add(&s_panel_key_events,1)+1;
-            ESP_LOGW(TAG,"LCD_KEY received seq=%u key=%u page=%u guide=%u blank=%u factory=%u",
-                     key_sequence,key,s_ui.page,s_onboarding.visible,s_blank,factory_testing);
-            handled_key=true;factory_note_key(key);
+            ESP_LOGW(TAG,"LCD_KEY received seq=%u key=%u page=%u guide=%u blank=%u",
+                     key_sequence,key,s_ui.page,s_onboarding.visible,s_blank);
+            handled_key=true;
             bool woke=panel_wake_key();
-            /* Diagnostic key presses are evidence only; never issue inverter actions. */
-            if(factory_testing){s_ui.dirty=true;continue;}
             if(woke)continue;
             if(s_onboarding.visible){
              if(key==1){
@@ -695,11 +758,8 @@ static void panel_task(void *arg) {
         panel_bus_request_settings(NULL,0);
         panel_stage(PANEL_SNAPSHOT);
         panel_snapshot();
-        /* Opening the existing Phone connection page requests exclusive BLE.
-         * Resource work stays in the main loop, never the LCD/key task. */
-        app_request_local_ble(s_onboarding.visible && !s_onboarding.automatic);
-        bool alarm=panel_alarm_feedback(&previous_alarm);
-        panel_idle_tick(alarm || s_ui_data.ota_busy || factory_testing);
+        bool alarm=panel_alarm_feedback();
+        panel_idle_tick(alarm || s_ui_data.ota_busy);
         atomic_store(&s_panel_page,s_ui.page);
         panel_stage(PANEL_RENDER);
         bool catalog=firmware_ui_tick();
@@ -709,6 +769,8 @@ static void panel_task(void *arg) {
         else direct_ui_build(&s_ui,&s_ui_data,&s_view);
         uint32_t signature=direct_display_signature(&s_ui,&s_ui_data,&s_view);
         if(s_ui.page==UI_HOME){
+            const uint8_t *home=(const uint8_t *)&s_home_readings;
+            for(size_t i=0;i<sizeof(s_home_readings);i++)signature=(signature^home[i])*16777619U;
             signature=(signature^full_inverter_alarm_active(&s_ui_data))*16777619U;
             full_battery_source_t battery=full_battery_source(&s_ui_data);
             signature=(signature^(uint32_t)battery)*16777619U;

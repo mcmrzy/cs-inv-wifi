@@ -25,12 +25,27 @@ menu "CS_INV ESP32 Direct Controller"
 
     config DIRECT_BUZZ_PIN
         int "Buzzer GPIO (-1 disables buzzer output)"
-        default 8
+        default -1
 
     config DIRECT_BUZZ_ACTIVE_LEVEL
         int "Buzzer active level (0 or 1)"
         range 0 1
         default 1
+
+    config DIRECT_BUZZ_PULSE_MS
+        int "L10 active buzzer pulse duration (ms)"
+        range 20 1000
+        default 70
+
+    config DIRECT_LED_GPIO
+        int "L10 WS2812 data GPIO (-1 disables the LEDs)"
+        range -1 21
+        default -1
+
+    config DIRECT_LED_BRIGHTNESS
+        int "L10 WS2812 brightness (0=off, 255=maximum)"
+        range 0 255
+        default 24
 
     config DIRECT_DSP_TX_PIN
         int "DSP UART TX GPIO (-1 disables direct bus)"
@@ -191,6 +206,11 @@ menu "CS_INV ESP32 Direct Controller"
         config DIRECT_KEY_MATRIX
             bool "Legacy four-wire key matrix"
     endchoice
+
+    config DIRECT_KEY_NEW_LAYOUT
+        bool "BS818A layout with BACK on KEY6, LEFT on KEY5 and UP on KEY4"
+        depends on DIRECT_KEY_BS818A
+        default n
 
     config CS_INV_UART_TX_PIN
         int "UART TX GPIO (U0TXD)"

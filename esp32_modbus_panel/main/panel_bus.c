@@ -35,17 +35,39 @@ static unsigned s_setting_count,s_setting_version,s_setting_applied;
 static uint32_t s_active_sequence;
 static panel_command_type_t s_active_type;
 static atomic_uint s_context_generation;
-typedef struct {panel_command_t command;uint32_t sequence;} queued_command_t;
+typedef struct {panel_command_t command;uint32_t sequence,context;} queued_command_t;
 typedef struct {
     uint8_t address,function,exception,head[24],head_length;
     uint16_t start,count;
     uint32_t bytes,at_ms;
     const char *result;
-    bool valid;
+    bool valid,nak;
 } exchange_trace_t;
 static exchange_trace_t s_rx,s_failed_rx;
+static bool s_recent_3ku_nak;
+static uint32_t s_last_3ku_nak_ms;
 static uint32_t s_read_ok,s_read_failed,s_read_at;
 static bool s_have_read;
+
+static void log_3ku_load(uint32_t now)
+{
+    /* Compare the normal measurement and the output diagnostic in their own units. */
+    const uint16_t registers[]={0x58,0x59,0x5b,0x5c,0x21c};
+    uint16_t raw[sizeof(registers)/sizeof(registers[0])]={0};
+    uint32_t age[sizeof(registers)/sizeof(registers[0])];
+    unsigned available=0;
+    for(unsigned i=0;i<sizeof(registers)/sizeof(registers[0]);i++){
+        age[i]=UINT32_MAX;
+        if(panel_value(&s_live,registers[i],&raw[i])){
+            available|=1U<<i;
+            age[i]=now-panel_stamp(&s_live,registers[i]);
+        }
+    }
+    ESP_LOGI(TAG,"INV_LOAD_3KU available=%02X V10_0058=%u A100_0059=%u W_005B=%u VA_005C=%u W_021C=%d age_ms=%lu/%lu/%lu/%lu/%lu",
+        available,raw[0],raw[1],raw[2],raw[3],(int)(int16_t)raw[4],
+        (unsigned long)age[0],(unsigned long)age[1],(unsigned long)age[2],
+        (unsigned long)age[3],(unsigned long)age[4]);
+}
 
 static void log_link_health(void)
 {
@@ -67,6 +89,23 @@ static void log_link_health(void)
     ESP_LOGI(TAG,"INV_LINK %s UART0 TX=1 RX=0 invert=off addr=%u baud=%lu parity=%c status=%04X age_ms=%lu read_ok=%lu read_fail=%lu",
         state,s_live.config.address,(unsigned long)s_live.config.baud,"NEO"[s_live.config.parity],
         status,(unsigned long)age,(unsigned long)s_read_ok,(unsigned long)s_read_failed);
+    if(!s_live.scanning && !atomic_load(&s_quiet) && panel_is_3ku(&s_live)){
+        uint16_t forward=0,reverse=0,load=0;
+        unsigned available=0;
+        if(panel_value(&s_live,0x5e,&forward))available|=1U;
+        if(panel_value(&s_live,0x53,&reverse))available|=2U;
+        if(panel_value(&s_live,0x5b,&load))available|=4U;
+        int32_t grid_w=0;
+        bool fresh=false;
+        bool decoded=panel_grid_watts(&s_live,&grid_w,&fresh);
+        ESP_LOGI(TAG,"INV_AC_3KU available=%X in_005E=%04X out_0053=%04X load_005B=%04X age_ms=%lu/%lu/%lu grid_valid=%d grid_W=%ld",
+            available,forward,reverse,load,
+            (unsigned long)(available&1U?now-panel_stamp(&s_live,0x5e):UINT32_MAX),
+            (unsigned long)(available&2U?now-panel_stamp(&s_live,0x53):UINT32_MAX),
+            (unsigned long)(available&4U?now-panel_stamp(&s_live,0x5b):UINT32_MAX),
+            decoded,(long)grid_w);
+        log_3ku_load(now);
+    }
     if(s_failed_rx.valid && !s_live.scanning){
         char head[73];panel_mb_hex_head(s_failed_rx.head,s_failed_rx.head_length,head,sizeof(head));
         ESP_LOGI(TAG,"INV_RX last_fail addr=%u fc=%02X reg=%04X count=%u result=%s rx_bytes=%lu ex=%02X age_ms=%lu head=%s",
@@ -115,18 +154,19 @@ bool panel_bus_snapshot(panel_snapshot_t *out)
 bool panel_bus_alarm_sample(panel_alarm_sample_t *out)
 {
     if(!out || !s_lock)return false;
-    *out=(panel_alarm_sample_t){.now_ms=uptime(NULL)};
     xSemaphoreTake(s_lock,portMAX_DELAY);
+    *out=(panel_alarm_sample_t){.now_ms=uptime(NULL)};
     panel_profile_t profile=s_shared.detected_profile;
     if(!panel_profile_supported(profile))profile=s_shared.config.profile_override;
     out->is_3ku=profile==PANEL_PROFILE_3KU;
     if(panel_profile_supported(profile))for(unsigned i=0;i<4;i++){
         unsigned slot=panel_slot((uint16_t)(0x46+i));
-        if(s_shared.valid[slot] && out->now_ms-s_shared.updated_ms[slot]<=PANEL_FRESH_MS){
+        if(panel_slot_valid(&s_shared,slot) && out->now_ms-s_shared.updated_ms[slot]<=PANEL_FRESH_MS){
             out->words[i]=s_shared.values[slot];out->fresh|=(uint8_t)(1U<<i);
         }
     }
-    for(unsigned i=0;i<PANEL_CACHE_SLOTS;i++)if(s_shared.valid[i] && out->now_ms-s_shared.updated_ms[i]<=PANEL_FRESH_MS){out->reachable=true;break;}
+    for(unsigned i=0;i<PANEL_CACHE_SLOTS;i++)
+        if(panel_slot_valid(&s_shared,i) && out->now_ms-s_shared.updated_ms[i]<=PANEL_FRESH_MS){out->reachable=true;break;}
     out->paused=atomic_load(&s_quiet) || s_shared.scanning;
     xSemaphoreGive(s_lock);return true;
 }
@@ -142,7 +182,7 @@ static bool submit_sequence(const panel_command_t *command,const uint32_t *conte
     bool available=command->type==PANEL_CMD_SCAN_CANCEL ?
         s_reserved && s_shared.scanning : !s_reserved;
     if(context && *context!=s_shared.context_generation)available=false;
-    queued_command_t request={.command=*command,.sequence=s_sequence+1U};
+    queued_command_t request={.command=*command,.sequence=s_sequence+1U,.context=s_shared.context_generation};
     bool accepted=available && xQueueSend(s_commands,&request,0)==pdTRUE;
     if (accepted) {
         s_reserved=true;
@@ -172,7 +212,11 @@ static void complete(void)
             state<sizeof(states)/sizeof(states[0])?states[state]:"UNKNOWN",state,s_live.exception,
             s_control.marker_seen,s_control.marker_raw,s_control.actual_reg,s_control.actual_seen,s_control.actual_raw);
     }
-    panel_result_record(&s_live,s_active_sequence,s_live.write_state,s_live.exception);
+    panel_result_t *receipt=panel_result_record(&s_live,s_active_sequence,s_live.write_state,s_live.exception);
+    if(s_active_type==PANEL_CMD_WRITE && s_control.readback_valid){
+        receipt->readback_valid=true;
+        receipt->readback_value=s_control.readback_value;
+    }
     xSemaphoreTake(s_lock,portMAX_DELAY);
     /* A cancellation may have queued while the last scan read completed. */
     s_reserved=uxQueueMessagesWaiting(s_commands)>0;
@@ -218,10 +262,17 @@ static esp_err_t configure_uart(const panel_config_t *config)
 static panel_io_result_t exchange(const uint8_t *request,size_t length,uint8_t function,
                                  uint16_t start,uint16_t count,panel_mb_reply_t *reply)
 {
+    enum { READ_3KU_AFTER_NAK_GAP_MS = 35, READ_3KU_NAK_QUIET_MS = 30 };
+    const panel_profile_t profile = s_live.config.profile_override == PANEL_PROFILE_UNKNOWN
+        ? s_live.detected_profile : s_live.config.profile_override;
+    const bool read_3ku = function == 3 && !s_live.scanning &&
+                          s_target == s_live.config.address && profile == PANEL_PROFILE_3KU;
+    const bool after_nak = read_3ku && s_rx.nak && s_rx.address == s_target;
     s_rx=(exchange_trace_t){.address=s_target,.function=function,.start=start,.count=count,.valid=true};
     /* Dedicated bus, 8N1 at 9600: 3.5 characters <4ms. Also cover 1200 8E1.
      * Flush only after a quiet interval; never read this UART in another task. */
     uint32_t gap=(38500U+s_live.config.baud-1U)/s_live.config.baud+2U;
+    if (after_nak && gap < READ_3KU_AFTER_NAK_GAP_MS) gap = READ_3KU_AFTER_NAK_GAP_MS;
     uint32_t elapsed=uptime(NULL)-s_last_end;
     if(elapsed<gap)sleep_ms(NULL,gap-elapsed);
     uart_flush_input(UART_NUM_0);
@@ -232,10 +283,12 @@ static panel_io_result_t exchange(const uint8_t *request,size_t length,uint8_t f
     }
     panel_mb_stream_t stream={0};
     uint32_t started=uptime(NULL);
+    uint32_t last_rx = started;
     uint8_t bytes[64];
     while(uptime(NULL)-started<s_timeout) {
         atomic_store(&s_tick,uptime(NULL));
         int n=uart_read_bytes(UART_NUM_0,bytes,sizeof(bytes),pdMS_TO_TICKS(10));
+        if (n > 0) last_rx = uptime(NULL);
         for(int i=0;i<n;i++) {
             s_rx.bytes++;
             if(s_rx.head_length<sizeof(s_rx.head))s_rx.head[s_rx.head_length++]=bytes[i];
@@ -246,6 +299,19 @@ static panel_io_result_t exchange(const uint8_t *request,size_t length,uint8_t f
                 if(reply->exception)s_failed_rx=s_rx;
                 return reply->exception ? PANEL_IO_EXCEPTION : PANEL_IO_OK;
             }
+        }
+        /* Give the RTU parser first chance at a response following the ASCII NAK. */
+        if (read_3ku && n == 0 && s_rx.bytes == 4 &&
+            memcmp(s_rx.head, "NAK\r", 4) == 0 &&
+            uptime(NULL) - last_rx >= READ_3KU_NAK_QUIET_MS) {
+            s_last_end = uptime(NULL);
+            s_rx.at_ms = s_last_end;
+            s_rx.result = "NAK";
+            s_rx.nak = true;
+            s_recent_3ku_nak = true;
+            s_last_3ku_nak_ms = s_last_end;
+            s_failed_rx = s_rx;
+            return PANEL_IO_NAK;
         }
     }
     s_last_end=uptime(NULL);
@@ -284,22 +350,24 @@ static panel_io_result_t write_reg(void *context,uint16_t reg,uint16_t value,uin
     return r;
 }
 
-static void poll_block(uint16_t start,uint16_t count)
+static panel_io_result_t poll_block(uint16_t start,uint16_t count)
 {
     uint16_t values[32];uint8_t exception=0;
-    if(count>32 || (uint32_t)start+count>PANEL_REG_COUNT)return;
-    if(read_regs(NULL,start,count,values,&exception)==PANEL_IO_OK) {
+    if(count>32 || (uint32_t)start+count>PANEL_REG_COUNT)return PANEL_IO_ERROR;
+    panel_io_result_t result=read_regs(NULL,start,count,values,&exception);
+    if(result==PANEL_IO_OK) {
         uint32_t received=uptime(NULL);
-        for(unsigned i=0;i<count;i++) {
-            s_live.values[panel_slot(start+i)]=values[i];
-            s_live.updated_ms[panel_slot(start+i)]=received;
-            s_live.valid[panel_slot(start+i)]=true;
-        }
+        if(start==0x38 && count==2){
+            if(panel_observe_identity(&s_live,values[0],values[1],received)){
+                atomic_store(&s_context_generation,s_live.context_generation);
+                ESP_LOGI(TAG,"MODEL_AUTO id38=%04X id39=%04X model=%s",values[0],values[1],
+                         panel_profile_name(panel_effective_profile(&s_live)));
+            }
+        }else for(unsigned i=0;i<count;i++)panel_store(&s_live,(uint16_t)(start+i),values[i],received);
     }
     s_live.now_ms=uptime(NULL);
-    if(s_live.valid[panel_slot(0x38)] && s_live.valid[panel_slot(0x39)])
-        s_live.detected_profile=panel_detect_profile(s_live.values[panel_slot(0x38)],s_live.values[panel_slot(0x39)]);
     publish(NULL,&s_live);
+    return result;
 }
 
 static void change_config(panel_config_t config)
@@ -359,11 +427,14 @@ void panel_bus_request_ble_setting(uint16_t address)
 {
     if(!s_lock || !panel_setting_find(address))return;
     xSemaphoreTake(s_lock,portMAX_DELAY);
-    if(s_ble_setting!=address){
+    uint32_t now=uptime(NULL);
+    const panel_setting_read_t *read=panel_setting_read_find(&s_shared,address);
+    if(s_ble_setting!=address || (read && read->state!=PANEL_SETTING_UNREAD &&
+       now-read->stamp>PANEL_FRESH_MS)){
         s_ble_setting=address;
         s_setting_version++;
     }
-    s_ble_setting_until=uptime(NULL)+4000U;
+    s_ble_setting_until=now+4000U;
     xSemaphoreGive(s_lock);
 }
 
@@ -383,14 +454,16 @@ static bool service_settings_query(const panel_control_io_t *io)
         s_setting_applied=s_setting_version;
     }
     xSemaphoreGive(s_lock);
-    if(changed)panel_settings_query_start(&s_setting_query,&s_live,addresses,count);
-    unsigned slot=s_setting_query.cursor<s_setting_query.count?s_setting_query.cursor:0;
+    if(changed){
+        s_live.now_ms=io->now(io->context);
+        panel_settings_query_start(&s_setting_query,&s_live,addresses,count);
+    }
     uint32_t previous_timeout=s_timeout;s_timeout=150;
     bool read=panel_settings_query_tick(&s_setting_query,&s_live,io);
     s_timeout=previous_timeout;
     if(read){
         static const char *const states[]={"READING","VALUE","NO_VALUE","TIMEOUT","UNSUPPORTED","INVALID"};
-        const panel_setting_read_t *r=&s_live.setting_reads[slot];
+        const panel_setting_read_t *r=&s_live.setting_reads[s_setting_query.last_slot];
         ESP_LOGI(TAG,"SETTING_READ fc=03 setting=%04X reg=%04X raw=%04X state=%s",
             r->address,s_setting_query.last_reg,s_setting_query.last_raw,
             r->state<sizeof(states)/sizeof(states[0])?states[r->state]:"INVALID");
@@ -399,19 +472,64 @@ static bool service_settings_query(const panel_control_io_t *io)
     return read;
 }
 
+typedef struct {
+    uint16_t start,count;
+    uint32_t retry_at;
+    uint16_t retry_ms;
+} background_block_t;
+
+static bool poll_background(background_block_t *blocks,unsigned count,unsigned *cursor,uint32_t now)
+{
+    for(unsigned i=0;i<count;i++){
+        background_block_t *block=&blocks[*cursor];
+        *cursor=(*cursor+1U)%count;
+        if(block->retry_ms && (int32_t)(now-block->retry_at)<0)continue;
+        if(poll_block(block->start,block->count)==PANEL_IO_OK){
+            if(block->retry_ms)ESP_LOGI(TAG,"POLL_BACKGROUND reg=%04X restored",block->start);
+            block->retry_ms=0;
+        }else{
+            enum { RETRY_START_MS=2000, RETRY_MAX_MS=8000 };
+            if(!block->retry_ms)ESP_LOGI(TAG,"POLL_BACKGROUND reg=%04X retry_ms=%u",block->start,(unsigned)RETRY_START_MS);
+            block->retry_ms=block->retry_ms?(uint16_t)(block->retry_ms*2U):RETRY_START_MS;
+            if(block->retry_ms>RETRY_MAX_MS)block->retry_ms=RETRY_MAX_MS;
+            block->retry_at=uptime(NULL)+block->retry_ms;
+        }
+        return true;
+    }
+    return false;
+}
+
+static void reset_background(background_block_t *blocks,unsigned count)
+{
+    for(unsigned i=0;i<count;i++)blocks[i].retry_ms=0;
+}
+
+static panel_io_result_t poll_realtime(uint16_t start, uint16_t count)
+{
+    /* A 3KU ASCII NAK can be transient. Bound retries to one read. */
+    panel_io_result_t result = poll_block(start, count);
+    return result == PANEL_IO_NAK ? poll_block(start, count) : result;
+}
+
 static void bus_task(void *arg)
 {
     (void)arg;
-    /* Keep all fields consumed by the direct home/telemetry sample within its
-     * two-second freshness window at 9600 baud. Interleave one diagnostic block
-     * per core round instead of delaying live measurements behind all pages. */
-    const uint16_t blocks[][2]={{0x50,16},{0x80,16},{0x96,11},{0x150,16},
-        {0x330,7},{0x140,5},{0x2a1,1},{0x350,2},{0x176,12}};
-    const uint16_t diagnostics[][2]={{0x91,2},{0x38,2},{0x60,16},{0x70,16},
-        {0x210,2},{0x218,16}};
-    unsigned block=0,diagnostic=0,scan=0,ota_diagnostic=0,query_gap=0;
+    enum { BACKGROUND_RECOVERY_MS = 2000, BACKGROUND_RECOVERY_MEASUREMENTS = 3 };
+    const uint16_t measurements[][2]={{0x50,16},{0x80,16},{0x96,11},{0x150,16},{0x330,7}};
+    background_block_t settings[]={
+        {.start=0x140,.count=5},{.start=0x2a1,.count=1},{.start=0x2a0,.count=1},
+        {.start=0x350,.count=2},{.start=0x176,.count=12},{.start=0x19e,.count=3},
+    };
+    background_block_t diagnostics[]={
+        {.start=0x91,.count=2},{.start=0x60,.count=16},
+        {.start=0x70,.count=16},{.start=0x210,.count=2},{.start=0x218,.count=16},
+    };
+    const unsigned settings_count=sizeof(settings)/sizeof(settings[0]);
+    const unsigned diagnostics_count=sizeof(diagnostics)/sizeof(diagnostics[0]);
+    unsigned block=0,setting=0,diagnostic=0,scan=0,ota_diagnostic=0,query_gap=0,background_gap=0;
     bool diagnostic_due=false,identify=true;
-    uint32_t next_status=0,next_poll=0;
+    uint32_t next_status=uptime(NULL),next_poll=next_status;
+    uint32_t next_status_batch=next_status,next_identify=next_status;
     panel_control_io_t io={NULL,uptime,sleep_ms,read_regs,write_reg,publish};
     for(;;) {
         atomic_store(&s_tick,uptime(NULL));
@@ -441,7 +559,7 @@ static void bus_task(void *arg)
             if(command.type==PANEL_CMD_SCAN_CANCEL) {
                 s_live.scanning=false;scan=0;s_target=s_live.config.address;s_timeout=350;
                 s_live.write_state=PANEL_WRITE_IDLE;s_live.exception=0;
-                complete();next_status=0;next_poll=0;
+                complete();next_status=next_poll=uptime(NULL);
             } else if(command.type==PANEL_CMD_SCAN) {
                 scan=1;s_live.scanning=true;s_live.scan_address=1;s_live.scan_found=0;
                 s_live.write_state=PANEL_WRITE_IDLE;
@@ -450,11 +568,25 @@ static void bus_task(void *arg)
                 if(s_live.scanning) { s_live.scanning=false;scan=0;s_timeout=350; }
                 s_target=s_live.config.address;
                 if(command.type==PANEL_CMD_CONFIG){
-                    change_config(command.config);identify=true;ota_diagnostic=0;atomic_store(&s_diag_request,false);complete();
+                    uint32_t previous_context=s_live.context_generation;
+                    change_config(command.config);
+                    if(s_live.context_generation!=previous_context){
+                        reset_background(settings,settings_count);
+                        reset_background(diagnostics,diagnostics_count);
+                        next_status_batch=uptime(NULL);
+                        s_recent_3ku_nak=false;
+                        block=setting=diagnostic=query_gap=background_gap=0;
+                        diagnostic_due=false;
+                    }
+                    identify=true;ota_diagnostic=0;atomic_store(&s_diag_request,false);complete();
                 }
-                else if(command.type==PANEL_CMD_WRITE &&
-                    !panel_control_begin(&s_control,&s_live,command.address,command.value,&io))complete();
-                next_status=0;next_poll=0;
+                else if(command.type==PANEL_CMD_WRITE){
+                    if(request.context!=s_live.context_generation){
+                        s_live.write_state=PANEL_WRITE_REJECTED;s_live.exception=0;complete();
+                    }else if(!panel_control_begin(&s_control,&s_live,command.address,command.value,&io))complete();
+                    else s_control.require_opposite_output=command.require_opposite_output;
+                }
+                next_status=next_poll=uptime(NULL);
             }
         }
         /* One confirmation transaction per turn leaves the regular measurement
@@ -471,51 +603,88 @@ static void bus_task(void *arg)
             } else scan++;
             if(scan>247) {
                 scan=0;s_live.scanning=false;s_target=s_live.config.address;s_timeout=350;
-                complete();next_status=0;next_poll=0;
+                complete();next_status=next_poll=uptime(NULL);
             } else publish(NULL,&s_live);
         } else {
             uint32_t now=uptime(NULL);
-            if(identify){
+            const panel_profile_t profile = s_live.config.profile_override == PANEL_PROFILE_UNKNOWN
+                ? s_live.detected_profile : s_live.config.profile_override;
+            const bool is_3ku = profile == PANEL_PROFILE_3KU;
+            if(identify && !panel_control_active(&s_control)){
                 identify=false;
                 poll_block(0x38,2);
+                next_identify=uptime(NULL)+1000U;
             } else if((int32_t)(now-next_status)>=0) {
                 /* Alarm acquisition is independent of all live measurements,
                  * version words and the unused parallel-state register0045. */
-                poll_block(0x41,4);poll_block(0x46,4);next_status=uptime(NULL)+500;
+                bool split_status = is_3ku && (int32_t)(now - next_status_batch) < 0;
+                if (!split_status) {
+                    split_status = poll_block(0x41, 4) == PANEL_IO_NAK;
+                    /* Keep working reads in rotation before probing the rejected batch again. */
+                    next_status_batch = uptime(NULL) + (split_status ? 5000U : 0U);
+                }
+                if (split_status && poll_realtime(0x42, 1) == PANEL_IO_OK) {
+                    /* Recover online status first, then the terminal and flow required by telemetry. */
+                    poll_realtime(0x43, 2);
+                    poll_block(0x41, 1);
+                }
+                poll_realtime(0x46, 4);
+                next_status = uptime(NULL) + 500;
             } else if((int32_t)(now-next_poll)>=0) {
-                if(!panel_control_active(&s_control) && query_gap>=3 && service_settings_query(&io)){
-                    query_gap=0;
-                }else if(diagnostic_due){
-                    /* Slow/unsupported OTA diagnostics may each time out.
-                     * Allocate one block per normal diagnostic slot rather
-                     * than delaying live sampling behind three reads. */
-                    if(ota_diagnostic || atomic_exchange(&s_diag_request,false)){
-                        static const uint16_t regs[]={0x4090,0x4092,0x4095};
-                        uint16_t values[14];uint8_t exception=0;
-                        if(read_regs(NULL,regs[ota_diagnostic],ota_diagnostic==2?14:1,values,&exception)==PANEL_IO_OK){
-                            if(ota_diagnostic==0)s_live.ota_error=values[0];
-                            else if(ota_diagnostic==1)s_live.ota_run=values[0];
-                            else memcpy(s_live.ota_info,values,sizeof(values));
-                            s_live.ota_valid|=(uint8_t)(1U<<ota_diagnostic);
-                            s_live.ota_updated_ms[ota_diagnostic]=uptime(NULL);
+                bool polled_background=false;
+                if (s_recent_3ku_nak && now - s_last_3ku_nak_ms >= BACKGROUND_RECOVERY_MS)
+                    s_recent_3ku_nak = false;
+                /* Preserve the usual configuration cadence once the bus is responding. */
+                const unsigned background_interval = is_3ku && s_recent_3ku_nak
+                    ? BACKGROUND_RECOVERY_MEASUREMENTS : 1U;
+                if(background_gap >= background_interval && !panel_control_active(&s_control)){
+                    if((int32_t)(now-next_identify)>=0){
+                        poll_block(0x38,2);
+                        next_identify=uptime(NULL)+2000U;
+                        polled_background=true;
+                    }else if(query_gap>=3 && service_settings_query(&io)){
+                        query_gap=0;polled_background=true;
+                    }else if(diagnostic_due){
+                        diagnostic_due=false;
+                        /* An explicit OTA diagnostic request still advances one
+                         * register group at a time through the same slot. */
+                        if(ota_diagnostic || atomic_exchange(&s_diag_request,false)){
+                            static const uint16_t regs[]={0x4090,0x4092,0x4095};
+                            uint16_t values[14];uint8_t exception=0;
+                            if(read_regs(NULL,regs[ota_diagnostic],ota_diagnostic==2?14:1,values,&exception)==PANEL_IO_OK){
+                                if(ota_diagnostic==0)s_live.ota_error=values[0];
+                                else if(ota_diagnostic==1)s_live.ota_run=values[0];
+                                else memcpy(s_live.ota_info,values,sizeof(values));
+                                s_live.ota_valid|=(uint8_t)(1U<<ota_diagnostic);
+                                s_live.ota_updated_ms[ota_diagnostic]=uptime(NULL);
+                            }
+                            ota_diagnostic=(ota_diagnostic+1U)%3U;publish(NULL,&s_live);
+                            polled_background=true;
+                        }else{
+                            polled_background=poll_background(diagnostics,diagnostics_count,&diagnostic,now);
                         }
-                        ota_diagnostic=(ota_diagnostic+1U)%3U;publish(NULL,&s_live);
-                    }else{
-                        poll_block(diagnostics[diagnostic][0],diagnostics[diagnostic][1]);
-                        diagnostic=(diagnostic+1U)%(sizeof(diagnostics)/sizeof(diagnostics[0]));
                     }
-                    diagnostic_due=false;
-                }else{
-                    uint16_t start=blocks[block][0],count=blocks[block][1];
+                    if(!polled_background)polled_background=poll_background(settings,settings_count,&setting,now);
+                }
+                if(!polled_background){
+                    uint16_t start=measurements[block][0],count=measurements[block][1];
                     if(panel_is_3ku(&s_live)){
                         if(start==0x96)count=10; /* 3KU table ends at 009F. */
                         if(start==0x330)count=5; /* No 0335/0336 temperature fields. */
                     }
-                    poll_block(start,count);
+                    if(is_3ku && start==0x50){
+                        if(poll_block(start,count)==PANEL_IO_NAK){
+                            /* Keep both grid words and load power in the same reply. */
+                            poll_block(0x53,12);
+                            poll_block(0x50,3);
+                        }
+                    }else poll_realtime(start,count);
                     if(query_gap<3)query_gap++;
-                    block=(block+1U)%(sizeof(blocks)/sizeof(blocks[0]));
-                    diagnostic_due=block==0;
+                    block=(block+1U)%(sizeof(measurements)/sizeof(measurements[0]));
+                    if(block==0)diagnostic_due=true;
                 }
+                if (polled_background) background_gap = 0;
+                else if (background_gap < background_interval) background_gap++;
                 next_poll=uptime(NULL)+40;
             }
         }

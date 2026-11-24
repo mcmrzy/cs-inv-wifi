@@ -1,10 +1,11 @@
 param(
  [string]$FirmwareRelease = 'release/esp32c3_v0.6.34_provisioning_dev_20261016',
+ [string]$Python = 'C:\Users\29538\.espressif\python_env\idf5.5_py3.13_env\Scripts\python.exe',
  [switch]$SkipExeBuild,
  [switch]$SkipFirmwareCopy
 )
 $ErrorActionPreference = 'Stop'
-$taskPython = 'C:\Users\29538\.espressif\python_env\idf5.5_py3.13_env\Scripts\python.exe'
+$taskPython = $Python
 $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $taskRoot
 try {

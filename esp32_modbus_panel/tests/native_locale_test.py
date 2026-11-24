@@ -21,7 +21,7 @@ int main(void){
  unsigned failures=0;
  for(unsigned i=0;i<sizeof(source)/sizeof(source[0]);i++){
   char out[256];snprintf(out,sizeof(out),"%s",source[i]);panel_locale_english(out,sizeof(out));
-  for(const unsigned char *p=(const unsigned char *)out;*p;p++)if(*p>=128){
+  for(const char *p=out;*p;p++)if(!strncmp(p,"℃",3))p+=2;else if((unsigned char)*p>=128){
    fprintf(stderr,"UNTRANSLATED %s -> %s\n",source[i],out);failures++;break;
   }
  }

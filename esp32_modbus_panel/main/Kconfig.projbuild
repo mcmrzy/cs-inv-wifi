@@ -9,12 +9,12 @@ menu "Modbus inverter panel"
         range 0 255
         default 24
     config PANEL_BUZZ_FREQUENCY_HZ
-        int "Passive buzzer tone frequency (Hz)"
+        int "Passive buzzer rated frequency (Hz)"
         range 1000 8000
-        default 4000
+        default 2048
         help
-            Match the fitted passive buzzer's rated tone frequency.
-            Uses LEDC timer1/channel1; key and alarm pulses last 70ms.
+            Sets the frequency of the 70ms test pulse. The 2048 Hz profile
+            also retunes the normal sound effects around that frequency.
     config PANEL_SLAVE_ADDRESS
         int "Initial Modbus slave address"
         range 1 247

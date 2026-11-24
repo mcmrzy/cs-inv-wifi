@@ -6,7 +6,7 @@ void panel_lvgl_host_assert(const char *file,int line);
 #endif
 #define LV_COLOR_DEPTH 16
 #define LV_COLOR_16_SWAP 0
-#define LV_MEM_SIZE (20U * 1024U)
+#define LV_MEM_SIZE (19U * 1024U)
 /* All product text uses the board's licensed subset. Avoid linking a second,
  * unused built-in Latin font through LVGL's default-style fallback. */
 #define LV_FONT_MONTSERRAT_14 0

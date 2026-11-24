@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static void power(char out[16],int32_t value){
+void direct_home_format_power(char out[16],int32_t value){
  uint32_t n=value<0?(uint32_t)(-(int64_t)value):(uint32_t)value;
  const char *sign=value<0?"-":"";
  if(n>=1000000U)snprintf(out,16,"%s%luMW",sign,(unsigned long)((n+500000U)/1000000U));
@@ -19,7 +19,7 @@ void direct_home_values(const direct_ui_data_t *d,direct_home_values_t *v){
  strcpy(v->load_power,"--W");strcpy(v->load_voltage,"--V");
  if(!d->dsp_online && !d->dsp_display_held)return;
  const RunParamDef *p=&d->run;
- power(v->grid_power,p->ACInWatt);power(v->pv_power,p->Ppv);power(v->load_power,p->OutputWatt);
+ direct_home_format_power(v->grid_power,p->ACInWatt);direct_home_format_power(v->pv_power,p->Ppv);direct_home_format_power(v->load_power,p->OutputWatt);
  snprintf(v->grid_voltage,16,"%uV",p->GridVolt);snprintf(v->pv_voltage,16,"%uV",p->Vpv1);
  snprintf(v->load_voltage,16,"%uV",p->ACOutputVolt);
  /* Keep the narrow auxiliary column usable for corrupt/out-of-range raw data. */
@@ -36,7 +36,7 @@ void direct_home_values(const direct_ui_data_t *d,direct_home_values_t *v){
    v->battery_watts=p->BatChrWatt?p->BatChrWatt:p->BatDisChrWatt;
    v->battery_state=p->BatChrWatt?DIRECT_HOME_CHARGING:DIRECT_HOME_DISCHARGING;
   }
-  power(v->battery_power,(int32_t)v->battery_watts);
+  direct_home_format_power(v->battery_power,(int32_t)v->battery_watts);
  }
 }
 int direct_home_wifi_level(const direct_ui_data_t *d){

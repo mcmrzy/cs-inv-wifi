@@ -4,7 +4,7 @@ from pathlib import Path
 import factory_tool as factory
 import flash_production as flasher
 
-VERSION='1.3.0'
+VERSION='1.4.0'
 
 MUTATIONS=('flash','flash-bin','provision','verify','lock','pairing','diagnostic-start','diagnostic-stop','test')
 
@@ -45,11 +45,31 @@ def friendly_error(error,operation):
  if code=='READBACK_MISMATCH':return '设备身份与工单不一致，请检查本台 SN 和字段。'
  return str(error)
 
+def inverter_summary(snapshot):
+ data=snapshot.get('inverter')
+ if not isinstance(data,dict):return '固件未提供逆变器识别数据'
+ state='在线' if data.get('online') else '离线'
+ mode='自动' if data.get('automatic') else '固定'
+ active=data.get('active_model') or '未知'
+ candidate=data.get('candidate') or '未知'
+ codes=' / '.join(f'0x{data[k]:04X}' if type(data.get(k)) is int and 0<=data[k]<=65535 else '—' for k in ('id38','id39'))
+ parity={0:'N',1:'E',2:'O'}.get(data.get('parity'),'?')
+ return (f"{state} · {mode} · {active}\n候选 {candidate} · 0038/0039 {codes}\n"
+         f"站号 {data.get('address','—')} · {data.get('baud','—')} 8{parity}1 · 读失败 {data.get('read_errors','—')}")
+
 def default_profile():
  return {**{name:'' for name,_ in factory.FIELDS},'sn':'','product':'CSERGY','model':'CS-L10-6K2','hw_system':'UNSET',
          'hw_controller':'UNSET','hw_dsp':'','hw_bms':'','batch':'',
          'production_time':datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
          'calibration_version':'','calibration_summary':''}
+
+def validate_flash_model(expected_model, manifest):
+ model=manifest.get('model','CS-L10-6K2')
+ if model not in ('CS-L10-6K2','CS-MB-PANEL'):
+  raise ValueError('固件清单缺少支持的产品型号')
+ if expected_model and model!=expected_model:
+  raise ValueError('固件型号与当前 USB 设备不一致')
+ return model
 
 def worker_command(job):
  if getattr(sys,'frozen',False):return [sys.executable,'--worker',str(job)]
@@ -87,6 +107,9 @@ def execute(job):
    sys.argv=['flash_production','--port',port,'--release',job['release'],
              '--backup-dir',job['backup_dir'],'--baud',str(job.get('baud',flasher.DEFAULT_BAUD)),
              '--expected-mac',job['expected_mac']]
+   manifest_path=Path(job['release'])/'flash_manifest.json'
+   if manifest_path.is_file():
+    sys.argv.extend(('--model',validate_flash_model(job.get('expected_model'),load_json(manifest_path))))
    if job.get('first_install'):sys.argv.append('--first-install')
    flasher.main()
   finally:flasher.command=previous;sys.argv=argv
@@ -135,6 +158,8 @@ def execute(job):
   profile=job['profile']
   with contextlib.closing(sqlite3.connect(job['registry'])) as db:
    if operation=='provision':
+    attached=snapshot.get('model')
+    if attached and profile.get('model')!=attached:raise ValueError('工单产品型号与当前 USB 设备不一致')
     payload=factory.record(profile,snapshot['mac'],schema=2)
     factory.reserve_identity(db,profile['sn'],snapshot['mac'])
     report=client.request(2,payload);require_mac(job['expected_mac'],report.get('mac',''));factory.verify(profile,report)

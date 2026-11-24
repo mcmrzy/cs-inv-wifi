@@ -239,8 +239,10 @@ static bool encode_result(const Request *r, const cJSON *body, char *out) {
     return ok;
 }
 
+/* Dispatch and completion run on the application loop. The response
+ * buffer is separate from the accepted envelope used during dispatch. */
 static void send_body(const Request *r, const cJSON *body) {
-    char response[RESULT_CAPACITY + 1u];
+    static char response[RESULT_CAPACITY + 1u];
     if (current_request(r) && encode_result(r, body, response))
         ble_ct_cmd_notify_result(response, (uint16_t)strlen(response));
 }
@@ -408,7 +410,7 @@ static void dispatch(const QueuedCommand *queued) {
     cJSON *canonical_json = cJSON_CreateObject();
     bool canonical_ok = canonical_json && cJSON_AddStringToObject(canonical_json, "action", action);
     if (canonical_ok) canonical_ok = add_owned(canonical_json, "params", battery_write ? canonical_copy(battery_config) : params ? canonical_copy(params) : cJSON_CreateObject());
-    char canonical[COMMAND_CAPACITY + 1u];
+    static char canonical[COMMAND_CAPACITY + 1u];
     if (!canonical_ok ||
         !encode(canonical_json, canonical, sizeof(canonical))) {
         reject(&r, "INVALID_ARGS"); goto done;
@@ -578,7 +580,7 @@ void ble_ct_cmd_tick(void) {
             "SYNC_TIMEOUT",false,false,0);
         else complete_write("SYNC_TIMEOUT", 0, 0, -1, -1);
     }
-    QueuedCommand queued;
+    static QueuedCommand queued;
     bool available = false;
     portENTER_CRITICAL(&s_rx_lock);
     if (s_count) {

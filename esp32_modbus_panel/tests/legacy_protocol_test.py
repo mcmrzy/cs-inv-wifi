@@ -11,9 +11,22 @@ shared = panel.parent / 'esp32_direct'
 script = (shared/'tests/cloud_command_replay_test.py').read_text(encoding='utf-8')
 script = script.replace("source = (ROOT / 'main/telemetry/cmd_handler.c').read_text(encoding='utf-8')",
                         "source = Path("+repr(str(panel/'full/cmd_handler.c'))+").read_text(encoding='utf-8')")
-script = script.replace('#include "../tests/battery_command_host.h"', '''#define FULL_WRITE_UNCONFIRMED (-22)
+script = script.replace('#include "../tests/battery_command_host.h"', '''#define FULL_MB_AC_POWER_INDEX 0xff00U
+#define FULL_MB_POWER_SAVING 0xff10U
+#define FULL_MB_AUTO_FREQUENCY 0xff11U
+#define FULL_MB_BATTERY_OPEN_ALARM 0xff12U
+#define FULL_MB_INVERTER_MUTE 0xff13U
+#define FULL_WRITE_UNCONFIRMED (-22)
 #define FULL_WRITE_PROTOCOL_ACCEPTED (-23)
 static void ble_ct_cmd_on_write_protocol_accepted(uint32_t token,const char *id){(void)token;(void)id;}''')
+script = script.replace('static int mqtt_publish(const char *topic,const char *body,int len,int qos,int retain){',
+                        'static int mqtt_publish_volatile(const char *topic,const char *body,int len,int qos){\n const int retain=0;')
+# Power uses an internal selector outside the stub's stored config array.
+script = script.replace('stored[addr]=raw;', 'if(addr<sizeof(stored)/sizeof(stored[0]))stored[addr]=raw;')
+script = script.replace('expect("stage","submitted")','expect("stage","applied")')
+script = script.replace('assert(!strstr(response,"applied_args") && !strstr(response,"reported_revision"))',
+                        'assert(strstr(response,"applied_args") && strstr(response,"reported_revision"))')
+script = script.replace('cJSON_GetObjectItem(quantized,"submitted_args")','cJSON_GetObjectItem(quantized,"applied_args")')
 script = script.replace('230.05', '230.1').replace('valuedouble==230.0','valuedouble==230.1')
 script = script.replace('quantized submitted value','exact submitted value')
 script = script.replace("target = ROOT / 'tmp/cloud_command_replay_test.c'",
@@ -59,6 +72,22 @@ script = script.replace(' puts("PASS actual MQTT dispatcher:',
  request(protocol_only);expect("stage","submitted");assert(writes==count+1);
  request("{\"task_id\":\"missing-readback\",\"cmd\":\"set_output_voltage\",\"args\":[230]}");
  finish(FULL_WRITE_UNCONFIRMED);expect("result","VALUE_UNCONFIRMED");expect("stage","failed");
+ cmd_handler_init();count=writes;
+ const char *start="{\"task_id\":\"start\",\"cmd\":\"ac_on\",\"args\":[]}";
+ request(start);assert(writes==count+1 && s_pending.addr==FULL_MB_AC_POWER_INDEX && s_pending.value==1);
+ finish(0);expect("stage","completed");expect("result","OK");
+ assert(!strstr(response,"applied_args"));
+ request(start);expect("stage","completed");assert(writes==count+1);
+ request("{\"task_id\":\"bad\",\"cmd\":\"ac_off\",\"args\":[0]}");
+ expect("result","INVALID_ARGS");assert(writes==count+1);
+ request("{\"task_id\":\"stop\",\"cmd\":\"ac_off\",\"args\":[]}");
+ assert(writes==count+2 && s_pending.value==2);
+ finish(FULL_WRITE_PROTOCOL_ACCEPTED);expect("stage","failed");expect("result","VALUE_UNCONFIRMED");
+ cmd_handler_init();count=writes;
+ const char *mute="{\"task_id\":\"mute\",\"cmd\":\"set_modbus_inverter_mute\",\"args\":[1]}";
+ request(mute);assert(writes==count+1 && s_pending.addr==FULL_MB_INVERTER_MUTE && s_pending.value==1);
+ finish(0);expect("stage","applied");
+ request(mute);expect("stage","applied");assert(writes==count+1);
  puts("PASS private protocol rejection and protocol-only MQTT receipt: no reported value and no duplicate write");
  puts("PASS actual MQTT dispatcher:''')
 exec(compile(script, str(shared/'tests/cloud_command_replay_test.py'), 'exec'),

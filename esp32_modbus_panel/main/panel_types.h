@@ -9,7 +9,7 @@
 #define PANEL_WRITE_GAP_MS 600U
 
 typedef enum {
-    /* Persisted numeric IDs. Keep retired profiles for detection and migration. */
+    /* Persisted numeric IDs. Keep these IDs stable across firmware updates. */
     PANEL_PROFILE_UNKNOWN, PANEL_PROFILE_6KU, PANEL_PROFILE_6KU_PARALLEL,
     PANEL_PROFILE_5KU, PANEL_PROFILE_12KU, PANEL_PROFILE_2KU,
     PANEL_PROFILE_4KL, PANEL_PROFILE_3KU, PANEL_PROFILE_COUNT
@@ -18,14 +18,22 @@ typedef enum {
 static inline bool panel_profile_supported(panel_profile_t profile)
 {
     return profile==PANEL_PROFILE_2KU || profile==PANEL_PROFILE_3KU ||
-           profile==PANEL_PROFILE_6KU || profile==PANEL_PROFILE_12KU;
+           profile==PANEL_PROFILE_6KU || profile==PANEL_PROFILE_6KU_PARALLEL ||
+           profile==PANEL_PROFILE_12KU;
+}
+
+static inline bool panel_profile_same_family(panel_profile_t a, panel_profile_t b)
+{
+    bool a_six = a==PANEL_PROFILE_6KU || a==PANEL_PROFILE_6KU_PARALLEL;
+    bool b_six = b==PANEL_PROFILE_6KU || b==PANEL_PROFILE_6KU_PARALLEL;
+    return a==b || (a_six && b_six);
 }
 
 typedef struct {
     uint8_t address; /* 1..247; never broadcast writes */
     uint32_t baud;
     uint8_t parity; /* 0=N, 1=E, 2=O; 8 data bits, 1 stop bit */
-    panel_profile_t profile_override; /* UNKNOWN=automatic diagnostic only */
+    panel_profile_t profile_override; /* UNKNOWN selects the validated live model */
 } panel_config_t;
 bool panel_config_valid(const panel_config_t *config);
 
@@ -48,18 +56,19 @@ typedef struct {
 } panel_setting_read_t;
 typedef struct {
     uint32_t sequence;
-    panel_write_state_t state;
-    uint8_t exception,scan_found;
-    bool valid;
+    uint16_t readback_value;
+    uint8_t state,exception,scan_found;
+    bool valid,readback_valid;
 } panel_result_t;
 
 typedef struct {
-    uint16_t values[PANEL_CACHE_SLOTS+1];
-    uint32_t updated_ms[PANEL_CACHE_SLOTS+1];
-    bool valid[PANEL_CACHE_SLOTS+1];
+    uint16_t values[PANEL_CACHE_SLOTS];
+    uint32_t updated_ms[PANEL_CACHE_SLOTS];
+    uint32_t valid_bits[(PANEL_CACHE_SLOTS+31U)/32U];
     uint32_t now_ms, polls, errors;
     panel_config_t config;
-    panel_profile_t detected_profile; /* Candidate only; manual profile enables model-specific writes. */
+    panel_profile_t detected_profile;
+    uint8_t auto_profile; /* Two matching identity replies on this bus context. */
     panel_write_state_t write_state;
     uint16_t write_address, write_value;
     uint8_t exception;
@@ -75,15 +84,22 @@ typedef struct {
     panel_setting_read_t setting_reads[PANEL_SETTING_READ_SLOTS];
 } panel_snapshot_t;
 
+static inline bool panel_slot_valid(const panel_snapshot_t *s,unsigned slot)
+{
+    return s && slot<PANEL_CACHE_SLOTS && (s->valid_bits[slot/32U]&(UINT32_C(1)<<(slot%32U)));
+}
+
+panel_profile_t panel_effective_profile(const panel_snapshot_t *s);
+
 static inline bool panel_is_3ku(const panel_snapshot_t *s)
 {
-    return s && (s->config.profile_override==PANEL_PROFILE_3KU ||
-                 s->detected_profile==PANEL_PROFILE_3KU);
+    return s && (panel_effective_profile(s)==PANEL_PROFILE_3KU ||
+                 (s->config.profile_override==PANEL_PROFILE_UNKNOWN && s->detected_profile==PANEL_PROFILE_3KU));
 }
 
 bool panel_grid_watts(const panel_snapshot_t *,int32_t *value,bool *fresh);
 bool panel_pv_watts(const panel_snapshot_t *,uint32_t *value,bool *fresh);
-void panel_result_record(panel_snapshot_t *,uint32_t sequence,panel_write_state_t,uint8_t exception);
+panel_result_t *panel_result_record(panel_snapshot_t *,uint32_t sequence,panel_write_state_t,uint8_t exception);
 const panel_result_t *panel_result_find(const panel_snapshot_t *,uint32_t sequence);
 void panel_device_context_reset(panel_snapshot_t *,const panel_config_t *);
 const panel_setting_read_t *panel_setting_read_find(const panel_snapshot_t *,uint16_t address);
@@ -105,4 +121,5 @@ typedef struct {
     panel_command_type_t type;
     uint16_t address, value;
     panel_config_t config;
+    bool require_opposite_output;
 } panel_command_t;

@@ -17,15 +17,15 @@ int main(void)
     assert(!direct_lcd_cs_toggles(-1,false));
     assert(!direct_lcd_cs_toggles(4,true));
     assert(direct_lcd_cs_toggles(4,false));
-    /* Regression: ARM PB14/SPI2_MISO maps to GPIO9 as LCD D/C. */
-    assert(direct_board_gpio_allowed(9, DIRECT_PIN_LCD_DC));
+    assert(direct_board_gpio_allowed(9, DIRECT_PIN_LED_DATA));
     assert(!direct_board_gpio_allowed(9, DIRECT_PIN_OTHER));
-    assert(!direct_board_gpio_allowed(9, DIRECT_PIN_KEY_CLOCK));
-    assert(direct_board_gpio_allowed(2, DIRECT_PIN_KEY_CLOCK));
+    assert(!direct_board_gpio_allowed(9, DIRECT_PIN_LCD_DC));
+    assert(direct_board_gpio_allowed(2, DIRECT_PIN_KEY_DATA));
     assert(!direct_board_gpio_allowed(2, DIRECT_PIN_LCD_DC));
     assert(!direct_board_gpio_allowed(18, DIRECT_PIN_LCD_DC));
     assert(!direct_board_gpio_allowed(19, DIRECT_PIN_OTHER));
     assert(!direct_board_gpio_allowed(8, DIRECT_PIN_OTHER));
+    assert(direct_board_gpio_allowed(8, DIRECT_PIN_LCD_DC));
     assert(direct_board_gpio_allowed(-1, DIRECT_PIN_OTHER));
     uint8_t packed[3];
     const uint8_t lcd_command = 0x2a;

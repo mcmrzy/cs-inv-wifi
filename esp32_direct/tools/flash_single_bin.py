@@ -36,9 +36,10 @@ def application_metadata(data):
  if (len(descriptor)!=64 or descriptor[:6]!=b'CSIV\1\0' or descriptor[7]!=0 or
      descriptor[6] not in profiles):
   raise ValueError('固件缺少受支持的 CSIV v1 产品和配置描述')
- expected=b'CS-L10-6K2'+b'\0'*46
- if descriptor[8:]!=expected:raise ValueError('固件型号或产品描述不受支持')
- return dict(model='CS-L10-6K2',profile=profiles[descriptor[6]])
+ model=next((name for name in ('CS-L10-6K2','CS-MB-PANEL')
+             if descriptor[8:]==name.encode('ascii').ljust(56,b'\0')),None)
+ if model is None:raise ValueError('固件型号或产品描述不受支持')
+ return dict(model=model,profile=profiles[descriptor[6]])
 
 def describe(path,kind):
  data=Path(path).read_bytes()
@@ -57,13 +58,15 @@ def describe(path,kind):
     bootable=True
     if metadata is None:metadata=current
   if not bootable:raise ValueError('合并文件未包含 factory 或 ota_0 应用镜像')
+  if any(app['model']!=metadata['model'] for app in app_profiles):
+   raise ValueError('合并文件包含不同产品的应用镜像')
   offset=0;scope='覆盖整片 Flash，包括 SN 身份区、网络设置和缓存。已有 SN 可能被清除或替换。'
  elif kind=='app':
   if len(data)>0x1a0000:raise ValueError('应用固件超过本项目 ota_0 分区容量')
   validate_image(data,True)
   metadata=application_metadata(data)
   offset=0x20000;scope='写入 ota_0，并重置 OTA 启动选择；保留用户 NVS 和 factory 身份区。需设备采用本项目分区。'
-  if metadata['profile']=='device':scope+=' 此 Device 镜像默认 SN H1ZZX0013900001P，已有管理员持久 SN 优先。'
+  if metadata['model']=='CS-L10-6K2' and metadata['profile']=='device':scope+=' 此 Device 镜像默认 SN H1ZZX0013900001P，已有管理员持久 SN 优先。'
  else:raise ValueError('请选择应用固件或完整 4MB 合并固件')
  info=dict(kind=kind,offset=offset,bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),scope=scope,**metadata)
  if kind=='merged':info['app_profiles']=app_profiles
@@ -78,7 +81,7 @@ def execute(job,command):
  expected=None
  if info['kind']=='app':
   layout=Path(job['layout']);manifest=json.loads((layout/'flash_manifest.json').read_text())
-  transport.validate_manifest(manifest)
+  transport.validate_manifest(manifest,info['model'])
   expected=(layout/'partition-table.bin').read_bytes()
   if hashlib.sha256(expected).hexdigest()!=manifest['sha256']['partition-table.bin']:raise RuntimeError('分区模板校验失败')
  stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
@@ -97,6 +100,10 @@ def execute_validated(job,info,expected,backup,staged,baud,command):
  if len(full)!=0x400000:raise RuntimeError('整片备份不完整，停止烧录')
  pairs=[hex(info['offset']),staged]
  if expected is not None:
+  if info['model']=='CS-MB-PANEL':
+   for offset in (0x20000,0x1c0000):
+    if full[offset]==0xe9 and application_metadata(full[offset:])['model']!=info['model']:
+     raise RuntimeError('现有镜像属于不同产品，备份已保存')
   if full[0x8000:0x8000+len(expected)]!=expected:raise RuntimeError('设备分区不匹配，备份已保存；请使用完整固件目录迁移')
   ota=backup/'ota_data_initial.bin';ota.write_bytes(b'\xff'*8192);pairs+=['0x10000',ota]
  command(job['port'],'write_flash','--flash_size','4MB',*pairs,baud=baud)

@@ -29,8 +29,13 @@
 #endif
 extern bool direct_dsp_get_measurement(RunParamDef *measurement, uint32_t *received_ms);
 extern bool direct_bms_get_summary(direct_bms_summary_t *summary);
+#ifdef PANEL_FULL_DIRECT
+#define TELEMETRY_CONFIG_COUNT FULL_MB_CLOUD_CONFIG_COUNT
+#else
+#define TELEMETRY_CONFIG_COUNT CTRL_PARAM_COUNT
 extern bool direct_config_snapshot_wire(uint16_t values[CTRL_PARAM_COUNT],
                                        bool valid[CTRL_PARAM_COUNT],uint32_t *revision);
+#endif
 #ifdef HOST_TEST
 /* 宿主单元测试桩 (build-host 临时目录, 测完即删): 屏蔽 ESP-IDF 依赖, 仅编译
  * heartbeat JSON 构造 / 告警判断纯逻辑。固件构建不定义 HOST_TEST, 以下代码
@@ -157,7 +162,10 @@ static uint32_t s_last_model_probe;
 #endif
 static uint32_t s_last_config_ms;    /* 上次 config 发布时刻 (arm 时间戳) */
 static volatile bool s_hb_requested; /* query_telemetry 请求补报 */
-static volatile bool s_config_requested; /* query_config/写入生效 请求补报 */
+static atomic_bool s_config_requested; /* query_config/写入生效 请求补报 */
+#ifdef PANEL_FULL_DIRECT
+static uint32_t s_modbus_config_attempt_ms;
+#endif
 static bool     s_alarm_armed;       /* 首次收到运行参数后开始检测 */
 static uint64_t s_last_warning;
 static uint32_t s_last_fault;
@@ -240,7 +248,11 @@ static uint32_t hb_clamp0(int32_t v)
  * 动机: 量纲知识集中到服务端一处 —— DSP/ARM 量纲调整只改服务端, 固件不再
  * 承担换算风险 (09-21/09-22 两次 ESP 侧换算结论错误均源于此)。
  * 信封版本 3，离线时保留原始运行快照与版本，重连后续传。 */
-static void publish_heartbeat(const RunParamDef *p, const direct_bms_summary_t *bms)
+static void publish_heartbeat(const RunParamDef *p, const direct_bms_summary_t *bms
+#ifdef PANEL_FULL_DIRECT
+                              , const bool *words
+#endif
+                              )
 {
     const uint16_t *w = (const uint16_t *)p;
     static char buf[1024]; /* L10: 87 run words plus 100 BMS bytes/metadata. */
@@ -249,7 +261,14 @@ static void publish_heartbeat(const RunParamDef *p, const direct_bms_summary_t *
 
     hb_append(buf, sizeof(buf), &pos, "{\"run\":[");
     for (int i = 0; i < RUN_PARAM_WORDS; i++) {
-        hb_append(buf, sizeof(buf), &pos, i ? ",%u" : "%u", (unsigned)w[i]);
+        if (i) hb_append(buf, sizeof(buf), &pos, ",");
+#ifdef PANEL_FULL_DIRECT
+        if (words && !words[i]) {
+            hb_append(buf, sizeof(buf), &pos, "null");
+            continue;
+        }
+#endif
+        hb_append(buf, sizeof(buf), &pos, "%u", (unsigned)w[i]);
     }
     hb_append(buf, sizeof(buf), &pos, "]");
     if (bms->acquired) {
@@ -402,7 +421,10 @@ static void publish_info(const OnlyReadDataDef *o)
     cJSON_DeleteItemFromObjectCaseSensitive(obj,"dsp_protocol");
     if((registry_model && !cJSON_AddStringToObject(obj,"model",registry_model)) ||
        !cJSON_AddStringToObject(obj,"device_type","inverter") ||
-       !cJSON_AddStringToObject(obj,"dsp_protocol","modbus_rtu_v1.27")){
+       !cJSON_AddStringToObject(obj,"dsp_protocol","modbus_rtu_v1.27") ||
+       !cJSON_AddBoolToObject(obj,"modbus_ac_power",registry_model != NULL) ||
+       !cJSON_AddBoolToObject(obj,"modbus_battery_settings",registry_model != NULL) ||
+       !cJSON_AddBoolToObject(obj,"modbus_system_settings",registry_model != NULL)){
         cJSON_Delete(obj);return;
     }
 #endif
@@ -454,7 +476,7 @@ typedef struct {
     uint8_t     scale;   /* 1 / 10 / 100 */
 } cfg_key_t;
 
-static const cfg_key_t s_cfg_keys[CTRL_PARAM_COUNT] = {
+static const cfg_key_t s_cfg_keys[TELEMETRY_CONFIG_COUNT] = {
     { "set_output_priority",        1   },
     { "set_max_charge_current",     10  },  /* 0.1A */
     { "set_ac_volt_range",          1   },
@@ -471,7 +493,11 @@ static const cfg_key_t s_cfg_keys[CTRL_PARAM_COUNT] = {
     { "set_charge_priority",        1   },
     { "set_alarm_control",          1   },
     { "set_backlight_ctrl",         1   },
+#if defined(PANEL_FULL_DIRECT) && PANEL_FULL_DIRECT
+    { "set_modbus_input_change_alarm", 1 },
+#else
     { "set_power_shutdown_alarm",   1   },
+#endif
     { "set_overload_use_city_power",1   },
     { "set_max_discharge_current",  10  },  /* 0.1A */
     { "set_max_chg_curr",           10  },  /* 0.1A */
@@ -497,9 +523,15 @@ static const cfg_key_t s_cfg_keys[CTRL_PARAM_COUNT] = {
     { "set_soc_close_gen",          1   },
     { "set_soc_cutoff",             1   },
     { "set_buzzer",                 1   },
+#ifdef PANEL_FULL_DIRECT
+    [CTRL_PARAM_COUNT + FULL_MB_POWER_SAVING - FULL_MB_POWER_SAVING] = { "set_modbus_power_saving", 1 },
+    [CTRL_PARAM_COUNT + FULL_MB_AUTO_FREQUENCY - FULL_MB_POWER_SAVING] = { "set_modbus_auto_frequency", 1 },
+    [CTRL_PARAM_COUNT + FULL_MB_BATTERY_OPEN_ALARM - FULL_MB_POWER_SAVING] = { "set_modbus_battery_open_alarm", 1 },
+    [CTRL_PARAM_COUNT + FULL_MB_INVERTER_MUTE - FULL_MB_POWER_SAVING] = { "set_modbus_inverter_mute", 1 },
+#endif
 };
 
-static void publish_config(const uint16_t *ctrl, const bool *valid, uint32_t rev)
+static bool publish_config(const uint16_t *ctrl, const bool *valid, uint32_t rev)
 {
     /* CtrlParamAlterTime 为 0 表示出厂未修改, 用当前时间兜底 (后端要求 rev > 0) */
     if (rev == 0) {
@@ -507,13 +539,13 @@ static void publish_config(const uint16_t *ctrl, const bool *valid, uint32_t rev
         ESP_LOGW(TAG, "CtrlParamAlterTime=0, using current time as rev=%lu",
                  (unsigned long)rev);
     }
-    /* 静态缓冲: 42 键 ~35B/键 + 信封 ≈ 1600B, 避免 main_loop 栈压力 */
+    /* Static storage keeps the configuration payload off the main loop stack. */
     static char buf[1800];
     int n = snprintf(buf, sizeof(buf), "{\"rev\":%lu,\"params\":{",
                      (unsigned long)rev);
 
     bool first=true;
-    for (int i = 0; i < CTRL_PARAM_COUNT && n > 0 && n < (int)sizeof(buf); i++) {
+    for (int i = 0; i < TELEMETRY_CONFIG_COUNT && n > 0 && n < (int)sizeof(buf); i++) {
         if(!valid[i])continue;
         uint16_t raw=ctrl[i];
         const char *sep = first ? "" : ",";first=false;
@@ -542,14 +574,48 @@ static void publish_config(const uint16_t *ctrl, const bool *valid, uint32_t rev
 
     if (n <= 0 || n >= (int)sizeof(buf) - 2) {
         ESP_LOGE(TAG, "config payload too large (%d)", n);
-        return;
+        return false;
     }
     buf[n++] = '}';
     buf[n++] = '}';
     buf[n] = '\0';
-    mqtt_publish(TOPIC_CONFIG, buf, 0, 1, 0);
+#ifdef PANEL_FULL_DIRECT
+    int result=mqtt_publish_volatile(TOPIC_CONFIG, buf, n, 1);
+#else
+    int result=mqtt_publish(TOPIC_CONFIG, buf, 0, 1, 0);
+#endif
+    if(result<0)return false;
+#ifdef PANEL_FULL_DIRECT
+    ESP_LOGW(TAG, "config sent topic=config rev=%lu bytes=%d utc=%lld",
+             (unsigned long)rev,n,(long long)time(NULL));
+#else
     ESP_LOGD(TAG, "config published (rev=%lu, %d bytes)", (unsigned long)rev, n);
+#endif
+    return true;
 }
+
+#ifdef PANEL_FULL_DIRECT
+static void publish_requested_modbus_config(uint32_t now)
+{
+    if(!mqtt_is_connected() || now-s_modbus_config_attempt_ms<1000U ||
+       !atomic_exchange(&s_config_requested,false))return;
+
+    s_modbus_config_attempt_ms=now;
+    uint16_t values[TELEMETRY_CONFIG_COUNT];
+    bool valid[TELEMETRY_CONFIG_COUNT];
+    uint32_t revision;
+    bool snapshot=full_modbus_cloud_config_snapshot(values,valid,&revision);
+    if(!snapshot || !publish_config(values,valid,revision)){
+        atomic_store(&s_config_requested,true);
+        static uint32_t last_diagnostic_ms;
+        if(now-last_diagnostic_ms>=5000U){
+            last_diagnostic_ms=now;
+            ESP_LOGW(TAG,"config report pending reason=%s mqtt=%u",
+                     snapshot?"publish_failed":"snapshot_unavailable",(unsigned)mqtt_is_connected());
+        }
+    }
+}
+#endif
 
 /* ---- ARM 通信故障告警 (source=2 ESP, code=1 comm_timeout) ---- */
 static void publish_arm_fault_alarm(void)
@@ -765,6 +831,10 @@ void telemetry_request_info(void)
 
 void telemetry_request_config(void)
 {
+#ifdef PANEL_FULL_DIRECT
+    ESP_LOGW(TAG,"config refresh requested mqtt=%u utc=%lld",
+             (unsigned)mqtt_is_connected(),(long long)time(NULL));
+#endif
     /* 请求 ARM 重读控制参数; tick 检测到 last_ctrl_ms 变化后发布 (V2.1 §9) */
     s_config_requested = true;
     s_last_config_ms = 0; /* Reconnect/query must also report an unchanged revision. */
@@ -781,7 +851,9 @@ void telemetry_tick(void)
     uint32_t received_ms = 0;
     OnlyReadDataDef info;
     bool report_info = false;
+#ifndef PANEL_FULL_DIRECT
     uint32_t config_ms = 0;
+#endif
 
     if (arm_poll_take_param()) {
         /* info 变化 → 发布一次 */
@@ -790,16 +862,21 @@ void telemetry_tick(void)
             info = g_only_read;
             report_info = true;
         }
+#ifndef PANEL_FULL_DIRECT
         /* config: 有请求且 ARM 已重读 (last_ctrl_ms 变化) → 发布一次 */
         if (s_config_requested && g_arm_stat.last_ctrl_ms != 0 &&
             g_arm_stat.last_ctrl_ms != s_last_config_ms) {
             config_ms = g_arm_stat.last_ctrl_ms;
         }
+#endif
         arm_poll_give_param();
     }
     /* Providers acquire the same nonrecursive mutex. Network publishing must
      * happen after release, using a coherent values/mask/revision snapshot. */
     if(report_info)publish_info(&info);
+#ifdef PANEL_FULL_DIRECT
+    publish_requested_modbus_config(s_now_ms);
+#else
     if(config_ms){
         uint16_t values[CTRL_PARAM_COUNT];
         bool valid[CTRL_PARAM_COUNT];
@@ -811,6 +888,7 @@ void telemetry_tick(void)
         }
         /* A busy snapshot leaves the request pending for the next tick. */
     }
+#endif
     have_run = direct_dsp_get_measurement(&rp, &received_ms);
 
     /* 90s 在线上报 (无需ARM应答) */
@@ -836,9 +914,19 @@ void telemetry_tick(void)
                                            : (uint32_t)TELEMETRY_PERIOD_MS;
 
     /* V2 heartbeat (需ARM应答; 调试模式按切换后的周期); query_telemetry 也可触发 */
-    if ((s_hb_requested && have_run) || (s_now_ms - s_last_hb_ms) >= hb_period_ms) {
-        /* Keep an explicit request pending until a fresh measurement arrives. */
-        s_hb_requested = s_hb_requested && !have_run;
+    if (s_hb_requested || (s_now_ms - s_last_hb_ms) >= hb_period_ms) {
+        bool heartbeat_ready = arm_ok;
+#ifdef PANEL_FULL_DIRECT
+        const bool *words = NULL;
+        bool partial[RUN_PARAM_WORDS];
+        if (!heartbeat_ready && !s_quiet && direct_modbus_get_partial_telemetry(&rp, partial)) {
+            heartbeat_ready = true;
+            words = partial;
+        }
+#endif
+        if (!heartbeat_ready && (s_now_ms - s_last_hb_ms) < hb_period_ms) return;
+        /* Keep an explicit request pending until a usable snapshot can be sent. */
+        s_hb_requested = s_hb_requested && (!heartbeat_ready || s_quiet);
         s_last_hb_ms = s_now_ms;
 
         if (arm_reachable) {
@@ -848,14 +936,18 @@ void telemetry_tick(void)
                 publish_arm_recovery_alarm();
             }
         }
-        if (arm_ok) {
+        if (heartbeat_ready) {
             if (!s_quiet) {
                 direct_bms_summary_t bms = {0};
                 direct_bms_get_summary(&bms);
+#ifdef PANEL_FULL_DIRECT
+                publish_heartbeat(&rp, &bms, words);
+#else
                 publish_heartbeat(&rp, &bms);
+#endif
             }
 #ifndef PANEL_FULL_DIRECT
-            publish_ble_telemetry(&rp);   /* BLE 通道遥测推送（核心子集） */
+            if (arm_ok) publish_ble_telemetry(&rp);   /* BLE 通道遥测推送（核心子集） */
 #endif
         } else if (!arm_reachable) {
             s_arm_fail_count++;

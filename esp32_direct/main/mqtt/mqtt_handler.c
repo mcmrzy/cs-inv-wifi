@@ -30,6 +30,9 @@
 #include "esp_system.h"
 #include "esp_tls_errors.h"
 #include "esp_timer.h"
+#ifdef PANEL_FULL_DIRECT
+#include "mbedtls/ssl.h"
+#endif
 #include "mqtt_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -67,7 +70,14 @@ static atomic_bool g_broker_fallback_pending;
 static atomic_llong g_disconnect_start_ms;  /* 断线开始时刻, 用于检测卡住 */
 static atomic_llong g_next_start_ms;
 static int g_force_restart_count = 0;      /* 连续强制重启次数, 动态延长超时 */
-static int64_t g_last_cache_flush = 0;
+#ifdef PANEL_FULL_DIRECT
+#define MQTT_TLS_MEMORY_RETRY_MS 15000
+#define MQTT_REPLAY_SETTLE_MS 20000
+#define MQTT_REPLAY_KEEP_FREE  (12U * 1024U)
+#define MQTT_REPLAY_KEEP_BLOCK (4U * 1024U)
+static atomic_llong g_connected_since_ms;
+static atomic_bool g_tls_alloc_failed;
+#endif
 
 static MQTTMessageHandler g_msg_handler = NULL;
 static MQTTMessageHandler g_msg_handler_saved = NULL;  /* force_restart 用 */
@@ -111,6 +121,15 @@ static void mqtt_rx_reset(void)
     g_rx_topic[0] = '\0';
 }
 
+#ifdef PANEL_FULL_DIRECT
+static bool mqtt_replay_has_room(size_t free_needed, size_t block_needed)
+{
+    const unsigned caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    return heap_caps_get_free_size(caps) >= free_needed &&
+           heap_caps_get_largest_free_block(caps) >= block_needed;
+}
+#endif
+
 static bool offline_send_callback(const char *topic, const char *payload,
                                   uint32_t timestamp)
 {
@@ -119,6 +138,11 @@ static bool offline_send_callback(const char *topic, const char *payload,
         !atomic_load(&g_mqtt_connected)) {
         return false;
     }
+#ifdef PANEL_FULL_DIRECT
+    /* Cache records, outbox copies and TLS all use internal heap. Stop at
+     * the next unacked record rather than competing with the live session. */
+    if (!mqtt_replay_has_room(8U * 1024U, MQTT_REPLAY_KEEP_BLOCK)) return false;
+#endif
 
     const uint16_t version=cache_route_decode(&topic);
 
@@ -199,6 +223,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
 
     switch (event->event_id) {
     case MQTT_EVENT_BEFORE_CONNECT:
+#ifdef PANEL_FULL_DIRECT
+        atomic_store(&g_tls_alloc_failed, false);
+#endif
         atomic_store(&g_transport_entered, true);
         mqtt_log_tls_memory("before_connect");
         break;
@@ -208,6 +235,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         g_binding_subscription_id = -1;
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
         mqtt_log_tls_memory("connected");
+#ifdef PANEL_FULL_DIRECT
+        atomic_store(&g_connected_since_ms, esp_timer_get_time() / 1000);
+#endif
         atomic_store(&g_mqtt_connected, true);
         atomic_store(&g_mqtt_started, true);
         atomic_store(&g_broker_fallback_pending, false);
@@ -257,7 +287,6 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 ESP_LOGD(TAG, "Found %d cached items, will flush", cached_count);
                 atomic_store(&g_flush_pending, true);
             }
-            g_last_cache_flush = esp_timer_get_time() / 1000;
         }
         atomic_store(&g_mqtt_connecting, false);
         break;
@@ -324,7 +353,13 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGW(TAG, "MQTT_EVENT_DISCONNECTED");
         mqtt_log_tls_memory("disconnected");
         atomic_store(&g_mqtt_connected, false);
-        g_next_start_ms = esp_timer_get_time() / 1000 + MQTT_START_RETRY_MS;
+        int retry_ms = MQTT_START_RETRY_MS;
+#ifdef PANEL_FULL_DIRECT
+        if (atomic_exchange(&g_tls_alloc_failed, false)) {
+            retry_ms = MQTT_TLS_MEMORY_RETRY_MS;
+        }
+#endif
+        g_next_start_ms = esp_timer_get_time() / 1000 + retry_ms;
         if (g_disconnect_start_ms == 0) {
             g_disconnect_start_ms = esp_timer_get_time() / 1000;
         }
@@ -351,6 +386,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         mqtt_log_tls_memory("error");
         if (event->error_handle) {
             const esp_mqtt_error_codes_t *err = event->error_handle;
+#ifdef PANEL_FULL_DIRECT
+            if (err->esp_tls_stack_err == MBEDTLS_ERR_SSL_ALLOC_FAILED ||
+                err->esp_tls_stack_err == -MBEDTLS_ERR_SSL_ALLOC_FAILED) {
+                atomic_store(&g_tls_alloc_failed, true);
+            }
+#endif
             ESP_LOGE(TAG,
                      "MQTT_EVENT_ERROR type=%d tls_esp=0x%x(%s) "
                      "tls_stack=0x%x cert_flags=0x%x sock_errno=%d(%s) "
@@ -468,6 +509,13 @@ bool mqtt_init(MQTTMessageHandler msg_handler)
         .network.timeout_ms = 10000,
         .session.keepalive = MQTT_KEEPALIVE,
         .task.stack_size = MQTT_TASK_STACK_SIZE,
+#ifdef PANEL_FULL_DIRECT
+        /* RX events are reassembled by offset below. ESP-MQTT fragments
+         * larger outgoing packets across its transmit buffer. */
+        .buffer.size = 1024,
+        .buffer.out_size = 1024,
+        .outbox.limit = 4096,
+#endif
     };
 
     g_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -498,6 +546,9 @@ bool mqtt_connect(void)
     if (atomic_load(&g_mqtt_connected)) return true;
     if (!wifi_sta_is_connected() || !atomic_load(&g_connect_allowed) ||
         atomic_load(&g_mqtt_connecting)) return false;
+#ifdef PANEL_FULL_DIRECT
+    if (atomic_load(&g_cache_flush_running)) return false;
+#endif
 
     const int64_t now = esp_timer_get_time() / 1000;
     if (now < g_next_start_ms) return false;
@@ -650,7 +701,16 @@ static int publish_core(const char *sub_topic, const char *data, int qos,
         return format_result;
     }
 
-    int msg_id = esp_mqtt_client_publish(g_mqtt_client, full_topic,
+    int msg_id;
+#ifdef PANEL_FULL_DIRECT
+    if (!allow_cache && qos == 1) {
+        /* Copy QoS1 responses into the outbox so TLS writes run after the
+         * command callback returns and releases its parsed JSON. */
+        msg_id = esp_mqtt_client_enqueue(g_mqtt_client, full_topic,
+                                         full_payload, (int)payload_len, qos, retain, true);
+    } else
+#endif
+    msg_id = esp_mqtt_client_publish(g_mqtt_client, full_topic,
                                          full_payload, (int)payload_len, qos, retain);
     free(full_payload);
     if (msg_id >= 0) {
@@ -785,6 +845,15 @@ void mqtt_flush_offline_cache(void)
         atomic_store(&g_flush_pending, false);
         return;
     }
+#ifdef PANEL_FULL_DIRECT
+    if (esp_timer_get_time() / 1000 - atomic_load(&g_connected_since_ms) < MQTT_REPLAY_SETTLE_MS)
+        return;
+    if (!mqtt_replay_has_room(OFFLINE_FLUSH_TASK_STACK + MQTT_REPLAY_KEEP_FREE,
+                              OFFLINE_FLUSH_TASK_STACK + 512U)) {
+        mqtt_log_tls_memory("cache_replay_deferred");
+        return;
+    }
+#endif
 
     if (atomic_exchange(&g_flush_pending, false)) {
         ESP_LOGD(TAG, "Flushing %d cached items (priority)...", cached);

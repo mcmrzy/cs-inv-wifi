@@ -19,7 +19,7 @@
 #include "panel_ble_aux.h"
 #include "nvs_storage.h"
 #include "factory_identity.h"
-#include "factory_service.h"
+#include "panel_usb_service.h"
 #include "wifi_sta.h"
 #include "esp_wifi.h"
 #include "arm_poll.h"
@@ -193,41 +193,43 @@ static TaskHandle_t s_startup_owner;
 static atomic_bool s_startup_health_done;
 static bool s_ble_services_started;
 static uint32_t s_startup_release_ms;
-static uint32_t s_ble_start_deadline_ms;
-static uint32_t s_cloud_retry_deadline_ms;
 static uint32_t s_next_ble_start_ms;
-static bool s_ble_suspended_for_mqtt;
-static atomic_bool s_local_ble_requested;
-static atomic_bool s_ble_retry_requested;
-static uint32_t s_ble_retry_after_ms;
 static atomic_bool s_prov_busy;
-static bool s_local_ble_mode;
-static uint32_t s_local_ble_idle_deadline_ms;
+static bool s_radios_started;
+static uint32_t s_next_wifi_start_ms;
 
 #define MAIN_LOOP_STACK_SIZE 6144U
 #define STARTUP_STACK_SETTLE_MS 100U
-#define BLE_STARTUP_WAIT_MS 10000U
 #define BLE_START_RETRY_MS 5000U
-#define CLOUD_RETRY_WINDOW_MS 30000U
-#define LOCAL_BLE_IDLE_MS 15000U
-#define BLE_MEMORY_RETRY_MS 300000U
-static uint32_t s_next_coexist_log_ms;
 static void startup_deferred_tick(void);
 
 static void indicators_tick(void)
 {
-    static bool cloud_seen;
+    static bool cloud_seen,cloud_was_online,weather_held_cloud;
+    static int64_t weather_recovery_until_ms;
     const bool configured=storage_has_wifi_config() || WIFI_DEFAULT_SSID[0];
     const bool wifi=wifi_sta_is_connected(),cloud=mqtt_is_connected();
     if(cloud)cloud_seen=true;
+    const int64_t now_ms=esp_timer_get_time()/1000;
+    const bool weather_pause=panel_weather_network_busy() && mqtt_is_paused_for_local();
+    if(!wifi || cloud){
+        weather_held_cloud=false;
+        weather_recovery_until_ms=0;
+    }else if(weather_pause){
+        weather_held_cloud=weather_held_cloud || cloud_was_online;
+    }else if(weather_held_cloud){
+        weather_held_cloud=false;
+        weather_recovery_until_ms=now_ms+15000;
+    }
+    const bool weather_recovering=weather_held_cloud || now_ms<weather_recovery_until_ms;
+    cloud_was_online=cloud;
     const bool available=ble_prov_is_ready() && !ble_prov_is_suspended();
-    const bool provisioning=available && (atomic_load(&s_prov_busy) ||
-        atomic_load(&s_local_ble_requested) || s_local_ble_mode || !configured);
+    const bool provisioning=available && (atomic_load(&s_prov_busy) || !configured);
     const panel_led_network_t network={
         .enabled=configured || wifi || cloud || available,
         .local_warning=full_alarm_needs_attention(),
         .wifi=wifi,.cloud=cloud,.ble=ble_prov_is_connected(),.provisioning=provisioning,
-        .reconnecting=configured && (!wifi || (cloud_seen && !cloud && !s_local_ble_mode))};
+        .reconnecting=configured && (!wifi || (cloud_seen && !cloud && !weather_recovering))};
     full_indicators_tick(&network);
 }
 
@@ -297,7 +299,8 @@ static void prov_connect_task(void *arg)
 {
     (void)arg;
     panel_wifi_status_t result=PANEL_WIFI_FAILED;
-    if(wifi_sta_connect(s_prov_ssid,s_prov_pass) && wifi_sta_wait_connected(PROV_WIFI_TIMEOUT_MS)){
+    if(wifi_sta_connect(s_prov_ssid,s_prov_pass) &&
+       wifi_sta_wait_connected(PROV_WIFI_TIMEOUT_MS)){
         result=storage_set_wifi(s_prov_ssid,s_prov_pass)?PANEL_WIFI_CONNECTED:PANEL_WIFI_SAVE_FAILED;
         if(result==PANEL_WIFI_CONNECTED)s_wifi_profile=0;
     }else if(wifi_sta_get_last_disconnect_reason()==WIFI_REASON_NO_AP_FOUND)result=PANEL_WIFI_NOT_FOUND;
@@ -438,7 +441,7 @@ static void main_loop_task(void *arg)
     esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 
     for (;;) {
-        panel_weather_process(atomic_load(&s_prov_busy) || atomic_load(&s_local_ble_requested));
+        if(s_radios_started)panel_weather_process(atomic_load(&s_prov_busy));
         startup_deferred_tick();
         direct_panel_diagnostic_tick();
         /* Device identity is fixed locally in this build. */
@@ -454,7 +457,7 @@ static void main_loop_task(void *arg)
         case STATE_STA_CONNECTING:
             if (wifi_sta_is_connected()) {
                 enter_state(STATE_MQTT_CONNECTING);
-            } else retry_saved_wifi();
+            } else if(s_radios_started)retry_saved_wifi();
             break;
 
         case STATE_MQTT_CONNECTING:
@@ -497,6 +500,13 @@ static void main_loop_task(void *arg)
         cmd_handler_tick();
         panel_ble_tick();
         ble_ct_cmd_tick();
+        static bool ble_stack_reported;
+        if (!ble_prov_is_connected()) ble_stack_reported = false;
+        else if (!ble_stack_reported && uxTaskGetStackHighWaterMark(NULL) < 1024U) {
+            ble_stack_reported = true;
+            ESP_LOGW(TAG, "Main loop stack low with BLE: free=%u",
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
+        }
         panel_ble_aux_tick();
         telemetry_tick();
         if (!ota_service_is_busy()) debug_log_tick(); /* Defer bulk logs during OTA. */
@@ -564,238 +574,56 @@ static bool start_ble_services(void)
     return true;
 }
 
-void app_request_local_ble(bool requested)
-{
-    bool previous=atomic_exchange(&s_local_ble_requested, requested);
-    if(requested && !previous)atomic_store(&s_ble_retry_requested,true);
-}
-
-/* Normal operation keeps both transports resident. An idle host is reclaimed
- * for reconnect handshakes; active phones are never forcibly disconnected.
- * Exclusive local mode also provides bounded offline and low-memory recovery. */
-static void local_ble_mode_tick(uint32_t now)
-{
-    const bool requested = atomic_load(&s_local_ble_requested) ||
-        (!storage_has_wifi_config() && !WIFI_DEFAULT_SSID[0]);
-    const bool recovery_window = !mqtt_is_connected() &&
-        (int32_t)(now - s_cloud_retry_deadline_ms) >= 0;
-    const unsigned caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-    const bool ble_start_required = !s_ble_services_started ||
-        ble_prov_is_suspended() || ble_prov_start_failed();
-    const bool ble_memory_available = heap_caps_get_free_size(caps) >= 65536U &&
-        heap_caps_get_largest_free_block(caps) >= 32768U;
-    if(atomic_exchange(&s_ble_retry_requested,false))s_ble_retry_after_ms=0;
-    if(!s_local_ble_mode && ble_start_required && !ble_memory_available &&
-       s_ble_retry_after_ms && (int32_t)(now-s_ble_retry_after_ms)<0){
-        /* Failed local admission must not keep taking the cloud offline. */
-        mqtt_set_connect_allowed(true);
-        return;
-    }
-    const bool local_fallback = requested &&
-        ble_start_required && (ble_prov_start_failed() || !ble_memory_available);
-    if (!s_local_ble_mode && mqtt_is_connected() && !local_fallback) {
-        s_cloud_retry_deadline_ms = now + CLOUD_RETRY_WINDOW_MS;
-        mqtt_set_connect_allowed(true);
-        if (ble_prov_is_ready() && (int32_t)(now - s_next_coexist_log_ms) >= 0) {
-            s_next_coexist_log_ms = now + 30000U;
-            ESP_LOGW(TAG, "MQTT+BLE resident: free=%u largest=%u",
-                     (unsigned)heap_caps_get_free_size(caps),
-                     (unsigned)heap_caps_get_largest_free_block(caps));
-        }
-        /* Keep the working cloud link when no phone has requested memory.
-         * A failed, unsuspended host may be cleaned once below, but never
-         * retry start/restore below the BLE service's existing admission floor.
-         * OTA-suspended hosts retain their owner until a restore is admitted. */
-        if (ble_start_required && !ble_memory_available &&
-            (!ble_prov_start_failed() || ble_prov_is_suspended())) return;
-        if (!ota_service_admin_begin()) return;
-        if (ble_prov_is_suspended() && !s_ble_suspended_for_mqtt) {
-            /* A failed OTA restore retains its owner. No OTA is active under
-             * this admin guard; retry that owner's restore, not generic start. */
-            if (!ble_prov_restore_after_ota())
-                s_next_ble_start_ms = now + BLE_START_RETRY_MS;
-        } else if (ble_prov_start_failed() && !s_ble_suspended_for_mqtt) {
-            if (ble_prov_recover_start_failure()) s_ble_services_started = false;
-            s_next_ble_start_ms = now + BLE_START_RETRY_MS;
-        } else {
-            bool accepted = true;
-            if (s_ble_suspended_for_mqtt) {
-                accepted = ble_prov_restore_after_mqtt();
-                if (accepted) s_ble_suspended_for_mqtt = false;
-            } else if (!s_ble_services_started) {
-                accepted = start_ble_services();
-                if (accepted) s_ble_services_started = true;
-            }
-            if (!accepted) s_next_ble_start_ms = now + BLE_START_RETRY_MS;
-        }
-        ota_service_admin_end();
-        return;
-    }
-    if (!s_local_ble_mode && !requested && !recovery_window) {
-        /* The menu can close while an old PUBACK worker is draining. Cancel
-         * that pending pause without leaving the cloud permanently gated. */
-        if (mqtt_is_paused_for_local()) {
-            if (!ota_service_admin_begin()) return;
-            const bool resumed = mqtt_resume_after_local();
-            ota_service_admin_end();
-            if (!resumed) return;
-        }
-        if (s_ble_services_started && !s_ble_suspended_for_mqtt) {
-            if (ble_prov_is_connected() || atomic_load(&s_prov_busy)) {
-                const unsigned caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-                mqtt_set_connect_allowed(heap_caps_get_free_size(caps) >= 32768U &&
-                    heap_caps_get_largest_free_block(caps) >= 16384U);
-                return;
-            }
-            if (!ota_service_admin_begin()) return;
-            if (ble_prov_suspend_for_mqtt()) {
-                s_ble_suspended_for_mqtt = true;
-                s_next_ble_start_ms = now + STARTUP_STACK_SETTLE_MS;
-            } else {
-                ble_prov_restore_after_mqtt();
-                s_next_ble_start_ms = now + BLE_START_RETRY_MS;
-            }
-            ota_service_admin_end();
-            return;
-        }
-        mqtt_set_connect_allowed(true);
-        return;
-    }
-    if (!s_local_ble_mode) {
-        if (!atomic_load(&s_local_ble_requested) &&
-            (int32_t)(now - s_ble_start_deadline_ms) < 0) return;
-        if (!ota_service_admin_begin()) return;
-        const bool paused = mqtt_pause_for_local();
-        ota_service_admin_end();
-        if (!paused) return; /* A pending PUBACK worker still owns the client. */
-        s_local_ble_mode = true;
-        s_local_ble_idle_deadline_ms = now + LOCAL_BLE_IDLE_MS;
-        s_next_ble_start_ms = now + STARTUP_STACK_SETTLE_MS;
-        ESP_LOGW(TAG, "Local BLE mode: MQTT released; free=%u largest=%u",
-                 (unsigned)esp_get_free_heap_size(),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-        return;
-    }
-    if(ble_start_required && !ble_memory_available &&
-       !atomic_load(&s_prov_busy) && !ble_prov_is_connected()){
-        if(!ota_service_admin_begin())return;
-        bool cleaned=true;
-        if(ble_prov_start_failed() && !ble_prov_is_suspended()){
-            cleaned=ble_prov_recover_start_failure();
-            if(cleaned)s_ble_services_started=false;
-        }
-        const bool resumed=cleaned && mqtt_resume_after_local();
-        ota_service_admin_end();
-        if(!resumed){s_next_ble_start_ms=now+BLE_START_RETRY_MS;return;}
-        s_local_ble_mode=false;
-        s_ble_retry_after_ms=now+BLE_MEMORY_RETRY_MS;
-        s_cloud_retry_deadline_ms=s_ble_retry_after_ms;
-        s_next_ble_start_ms=now;
-        mqtt_set_connect_allowed(true);
-        ESP_LOGW(TAG,"BLE memory low; cloud restored; retry=%u ms",BLE_MEMORY_RETRY_MS);
-        return;
-    }
-    const bool occupied = requested || atomic_load(&s_prov_busy) ||
-                          ble_prov_is_connected();
-    if (occupied) s_local_ble_idle_deadline_ms = now + LOCAL_BLE_IDLE_MS;
-    if (ble_prov_is_suspended() && !s_ble_suspended_for_mqtt) {
-        if (!ota_service_admin_begin()) return;
-        const bool restored = ble_prov_restore_after_ota();
-        ota_service_admin_end();
-        s_next_ble_start_ms = now + (restored ? STARTUP_STACK_SETTLE_MS : BLE_START_RETRY_MS);
-        return;
-    }
-    if (ble_prov_start_failed() && !s_ble_suspended_for_mqtt) {
-        if (!ota_service_admin_begin()) return;
-        if (ble_prov_recover_start_failure()) s_ble_services_started = false;
-        ota_service_admin_end();
-        s_next_ble_start_ms = now + BLE_START_RETRY_MS;
-        return;
-    }
-    if (!occupied && (int32_t)(now - s_local_ble_idle_deadline_ms) >= 0) {
-        if (!ota_service_admin_begin()) return;
-        if (!s_ble_suspended_for_mqtt) {
-            if (!ble_prov_suspend_for_mqtt()) {
-                /* A phone may have connected after our idle check. The BLE
-                 * helper rejects that race; recover only our own failed pause. */
-                ble_prov_restore_after_mqtt();
-                s_next_ble_start_ms = now + BLE_START_RETRY_MS;
-                ota_service_admin_end();
-                return;
-            }
-            s_ble_suspended_for_mqtt = true;
-            s_next_ble_start_ms = now + STARTUP_STACK_SETTLE_MS;
-            ota_service_admin_end();
-            return;
-        }
-        const bool resumed = mqtt_resume_after_local();
-        ota_service_admin_end();
-        if (!resumed) {
-            s_next_ble_start_ms = now + BLE_START_RETRY_MS;
-            return;
-        }
-        s_local_ble_mode = false;
-        s_cloud_retry_deadline_ms = now + CLOUD_RETRY_WINDOW_MS;
-        mqtt_set_connect_allowed(true);
-        ESP_LOGW(TAG, "MQTT resume; BLE retry in %u ms",
-                 CLOUD_RETRY_WINDOW_MS);
-        return;
-    }
-    if (!ota_service_admin_begin()) return;
-    bool accepted = true;
-    if (s_ble_suspended_for_mqtt) {
-        accepted = ble_prov_restore_after_mqtt();
-        if (accepted) s_ble_suspended_for_mqtt = false;
-    } else if (!s_ble_services_started) {
-        accepted = start_ble_services();
-        if (accepted) s_ble_services_started = true;
-    }
-    ota_service_admin_end();
-    if (!accepted || ble_prov_start_failed()) {
-        ESP_LOGW(TAG, "BLE start failed; MQTT paused");
-        s_next_ble_start_ms = now + BLE_START_RETRY_MS;
-    }
-}
-
-/* Only the main loop owns lifecycle changes; LCD/GAP callbacks publish intent.
- * SDK auto-reconnect stays disabled so no TLS attempt bypasses local mode. */
+/* Start BLE before Wi-Fi and TLS can fragment its controller allocation.
+ * After boot, each service retains ownership across the other's reconnects. */
 static void startup_deferred_tick(void)
 {
-    const uint32_t now = now_ms();
-    bool weather_busy=panel_weather_network_busy();
+    uint32_t now=now_ms();
+    if(s_startup_owner){
+        if(!atomic_load(&s_startup_health_done) || (int32_t)(now-s_startup_release_ms)<0)return;
+        vTaskDelete(s_startup_owner);
+        s_startup_owner=NULL;
+        s_next_ble_start_ms=now+STARTUP_STACK_SETTLE_MS;
+        s_next_wifi_start_ms=s_next_ble_start_ms;
+    }
+    bool weather_busy=s_radios_started && panel_weather_network_busy();
     if(!weather_busy)mqtt_poll_connection();
-    else mqtt_set_connect_allowed(false);
-    if (s_startup_owner && atomic_load(&s_startup_health_done) &&
-        (int32_t)(now - s_startup_release_ms) >= 0) {
-        TaskHandle_t owner = s_startup_owner;
-        s_startup_owner = NULL;
-        vTaskDelete(owner);
-        s_next_ble_start_ms = now + STARTUP_STACK_SETTLE_MS;
-        ESP_LOGW(TAG, "Startup stack released; free=%u largest=%u",
-                 (unsigned)esp_get_free_heap_size(),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    bool ota_busy=ota_service_is_busy();
+    if(!weather_busy && !ota_busy && !mqtt_is_connecting() &&
+       (int32_t)(now-s_next_ble_start_ms)>=0 &&
+       (!s_ble_services_started || ble_prov_start_failed()) && ota_service_admin_begin()){
+        if(ble_prov_start_failed()){
+            if(ble_prov_recover_start_failure())s_ble_services_started=false;
+        }else if(!s_ble_services_started)s_ble_services_started=start_ble_services();
+        ota_service_admin_end();
+        s_next_ble_start_ms=now+BLE_START_RETRY_MS;
     }
-    if(weather_busy)return;
-    if (s_startup_owner ||
-        (int32_t)(now - s_next_ble_start_ms) < 0) {
-        if(s_startup_owner)mqtt_set_connect_allowed(false);
-        return; /* Retain the last decision while BLE scheduling is deferred. */
+    if(!s_radios_started){
+        if((int32_t)(now-s_next_wifi_start_ms)<0)return;
+        const unsigned caps=MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        ESP_LOGW(TAG,"WiFi coexist init: free=%u largest=%u min=%u",
+                 (unsigned)heap_caps_get_free_size(caps),
+                 (unsigned)heap_caps_get_largest_free_block(caps),
+                 (unsigned)heap_caps_get_minimum_free_size(caps));
+        if(!wifi_sta_try_init()){
+            s_next_wifi_start_ms=now+BLE_START_RETRY_MS;
+            return;
+        }
+        start_saved_wifi(false);
+        sntp_sync_init();
+        s_radios_started=true;
     }
-    mqtt_set_connect_allowed(false);
-    if (ota_service_is_busy()) {
-        /* Freeze mode/lifecycle changes, not an existing cloud control link.
-         * Remote OTA may still need progress/cancel traffic after a drop. */
-        const unsigned caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-        if (!s_local_ble_mode && !mqtt_is_paused_for_local() &&
-            (!s_ble_services_started || ble_prov_is_suspended()) &&
-            heap_caps_get_free_size(caps) >= 32768U &&
-            heap_caps_get_largest_free_block(caps) >= 16384U)
-            mqtt_set_connect_allowed(true);
-        return;
+    mqtt_set_connect_allowed(!weather_busy);
+    static bool reported;
+    bool coexisting=mqtt_is_connected() && ble_prov_is_ready();
+    if(coexisting && !reported){
+        const unsigned caps=MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        ESP_LOGW(TAG,"WiFi/MQTT + BLE ready: free=%u largest=%u min=%u",
+                 (unsigned)heap_caps_get_free_size(caps),
+                 (unsigned)heap_caps_get_largest_free_block(caps),
+                 (unsigned)heap_caps_get_minimum_free_size(caps));
     }
-    /* Finish the admitted handshake before stopping/destroying its client. */
-    if (mqtt_is_connecting()) return;
-    local_ble_mode_tick(now);
+    reported=coexisting;
 }
 
 static bool wait_for_first_ui_frame(void)
@@ -856,6 +684,7 @@ void app_main(void)
     esp_log_level_set("modbus_direct", ESP_LOG_INFO);
     esp_log_level_set("panel_led", ESP_LOG_INFO);
     esp_log_level_set("mb_alarm", ESP_LOG_INFO);
+    esp_log_level_set("weather", ESP_LOG_INFO);
     atomic_store(&s_boot_stage, BOOT_BUZZ);
     ESP_LOGI(TAG, "Buzzer GPIO%d; USB wait=0ms", CONFIG_DIRECT_BUZZ_PIN);
     /* BLE 配对诊断: 放开 NimBLE 协议栈日志 (需 CONFIG_BT_NIMBLE_LOG_LEVEL=DEBUG 编译) */
@@ -874,7 +703,7 @@ void app_main(void)
     }
 
     factory_result_t factory_init=factory_identity_init();
-    ESP_LOGI(TAG,"Factory partition init: %s",factory_result_name(factory_init));
+    ESP_LOGI(TAG,"Stored identity init: %s",factory_result_name(factory_init));
     ensure_sn();
     ensure_key();
 
@@ -895,11 +724,11 @@ void app_main(void)
     panel_weather_init();
     direct_panel_init();
     atomic_store(&s_boot_stage, BOOT_NETWORK);
-    if(!factory_service_start())ESP_LOGE(TAG,"Factory USB service failed");
+    if(!panel_usb_service_start())ESP_LOGE(TAG,"Panel USB service failed");
     printf("[DEVICE] CS-MB-PANEL firmware=%s sn=%s reset=%d\n",FIRMWARE_VERSION,g_device_sn,(int)esp_reset_reason());
     if(esp_reset_reason()==ESP_RST_BROWNOUT)ESP_LOGW(TAG,"Previous reset: BROWNOUT; check controller 3.3V supply");
 #if CONFIG_DIRECT_IDENTITY_PRODUCTION
-    if(!g_device_sn[0]){atomic_store(&s_boot_stage,BOOT_READY);ESP_LOGW(TAG,"Waiting for USB provision, then reset device");return;}
+    if(!g_device_sn[0]){atomic_store(&s_boot_stage,BOOT_READY);ESP_LOGW(TAG,"SN required before starting network services");return;}
 #endif
     telemetry_init();
     cmd_handler_init();
@@ -930,17 +759,6 @@ void app_main(void)
     /* UI snapshots need MQTT/OTA/storage ready, but no radio is required.
      * The main loop remains parked so it cannot start BLE during the gate. */
     (void)wait_for_first_ui_frame();
-    s_ble_start_deadline_ms = now_ms() + BLE_STARTUP_WAIT_MS;
-    s_cloud_retry_deadline_ms = now_ms() + CLOUD_RETRY_WINDOW_MS;
-    s_next_ble_start_ms = now_ms();
-    wifi_sta_init();
-    start_saved_wifi(false);
-    /* mqtt_init reserved stack headroom. Transport starts only after DHCP
-     * and after startup_deferred_tick admits its exclusive memory window. */
-    mqtt_connect();
-
-    sntp_sync_init();
-
     enter_state(STATE_INIT);
 
     atomic_store(&s_boot_stage, BOOT_READY);

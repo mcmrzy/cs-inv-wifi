@@ -32,6 +32,7 @@ void full_mb_battery(const panel_snapshot_t *s,direct_inverter_battery_t *out)
 }
 #include "panel_catalog.h"
 #include <limits.h>
+#include <stddef.h>
 #include <string.h>
 
 const char *full_mb_registry_model(const panel_snapshot_t *s)
@@ -40,9 +41,10 @@ const char *full_mb_registry_model(const panel_snapshot_t *s)
     uint16_t a,b;
     if(!panel_value(s,0x38,&a) || !panel_value(s,0x39,&b))return NULL;
     panel_profile_t profile=panel_detect_profile(a,b);
-    if(s->config.profile_override!=PANEL_PROFILE_UNKNOWN && s->config.profile_override!=profile)return NULL;
+    if(s->config.profile_override!=PANEL_PROFILE_UNKNOWN &&
+       !panel_profile_same_family(s->config.profile_override,profile))return NULL;
     switch(profile){
-    case PANEL_PROFILE_6KU:return "6KU";
+    case PANEL_PROFILE_6KU:case PANEL_PROFILE_6KU_PARALLEL:return "6KU";
     case PANEL_PROFILE_12KU:return "12KU";
     case PANEL_PROFILE_2KU:return "PWR2KH12H1";
     case PANEL_PROFILE_3KU:return "3KU";
@@ -120,6 +122,59 @@ static const uint16_t measurement_regs[]={0x42,0x43,0x44,0x46,0x47,0x48,0x49,
     0x80,0x81,0x84,0x85,0x96,0x97,0x98,0x99,0x9a,0x9b,0xa0,0x154,0x330,0x331};
 static const uint16_t nonnegative_regs[]={0x50,0x52,0x58,0x5a,0x5d,0x80,0x84,0x96,0x97,0x98,0x99,0x9a,0x9b,0x154};
 
+static bool home_fresh(const panel_snapshot_t *s,uint16_t address,const uint32_t *after)
+{
+    uint32_t stamp=panel_stamp(s,address);
+    return !s->scanning && s->now_ms-stamp<FULL_MB_MEASUREMENT_FRESH_MS &&
+        (!after || (int32_t)(stamp-*after)>0);
+}
+
+void full_mb_home(const panel_snapshot_t *s,const uint32_t *after,panel_home_readings_t *out)
+{
+    memset(out,0,sizeof(*out));
+    if(!s)return;
+    const bool three=panel_is_3ku(s);
+    const uint16_t volts[]={0x50,0x96,0x80,0x58};
+    uint16_t raw,current;
+    for(unsigned i=0;i<PANEL_HOME_COUNT;i++){
+        if(!panel_value(s,volts[i],&raw) || raw>INT16_MAX)continue;
+        out->meter[i].decivolts=raw;
+        out->meter[i].available=PANEL_HOME_VOLTAGE;
+        if(home_fresh(s,volts[i],after))out->meter[i].fresh=PANEL_HOME_VOLTAGE;
+    }
+    panel_home_meter_t *grid=&out->meter[PANEL_HOME_GRID],*pv=&out->meter[PANEL_HOME_SOLAR];
+    panel_home_meter_t *battery=&out->meter[PANEL_HOME_BATTERY],*load=&out->meter[PANEL_HOME_LOAD];
+    bool fresh;
+    uint32_t watts;
+    if(panel_grid_watts(s,&grid->watts,&fresh)){
+        grid->available|=PANEL_HOME_POWER;
+        if(fresh && home_fresh(s,0x53,after) && (!three || home_fresh(s,0x5e,after)))
+            grid->fresh|=PANEL_HOME_POWER;
+    }
+    if(panel_pv_watts(s,&watts,&fresh)){
+        pv->watts=(int32_t)watts;pv->available|=PANEL_HOME_POWER;
+        if(fresh && (three?(home_fresh(s,0x98,after) && home_fresh(s,0x9b,after)):
+                            home_fresh(s,0xa0,after)))pv->fresh|=PANEL_HOME_POWER;
+    }
+    if(panel_value(s,0x5b,&raw)){
+        load->watts=(int16_t)raw;load->available|=PANEL_HOME_POWER;
+        if(home_fresh(s,0x5b,after))load->fresh|=PANEL_HOME_POWER;
+    }
+    if(panel_value(s,0x85,&raw)){
+        battery->watts=magnitude((int16_t)raw);battery->available|=PANEL_HOME_POWER;
+        if(home_fresh(s,0x85,after))battery->fresh|=PANEL_HOME_POWER;
+        if(panel_value(s,0x81,&current) && panel_stamp(s,0x85)==panel_stamp(s,0x81)){
+            int16_t signed_current=(int16_t)current;
+            int16_t direction=three && !signed_current?(int16_t)raw:signed_current;
+            out->battery_direction=(direction>0)-(direction<0);
+        }
+    }
+    if(panel_value(s,0x84,&raw) && raw<=1000){
+        out->battery_soc=(uint8_t)(raw/10U);battery->available|=PANEL_HOME_SOC;
+        if(home_fresh(s,0x84,after))battery->fresh|=PANEL_HOME_SOC;
+    }
+}
+
 static full_mb_data_state_t measurement_check(const panel_snapshot_t *s,uint16_t *problem,uint32_t *stamp)
 {
     uint16_t raw;
@@ -149,6 +204,23 @@ static full_mb_data_state_t measurement_check(const panel_snapshot_t *s,uint16_t
 full_mb_data_state_t full_mb_measurement_check(const panel_snapshot_t *s,uint16_t *problem)
 {
     return measurement_check(s,problem,NULL);
+}
+
+static uint16_t measurement_status(const panel_snapshot_t *s,const direct_dsp_status_t *status,int direction)
+{
+    uint16_t state=raw_value(s,0x42),flow=raw_value(s,0x44),bits=status->inverter_status[0];
+    uint16_t flags=(state==2)?1U:0U;
+    if(state==7 || status->fault)flags|=2U;
+    if(direction<0)flags|=4U;else if(direction>0)flags|=8U;
+    if((flow&(1U<<4)) && (flow&(1U<<5)))flags|=0x10;
+    if((flow&(1U<<0)) && (flow&(1U<<5)))flags|=0x20;
+    if((flow&(1U<<2)) && (flow&(1U<<5)))flags|=0x40;
+    if(flow&(1U<<1))flags|=0x80;
+    if(bits&8U)flags|=0x100;
+    if(bits&0x30U)flags|=0x200;
+    if(bits&1U)flags|=0x400;
+    if(bits&2U)flags|=0x800;
+    return flags;
 }
 
 bool full_mb_measurement(const panel_snapshot_t *s,RunParamDef *out,uint32_t *received_ms)
@@ -201,32 +273,154 @@ bool full_mb_measurement(const panel_snapshot_t *s,RunParamDef *out,uint32_t *re
     next.InvertTemp=is_3ku?inverter_temp*10:inverter_temp;
     next.Warning=status.warning[1];next.BmsWarning=status.warning[2]&0x1fffU;
     next.BatOverCharge=(raw_value(s,0x48)>>5)&1U;next.FaultValue=status.fault;
-    uint16_t state=raw_value(s,0x42),flow=raw_value(s,0x44),bits=status.inverter_status[0];
-    if(state==2)next.SysStatus|=1U;
-    if(state==7 || status.fault)next.SysStatus|=2U;
-    if(direction<0)next.SysStatus|=4U;else if(direction>0)next.SysStatus|=8U;
-    if((flow&(1U<<4)) && (flow&(1U<<5)))next.SysStatus|=0x10;
-    if((flow&(1U<<0)) && (flow&(1U<<5)))next.SysStatus|=0x20;
-    if((flow&(1U<<2)) && (flow&(1U<<5)))next.SysStatus|=0x40;
-    if(flow&(1U<<1))next.SysStatus|=0x80;
-    if(bits&8U)next.SysStatus|=0x100;
-    if(bits&0x30U)next.SysStatus|=0x200;
-    if(bits&1U)next.SysStatus|=0x400;
-    if(bits&2U)next.SysStatus|=0x800;
+    next.SysStatus=measurement_status(s,&status,direction);
     if(panel_fresh(s,0x9c))next.Epv_today=raw_value(s,0x9c);
     if(panel_fresh(s,0x9d))next.Epv_total=raw_value(s,0x9d);
     *out=next;*received_ms=stamp;return true;
+}
+
+static bool telemetry_reg(const panel_snapshot_t *s,uint16_t address,uint16_t *value)
+{
+    return fresh_value(s,address,value) && s->now_ms-panel_stamp(s,address)<=FULL_MB_MEASUREMENT_FRESH_MS;
+}
+
+bool full_mb_partial_telemetry(const panel_snapshot_t *s,RunParamDef *out,bool words[RUN_PARAM_WORDS])
+{
+    if(!s || !out || !words || s->scanning || !panel_online(s))return false;
+    memset(out,0,sizeof(*out));
+    memset(words,0,RUN_PARAM_WORDS*sizeof(*words));
+    #define MARK(field) words[offsetof(RunParamDef,field)/sizeof(uint16_t)]=true
+    #define READ_FIELD(field,address,scale,type) do { \
+        uint16_t raw; \
+        if(telemetry_reg(s,address,&raw)){out->field=(type)raw/(scale);MARK(field);} \
+    } while(0)
+
+    uint16_t raw,voltage;
+    int32_t grid;
+    uint32_t pv;
+    bool fresh;
+    const bool three=panel_is_3ku(s);
+    if(telemetry_reg(s,0x53,&raw) && (!three || telemetry_reg(s,0x5e,&raw)) &&
+       panel_grid_watts(s,&grid,&fresh) && fresh && grid>=INT16_MIN && grid<=INT16_MAX){
+        out->ACInWatt=(int16_t)grid;MARK(ACInWatt);
+        if(telemetry_reg(s,0x50,&voltage) && telemetry_reg(s,0x51,&raw)){
+            uint32_t va=(uint32_t)voltage*magnitude((int16_t)raw)/1000U;
+            if(va>INT16_MAX)va=INT16_MAX;
+            out->ACInVA=grid<0 ? -(int16_t)va : (int16_t)va;MARK(ACInVA);
+        }
+    }
+    READ_FIELD(GridVolt,0x50,10U,uint16_t);
+    READ_FIELD(GridFreq,0x52,10U,uint16_t);
+    READ_FIELD(ACChrCurr,0x51,1,int16_t);
+    READ_FIELD(ACOutputVolt,0x58,10U,uint16_t);
+    READ_FIELD(OutputCurr,0x59,1,int16_t);
+    READ_FIELD(ACOutputFreq,0x5a,10U,uint16_t);
+    READ_FIELD(OutputWatt,0x5b,1,int16_t);
+    READ_FIELD(OutputVA,0x5c,1,int16_t);
+    READ_FIELD(LoadPercent,0x5d,1U,uint16_t);
+    READ_FIELD(BatVolt,0x80,1U,uint16_t);
+    if(telemetry_reg(s,0x84,&raw) && raw<=1000){out->BatterySOC=raw/10U;MARK(BatterySOC);}
+    uint16_t current;
+    int direction=0;
+    bool battery_fresh=false;
+    if(telemetry_reg(s,0x81,&current) && telemetry_reg(s,0x85,&raw) &&
+       panel_stamp(s,0x81)==panel_stamp(s,0x85)){
+        direction=panel_battery_direction(s);
+        if(direction<0){out->BatChgCurr=magnitude((int16_t)current);out->BatChrWatt=magnitude((int16_t)raw);}
+        if(direction>0){out->BatDischgCurr=magnitude((int16_t)current);out->BatDisChrWatt=magnitude((int16_t)raw);}
+        battery_fresh=direction || raw==0;
+        if(battery_fresh){MARK(BatChgCurr);MARK(BatDischgCurr);MARK(BatChrWatt);MARK(BatDisChrWatt);}
+    }
+    direct_dsp_status_t status;
+    uint32_t received;
+    if(full_mb_status(s,&status,&received) && s->now_ms-received<=FULL_MB_MEASUREMENT_FRESH_MS){
+        out->FaultValue=status.fault;MARK(FaultValue);words[offsetof(RunParamDef,FaultValue)/2+1]=true;
+        out->Warning=status.warning[1];MARK(Warning);
+        out->BmsWarning=status.warning[2]&0x1fffU;MARK(BmsWarning);
+        out->BatOverCharge=(raw_value(s,0x48)>>5)&1U;MARK(BatOverCharge);
+        if(battery_fresh){out->SysStatus=measurement_status(s,&status,direction);MARK(SysStatus);}
+    }
+    READ_FIELD(Vpv1,0x96,10U,uint16_t);
+    READ_FIELD(Buck1Curr,0x97,1U,uint16_t);
+    READ_FIELD(Ppv1,0x98,1U,uint16_t);
+    READ_FIELD(Vpv2,0x99,10U,uint16_t);
+    READ_FIELD(Buck2Curr,0x9a,1U,uint16_t);
+    READ_FIELD(Ppv2,0x9b,1U,uint16_t);
+    if((three ? (telemetry_reg(s,0x98,&raw) && telemetry_reg(s,0x9b,&raw)) : telemetry_reg(s,0xa0,&raw)) &&
+       panel_pv_watts(s,&pv,&fresh) && fresh && pv<=UINT16_MAX){out->Ppv=(uint16_t)pv;MARK(Ppv);}
+    READ_FIELD(BusVolt,0x154,1U,uint16_t);
+    READ_FIELD(BoostTemp,0x330,(three?1:10),int16_t);
+    if(telemetry_reg(s,0x331,&raw)){
+        int32_t temperature=(int16_t)raw*(three?10:1);
+        if(temperature>=INT16_MIN && temperature<=INT16_MAX){out->InvertTemp=(int16_t)temperature;MARK(InvertTemp);}
+    }
+    if(telemetry_reg(s,0x9c,&raw)){
+        out->Epv_today=raw;MARK(Epv_today);words[offsetof(RunParamDef,Epv_today)/2+1]=true;
+    }
+    if(telemetry_reg(s,0x9d,&raw)){
+        out->Epv_total=raw;MARK(Epv_total);words[offsetof(RunParamDef,Epv_total)/2+1]=true;
+    }
+    #undef READ_FIELD
+    #undef MARK
+    for(unsigned i=0;i<RUN_PARAM_WORDS;i++)if(words[i])return true;
+    return false;
+}
+
+static uint16_t system_setting_register(uint16_t index)
+{
+    switch(index) {
+    case FULL_MB_POWER_SAVING:return 0x412a;
+    case FULL_MB_AUTO_FREQUENCY:return 0x412b;
+    case FULL_MB_BATTERY_OPEN_ALARM:return 0x412d;
+    case FULL_MB_INVERTER_MUTE:return 0x4130;
+    default:return 0;
+    }
+}
+
+static uint16_t soc_setting_register(uint16_t index)
+{
+    switch(index) {
+    case 36:return 0x4122; /* Back to utility. */
+    case 37:return 0x4121; /* Back to battery. */
+    case 40:return 0x4120; /* Low SOC shutdown. */
+    default:return 0;
+    }
+}
+
+static bool modbus_lead_battery(const panel_snapshot_t *s)
+{
+    uint16_t battery;
+    return fresh_value(s,0x150,&battery) && battery<=1;
 }
 
 bool full_mb_read_config(const panel_snapshot_t *s,uint16_t index,bool wire,uint16_t *value)
 {
     if(!s || !value)return false;
     uint16_t raw,next,reg;
+    uint16_t system=system_setting_register(index);
+    if(system){
+        return wire && full_mb_registry_model(s) && fresh_value(s,0x351,&raw) &&
+               panel_setting_decode_current(s,system,raw,value);
+    }
+    uint16_t soc=soc_setting_register(index);
+    if(soc){
+        const panel_setting_t *setting=panel_setting_find(soc);
+        raw=0xffff;
+        /* The enabled flags are authoritative for OFF. A stale threshold
+         * must not turn into a numeric setting when its flag is set. */
+        (void)fresh_value(s,setting->read_address,&raw);
+        if(!panel_setting_decode_current(s,soc,raw,&next))return false;
+        *value=wire && next==0xfff1?0:next;
+        return true;
+    }
+    if(index>=27 && index<=30 && (!panel_is_3ku(s) || !modbus_lead_battery(s)))return false;
     switch(index) {
     case 0:reg=0x142;break;case 2:reg=0x140;break;case 13:reg=0x143;break;
+    case 1:if(!panel_is_3ku(s))return false;reg=0x179;break;
     case 4:case 23:reg=0x150;break;
-    case 8:reg=0x2a1;break;
+    case 7:reg=0x2a0;break;case 8:reg=0x2a1;break;
     case 5:case 6:case 16:case 17:case 26:reg=0x351;break;
+    case 27:case 28:case 29:case 30:reg=(uint16_t)(0x17e + index - 27);break;
     default:return false;
     }
     if(!fresh_value(s,reg,&raw) || raw==0xffff)return false;
@@ -236,7 +430,14 @@ bool full_mb_read_config(const panel_snapshot_t *s,uint16_t index,bool wire,uint
         if(raw>=3)return false;
         next=values[raw];break;
     }
-    case 2:if(raw>2)return false;next=raw+1;break;
+    case 1: {
+        uint16_t decoded;
+        if(!panel_setting_decode_current(s,0x4106,raw,&decoded))return false;
+        next=decoded?decoded*10U:2U;
+        if(wire)next*=10U;
+        break;
+    }
+    case 2:if(raw>2 || (raw==2 && panel_is_3ku(s)))return false;next=raw+1;break;
     case 13: {
         static const uint16_t native[]={3,4,1},collector[]={2,3,1};
         if(raw>2)return false;
@@ -249,12 +450,24 @@ bool full_mb_read_config(const panel_snapshot_t *s,uint16_t index,bool wire,uint
         if(panel_is_3ku(s) || s->config.profile_override==PANEL_PROFILE_4KL ||
            s->detected_profile==PANEL_PROFILE_4KL || (raw!=2 && raw!=3))return false;
         next=raw==2 ? 1 : 0;break;
+    case 7: {
+        uint16_t decoded;
+        if(!panel_setting_decode_current(s,0x4100,raw,&decoded))return false;
+        next=raw;break;
+    }
     case 8:if(raw!=5000 && raw!=6000)return false;next=raw;break;
     case 5:next=(raw>>2)&1U;break;
     case 6:next=(raw>>1)&1U;break;
     case 16:next=(raw>>14)&1U;break;
     case 17:next=(raw>>3)&1U;break;
     case 26:next=(raw>>8)&1U;break;
+    case 27:
+        if(raw<240 || raw>300)return false;
+        next=raw;break;
+    case 28:case 29:case 30:
+        if(raw==0 || !panel_setting_decode_current(s,(uint16_t)(0x4113+index-27),raw,&next))
+            return false;
+        break;
     default:return false;
     }
     *value=next;return true;
@@ -271,7 +484,7 @@ static uint16_t write_register(uint16_t index)
     case 13:return 0x4104;case 26:return 0x4112;
     case 27:return 0x4113;case 28:return 0x4114;case 29:return 0x4115;
     case 30:return 0x4116;case 31:return 0x4117;
-    case 36:return 0x4122;case 37:return 0x4121;case 40:return 0x4120;
+    case 36:case 37:case 40:return soc_setting_register(index);
     default:return 0xffff;
     }
 }
@@ -280,7 +493,35 @@ bool full_mb_make_write(const panel_snapshot_t *s,uint16_t index,uint16_t value,
 {
     if(!s || !command)return false;
     uint16_t reg=write_register(index),raw=value;
+    uint16_t system=system_setting_register(index);
+    if(system){
+        if(!wire || !panel_profile_supported(panel_effective_profile(s)) || !full_mb_registry_model(s))
+            return false;
+        reg=system;
+    }
+    if(index==FULL_MB_AC_POWER_INDEX){
+        uint16_t state;
+        if(!wire || !panel_profile_supported(panel_effective_profile(s)) ||
+           !full_mb_registry_model(s) || !fresh_value(s,0x42,&state))return false;
+        bool start=value==1 && (state==2 || (state==8 && !panel_is_3ku(s)));
+        bool stop=value==2 && state>=3 && state<=6;
+        if(!start && !stop)return false;
+        reg=0x4123;
+    }
     if(reg==0xffff)return false;
+    if(wire && soc_setting_register(index)){
+        uint16_t battery;
+        if(!panel_profile_supported(panel_effective_profile(s)) || !full_mb_registry_model(s))return false;
+        if(value==0)raw=0xfff1;
+        else if(!fresh_value(s,0x150,&battery) || (battery!=2 && (battery!=3 || panel_is_3ku(s))))
+            return false;
+    }
+    if(wire && index>=26 && index<=30){
+        if(panel_effective_profile(s)!=PANEL_PROFILE_3KU || !full_mb_registry_model(s) ||
+           !modbus_lead_battery(s))return false;
+        /* The 3KU exposes holding and timeout settings as whole hours. */
+        if((index==28 || index==29) && (value<60 || value>900 || value%60U))return false;
+    }
     if(wire && (index==1 || index==10)) {
         if(value%10U)return false;
         value/=10U;raw=value;

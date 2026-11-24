@@ -68,7 +68,7 @@ static uint16_t register_id(const char *id)
 
 static const char *panel_info(cJSON *actual)
 {
-    panel_profile_t configured=snapshot.config.profile_override;
+    panel_profile_t configured=panel_effective_profile(&snapshot);
     bool confirmed=panel_profile_supported(configured);
     panel_profile_t model=confirmed?configured:snapshot.detected_profile;
     return cJSON_AddStringToObject(actual,"model",panel_profile_name(model)) &&

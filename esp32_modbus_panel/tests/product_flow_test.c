@@ -24,9 +24,9 @@ int main(void){
  assert(!press(&u,DIRECT_KEY_ENTER));assert(u.page==PANEL_PAGE_COMM && u.model_setup && u.selected==3 && u.editing);
  assert(!press(&u,DIRECT_KEY_ENTER) && !u.review); /* Unknown is never a confirmed model. */
  const panel_profile_t profiles[]={PANEL_PROFILE_2KU,PANEL_PROFILE_3KU,PANEL_PROFILE_6KU,
-     PANEL_PROFILE_12KU,PANEL_PROFILE_UNKNOWN,PANEL_PROFILE_2KU,PANEL_PROFILE_3KU,PANEL_PROFILE_6KU};
+     PANEL_PROFILE_6KU_PARALLEL,PANEL_PROFILE_12KU,PANEL_PROFILE_UNKNOWN,PANEL_PROFILE_2KU,PANEL_PROFILE_3KU,PANEL_PROFILE_6KU};
  for(unsigned i=0;i<sizeof(profiles)/sizeof(profiles[0]);i++){
-     assert(!press(&u,DIRECT_KEY_RIGHT) && u.comm_draft.profile_override==profiles[i]);
+     assert(!press(&u,DIRECT_KEY_LEFT) && u.comm_draft.profile_override==profiles[i]);
  }
  assert(!press(&u,DIRECT_KEY_ENTER) && u.review);
  assert(press(&u,DIRECT_KEY_ENTER) && c.type==PANEL_CMD_CONFIG);
@@ -41,7 +41,7 @@ int main(void){
  panel_ui_init(&u);u.page=PANEL_PAGE_SETTINGS;u.selected=1;
  press(&u,DIRECT_KEY_ENTER);press(&u,DIRECT_KEY_UP);assert(u.draft==1);
  press(&u,DIRECT_KEY_DOWN);assert(u.draft==0);
- press(&u,DIRECT_KEY_LEFT);assert(strstr(u.message,"边界"));
+ press(&u,DIRECT_KEY_RIGHT);assert(strstr(u.message,"边界"));
  u.editing=false;u.have_result=true;u.result_address=0x4101;u.result_value=1;
  u.last_result=PANEL_WRITE_REJECTED;u.result_exception=3;
  panel_ui_view(&u,&s,&v);assert(strstr(v.rows[3],"拒绝参数值"));
@@ -64,7 +64,60 @@ int main(void){
  set(0x42,2);panel_ui_sync(&u,&s);
  assert(!u.blocked && !u.editing);
  panel_ui_view(&u,&s,&v);
- assert(v.key_labels[KEY_ENTER]==KEY_EDIT && !v.footer_notice);
+ assert(v.key_labels[KEY_ENTER]==KEY_EDIT && strstr(v.footer,"并机相位"));
+
+ panel_ui_init(&u);u.page=PANEL_PAGE_SETTINGS;u.setting_group=2;
+ u.selected=(uint16_t)(panel_setting_find(0x4124)-panel_setting(0));
+ const panel_profile_t reserved[]={PANEL_PROFILE_2KU,PANEL_PROFILE_6KU,PANEL_PROFILE_6KU_PARALLEL,PANEL_PROFILE_12KU};
+ for(unsigned i=0;i<sizeof(reserved)/sizeof(reserved[0]);i++){
+  s.config.profile_override=reserved[i];
+  assert(!panel_setting_allowed(&s,0x4124,0) && !panel_setting_allowed(&s,0x4124,1));
+  assert(panel_ui_view(&u,&s,&v) && strstr(v.footer,"未定义充电开关"));
+  assert(v.key_labels[KEY_ENTER]==KEY_INFO && !strcmp(v.values[v.selected],"未定义"));
+  for(unsigned r=0;r<v.setting_count;r++)assert(v.setting_addresses[r]!=0x4124);
+  assert(!press(&u,DIRECT_KEY_ENTER) && u.blocked);
+  assert(panel_ui_view(&u,&s,&v) && strstr(v.rows[4],"仅 3KU"));
+  assert(!press(&u,DIRECT_KEY_BACK) && !u.blocked);
+ }
+ s.config.profile_override=PANEL_PROFILE_3KU;
+ assert(panel_ui_view(&u,&s,&v) && v.key_labels[KEY_ENTER]==KEY_EDIT && strstr(v.footer,"停止电池充电"));
+ assert(!press(&u,DIRECT_KEY_ENTER) && u.editing && u.draft==0xffff);
+ assert(panel_ui_view(&u,&s,&v) && strstr(v.subtitle,"停止电池充电"));
+ assert(!press(&u,DIRECT_KEY_LEFT) && u.draft==0);
+ assert(!press(&u,DIRECT_KEY_LEFT) && u.draft==1);
+ assert(press(&u,DIRECT_KEY_ENTER) && c.address==0x4124 && c.value==1);
+
+ panel_ui_init(&u);u.page=PANEL_PAGE_SETTINGS;u.setting_group=2;
+ u.selected=(uint16_t)(panel_setting_find(0x4105)-panel_setting(0));
+ assert(panel_ui_view(&u,&s,&v) && v.footer_notice && strstr(v.footer,"市电"));
+ assert(!press(&u,DIRECT_KEY_ENTER) && u.editing);
+ assert(panel_ui_view(&u,&s,&v) && strstr(v.subtitle,"市电"));
+ panel_ui_init(&u);u.page=PANEL_PAGE_SETTINGS;
+ const unsigned count=(unsigned)panel_setting_count(),pages=(count+4)/5;
+ char suffix[24];
+ snprintf(suffix,sizeof(suffix)," 1/%u",pages);
+ u.selected=0;assert(panel_ui_view(&u,&s,&v) && strstr(v.title,suffix));
+ u.selected=4;assert(panel_ui_view(&u,&s,&v) && strstr(v.title,suffix));
+ press(&u,DIRECT_KEY_RIGHT);
+ snprintf(suffix,sizeof(suffix)," 2/%u",pages);
+ assert(panel_ui_view(&u,&s,&v) && strstr(v.title,suffix));
+ u.selected=count-1;
+ snprintf(suffix,sizeof(suffix)," %u/%u",pages,pages);
+ assert(panel_ui_view(&u,&s,&v) && strstr(v.title,suffix));
+
+ for(unsigned i=0;i<count;i++){
+  u.selected=i;u.editing=true;u.draft=0xffff;
+  assert(panel_ui_view(&u,&s,&v) && v.setting_editor && v.subtitle[0]);
+ }
+ u.selected=(uint16_t)(panel_setting_find(0x4102)-panel_setting(0));
+ u.draft=1;
+ assert(panel_ui_view(&u,&s,&v) && !strcmp(v.values[2],"光伏优先") && strstr(v.subtitle,"优先使用光伏"));
+ assert(!panel_setting_allowed(&s,0x4102,3));
+ s.config.profile_override=PANEL_PROFILE_6KU;
+ assert(panel_ui_view(&u,&s,&v) && strstr(v.subtitle,"再用市电"));
+ u.draft=3;
+ assert(panel_ui_view(&u,&s,&v) && !strcmp(v.values[2],"MKS") && !strcmp(v.subtitle,"发电机优先，不向市电回馈"));
+ assert(panel_setting_allowed(&s,0x4102,3));
  s.now_ms=7001;assert(panel_setting_access(&s,0x4102)==PANEL_ACCESS_OFFLINE);
  puts("PASS product flow: blocked setting recovery/model confirmation, restored selection, no-op write suppression and explicit reasons");
 }

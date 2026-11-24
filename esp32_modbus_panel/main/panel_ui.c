@@ -14,7 +14,14 @@ static const char *const states[]={"上电","初始化","待机","市电","光�
 static const char *const detail_titles[]={
     "市电与负载","电池与充电","光伏输入","电池状态","温度监测","发电机","电量与输出","当前运行设置"
 };
-enum {DETAIL_INDEX_ROWS=4,SETTINGS_PAGE_ROWS=5};
+enum {SETTINGS_PAGE_ROWS=5};
+
+const char *panel_detail_group_label(unsigned group,bool english)
+{
+    static const char *const en[]={"Grid & load","Battery","Solar","Battery status",
+        "Temperatures","Generator","Energy","Modes"};
+    return group<PANEL_DETAIL_PAGES?(english?en[group]:detail_titles[group]):"";
+}
 
 static const char *run_state(const panel_snapshot_t *s)
 {
@@ -31,7 +38,7 @@ static const char *result_state(panel_write_state_t state)
     case PANEL_WRITE_PROTOCOL_ACCEPTED:return "设备已受理";
     case PANEL_WRITE_PROCESSED:return "设置未生效";
     case PANEL_WRITE_CONFIRMED:return "设置已生效";
-    case PANEL_WRITE_UNCERTAIN:return "设置应答超时";
+    case PANEL_WRITE_UNCERTAIN:return "设置结果未确认";
     case PANEL_WRITE_REJECTED:return "命令失败，查看诊断";
     default:return "";
     }
@@ -51,7 +58,7 @@ void panel_ui_sync(panel_ui_t *u,const panel_snapshot_t *s)
         bool uncertain=u->pending && u->pending_type==PANEL_CMD_WRITE;
         if(u->model_setup){u->page=PANEL_PAGE_SETTINGS;u->selected=u->model_return_selected;}
         u->pending=false;u->editing=false;u->review=false;u->blocked=false;u->model_setup=false;
-        u->have_result=uncertain;u->last_result=PANEL_WRITE_UNCERTAIN;u->result_exception=0;
+        u->have_result=uncertain;u->last_result=PANEL_WRITE_UNCERTAIN;u->result_exception=0;u->result_readback_valid=false;
         u->edit_original_valid=false;
         u->had_link=false;u->link_lost=false;u->show_recovery=false;
         snprintf(u->message,sizeof(u->message),"通信配置已变更，请重新打开参数");
@@ -88,7 +95,7 @@ void panel_ui_sync(panel_ui_t *u,const panel_snapshot_t *s)
     if(u->pending && !receipt && !s->command_busy && s->now_ms-u->pending_since_ms>1000U){
         u->pending=false;u->editing=false;u->review=false;
         if(u->pending_type==PANEL_CMD_WRITE){
-            u->have_result=true;u->last_result=PANEL_WRITE_UNCERTAIN;u->result_exception=0;
+            u->have_result=true;u->last_result=PANEL_WRITE_UNCERTAIN;u->result_exception=0;u->result_readback_valid=false;
         }else snprintf(u->message,sizeof(u->message),"未取得操作回执，请核对当前配置");
         return;
     }
@@ -109,6 +116,8 @@ void panel_ui_sync(panel_ui_t *u,const panel_snapshot_t *s)
         }else{
             u->have_result=true;u->last_result=state;
             u->result_exception=receipt->exception;
+            u->result_readback=receipt->readback_value;
+            u->result_readback_valid=receipt->readback_valid;
             snprintf(u->message,sizeof(u->message),"%s",result_state(state));
         }
         if(u->pending_type==PANEL_CMD_CONFIG && u->model_setup && state!=PANEL_WRITE_REJECTED){
@@ -141,7 +150,7 @@ static bool send_command(panel_ui_t *u,const panel_snapshot_t *s,panel_command_t
     u->pending=true;u->have_result=false;u->pending_sequence=s->command_sequence+1U;
     u->pending_since_ms=s->now_ms;u->context_seen=true;u->context_generation=s->context_generation;
     u->pending_type=c->type;
-    if(c->type==PANEL_CMD_WRITE){u->result_address=c->address;u->result_value=c->value;u->result_profile=s->config.profile_override;}
+    if(c->type==PANEL_CMD_WRITE){u->result_address=c->address;u->result_value=c->value;u->result_profile=panel_effective_profile(s);}
     u->editing=false;u->review=false;u->message[0]=0;
     return true;
 }
@@ -150,6 +159,34 @@ static unsigned move(unsigned selected,unsigned count,int direction)
 {
     if(!count)return 0;
     return direction>0?(selected+1U)%count:(selected?selected-1U:count-1U);
+}
+
+static unsigned step_page(unsigned selected,unsigned count,int direction)
+{
+    if(selected>=count)selected=count-1;
+    return direction>0?(selected+1<count?selected+1:selected):(selected?selected-1:0);
+}
+
+static unsigned move_grid(unsigned selected,unsigned count,unsigned columns,uint8_t key)
+{
+    unsigned column=selected%columns;
+    if(key==DIRECT_KEY_LEFT && column>0)return selected-1;
+    if(key==DIRECT_KEY_UP && selected>=columns)return selected-columns;
+    if(key==DIRECT_KEY_DOWN && selected+columns<count)return selected+columns;
+    if(key==DIRECT_KEY_RIGHT && column+1<columns && selected+1<count)return selected+1;
+    return selected;
+}
+
+static uint16_t power_request(unsigned selected)
+{
+    return selected==0?1:selected==1?2:0;
+}
+
+static unsigned move_page(unsigned selected,unsigned count,unsigned rows,int direction)
+{
+    unsigned page=move(selected/rows,(count+rows-1)/rows,direction);
+    unsigned next=page*rows+selected%rows;
+    return next<count?next:count-1;
 }
 
 static unsigned alarm_pages(const panel_snapshot_t *s)
@@ -173,13 +210,15 @@ static bool current_setting(const panel_snapshot_t *s,const panel_setting_t *set
 
 static bool displayed_setting(const panel_snapshot_t *s,const panel_setting_t *setting,uint16_t *value,bool *verified,bool *stale)
 {
-    *verified=true;*stale=false;
-    if(current_setting(s,setting,value)){
-        *stale=!panel_fresh(s,panel_setting_current_address(s,setting));return true;
-    }
+    *verified=true;*stale=!panel_online(s);
     const panel_setting_read_t *r=setting?panel_setting_read_find(s,setting->address):NULL;
-    if(!r || r->state!=PANEL_SETTING_VALUE)return false;
-    *value=r->value;*verified=r->independent;*stale=s->now_ms-r->stamp>PANEL_FRESH_MS;return true;
+    if(r && r->state!=PANEL_SETTING_UNREAD){
+        if(r->state!=PANEL_SETTING_VALUE)return false;
+        *value=r->value;*verified=r->independent;return true;
+    }
+    if(!current_setting(s,setting,value))return false;
+    *stale|=!panel_fresh(s,panel_setting_current_address(s,setting));
+    return true;
 }
 
 static const char *setting_read_status(const panel_snapshot_t *s,uint16_t address,bool short_text)
@@ -208,6 +247,80 @@ static bool setting_uses_fast_step(const panel_setting_t *setting)
            (address>=0x4120 && address<=0x4122) || address==0x414b || address==0x418d;
 }
 
+static const char *setting_help(uint16_t address)
+{
+    switch(address){
+    case 0x4104:return "设置充电来源与优先级";
+    case 0x4105:return "限制市电充电电流";
+    case 0x4106:return "限制光伏和市电的总充电电流";
+    case 0x410a:return "恒压充电阶段的目标电压";
+    case 0x410b:return "充电完成后的维持电压";
+    case 0x4112:return "均衡充电仅适用于铅酸电池";
+    case 0x4117:return "立即执行一次铅酸均衡充电";
+    case 0x4120:return "电池电量低于此值时关机";
+    case 0x4121:return "电量回升到此值时转电池供电";
+    case 0x4122:return "电量降到此值时转市电供电";
+    case 0x4124:return "关闭后停止电池充电";
+    case 0x4100:return "设置交流输出的额定电压";
+    case 0x4101:return "设置交流输出的额定频率";
+    case 0x4102:return "选择负载优先使用的电源";
+    case 0x4103:return "选择逆变器接受的输入电压范围";
+    case 0x4107:return "按电池类型选择充电参数";
+    case 0x4108:return "电池电压低于此值时告警";
+    case 0x4109:return "电池电压低于此值时关机";
+    case 0x410c:return "电池电压降到此值时转市电";
+    case 0x410d:return "电池电压回升到此值时转电池";
+    case 0x410e:return "市电电压低于此值时退出市电";
+    case 0x410f:return "市电电压高于此值时退出市电";
+    case 0x4110:return "选择单机或并机相位";
+    case 0x4111:return "为并机中的逆变器设置编号";
+    case 0x4113:return "设置均衡充电的目标电压";
+    case 0x4114:return "设置均衡充电持续时间";
+    case 0x4115:return "设置均衡充电最长时间";
+    case 0x4116:return "设置均衡充电间隔天数";
+    case 0x4118:return "电压降到此值时关闭输出 2";
+    case 0x4119:return "设置输出 2 的供电时间";
+    case 0x411a:return "控制是否允许接入发电机";
+    case 0x411b:return "按发电机铭牌设置额定功率";
+    case 0x411c:return "设置发电机输入功率上限";
+    case 0x411d:return "消除当前的发电机告警";
+    case 0x411e:return "选择逆变器与电池的通信协议";
+    case 0x411f:return "设置逆变器通信使用的电池地址";
+    case 0x4123:return "远程开启或关闭逆变器";
+    case 0x4125:return "控制逆变器屏幕自动关闭";
+    case 0x4127:return "温度恢复后可自动重启";
+    case 0x4128:return "过载恢复后可自动重启";
+    case 0x4129:return "过载时允许切换到市电旁路";
+    case 0x412a:return "低负载时启用省电模式";
+    case 0x412b:return "自动检测市电输入频率";
+    case 0x412c:return "继电器接通后启用软启动";
+    case 0x412d:return "电池开路时发出告警";
+    case 0x4130:return "控制逆变器蜂鸣器是否静音";
+    case 0x4131:return "允许逆变器界面自动返回首页";
+    case 0x4132:return "主输入电源变化时发出告警";
+    case 0x4142:return "限制电池放电的最大电流";
+    case 0x414b:return "电量降到此值时关闭输出 2";
+    case 0x4153:return "允许并机系统在无电池时运行";
+    case 0x4166:return "检测逆变器是否接入电池";
+    case 0x418d:return "电池电量低于此值时告警";
+    case 0x41a6:return "选择高温时的功率限制策略";
+    default:return "";
+    }
+}
+
+static const char *setting_edit_help(const panel_snapshot_t *s,uint16_t address,uint16_t draft)
+{
+    if(address==0x4102){
+        switch(draft){
+        case 0:return "负载优先使用市电";
+        case 1:return panel_is_3ku(s)?"负载优先使用光伏":"光伏优先，再用市电，最后电池";
+        case 2:return "光伏优先，再用电池，最后市电";
+        case 3:if(!panel_is_3ku(s))return "发电机优先，不向市电回馈";break;
+        }
+    }
+    return setting_help(address);
+}
+
 static uint16_t battery_suggestion(const panel_ui_t *u,const panel_snapshot_t *s,uint16_t reg)
 {
     if(!u->battery_limits_page)return 0;
@@ -234,8 +347,8 @@ static bool begin_setting(panel_ui_t *u,const panel_snapshot_t *s)
     uint16_t suggestion=battery_suggestion(u,s,setting->address);
     u->battery_draft=suggestion && suggestion!=draft;
     if(u->battery_draft)draft=suggestion;
-    u->edit_original_valid=panel_fresh(s,panel_setting_current_address(s,setting)) &&
-        current_setting(s,setting,&u->edit_original);
+    u->edit_original_valid=displayed_setting(s,setting,&u->edit_original,&verified,&stale) &&
+        verified && !stale;
     u->context_seen=true;u->context_generation=s->context_generation;
     u->blocked=false;u->have_result=false;u->draft=draft;u->editing=true;u->review=false;return false;
 }
@@ -274,7 +387,7 @@ static void comm_step(panel_ui_t *u,int direction)
     }else if(u->selected==2)c->parity=(uint8_t)move(c->parity,3,direction);
     else if(u->selected==3){
         static const panel_profile_t profiles[]={PANEL_PROFILE_UNKNOWN,PANEL_PROFILE_2KU,
-            PANEL_PROFILE_3KU,PANEL_PROFILE_6KU,PANEL_PROFILE_12KU};
+            PANEL_PROFILE_3KU,PANEL_PROFILE_6KU,PANEL_PROFILE_6KU_PARALLEL,PANEL_PROFILE_12KU};
         const unsigned count=sizeof(profiles)/sizeof(profiles[0]);
         unsigned index=0;
         for(unsigned i=1;i<count;i++)if(profiles[i]==c->profile_override){index=i;break;}
@@ -282,12 +395,11 @@ static void comm_step(panel_ui_t *u,int direction)
     }
 }
 
-static void adjust_setting(panel_ui_t *u,const panel_snapshot_t *s,uint8_t key)
+static void adjust_setting(panel_ui_t *u,const panel_snapshot_t *s,int direction,bool fast)
 {
     const panel_setting_t *setting=panel_setting(u->selected);
     if(!setting)return;
-    int direction=(key==DIRECT_KEY_UP || key==DIRECT_KEY_RIGHT)?1:-1;
-    unsigned steps=setting_uses_fast_step(setting) && (key==DIRECT_KEY_UP || key==DIRECT_KEY_DOWN)?10U:1U;
+    unsigned steps=fast && setting_uses_fast_step(setting)?10U:1U;
     uint16_t next;
     bool moved=false;
     while(steps-- && panel_setting_step(s,setting->address,u->draft,direction,&next)){
@@ -309,10 +421,15 @@ static bool commit_setting(panel_ui_t *u,const panel_snapshot_t *s,panel_command
     uint16_t actual=0;
     bool current_valid=!power && panel_fresh(s,panel_setting_current_address(s,setting)) &&
         current_setting(s,setting,&actual);
+    const panel_setting_read_t *cached=power?NULL:panel_setting_read_find(s,reg);
+    if(!current_valid && cached && cached->state==PANEL_SETTING_VALUE && cached->independent){
+        actual=cached->value;current_valid=true;
+    }
     if(!panel_setting_allowed(s,reg,u->draft))reason="状态已改变，设置未发送";
     else if(!power && u->battery_draft && battery_suggestion(u,s,reg)!=u->draft)
         reason="电池参数已变化，请重新进入";
-    else if(!power && u->edit_original_valid && !current_valid)reason="当前值已失效，请重新编辑";
+    else if(!power && u->edit_original_valid && !current_valid)
+        reason="当前值已失效，请重新编辑";
     else if(current_valid && u->edit_original_valid && actual!=u->edit_original && actual!=u->draft)
         reason="当前值已变化，请重新编辑";
     else if(current_valid && actual==u->draft)reason="数值未改变，无需发送";
@@ -373,9 +490,8 @@ bool panel_ui_key(panel_ui_t *u,uint8_t key,const panel_snapshot_t *s,panel_comm
             if(u->page==PANEL_PAGE_SETTINGS)return commit_setting(u,s,out);
             u->review=true;return false;
         }
-        int adjustment=(key==DIRECT_KEY_UP || key==DIRECT_KEY_RIGHT)?1:-1;
-        if(u->page==PANEL_PAGE_COMM)comm_step(u,adjustment);
-        else adjust_setting(u,s,key);
+        if(u->page==PANEL_PAGE_COMM)comm_step(u,-direction);
+        else adjust_setting(u,s,-direction,key==DIRECT_KEY_UP || key==DIRECT_KEY_DOWN);
         return false;
     }
     if(key==DIRECT_KEY_BACK){
@@ -414,19 +530,18 @@ bool panel_ui_key(panel_ui_t *u,uint8_t key,const panel_snapshot_t *s,panel_comm
             }
             u->detail_from_index=false;
             u->selected=u->detail;u->page=PANEL_PAGE_DETAIL_GROUPS;
-        }else u->detail=(uint8_t)move(u->detail,PANEL_DETAIL_PAGES,direction);
+        }else
+            u->detail=(uint8_t)step_page(u->detail,PANEL_DETAIL_PAGES,direction);
         break;
     case PANEL_PAGE_DETAIL_GROUPS:
         if(key==DIRECT_KEY_ENTER){
             u->detail=(uint8_t)(u->selected%PANEL_DETAIL_PAGES);
             u->page=PANEL_PAGE_DETAILS;u->detail_from_index=true;
-        }else if(key==DIRECT_KEY_LEFT || key==DIRECT_KEY_RIGHT){
-            u->selected=(uint16_t)((u->selected+DETAIL_INDEX_ROWS)%PANEL_DETAIL_PAGES);
-        }
-        else u->selected=(uint16_t)move(u->selected,PANEL_DETAIL_PAGES,direction);
+        }else
+            u->selected=(uint16_t)move_grid(u->selected,PANEL_DETAIL_PAGES,PANEL_DETAIL_COLUMNS,key);
         break;
     case PANEL_PAGE_ALARMS:
-        if(key!=DIRECT_KEY_ENTER)u->selected=(uint16_t)move(u->selected%alarm_pages(s),alarm_pages(s),direction);
+        if(key!=DIRECT_KEY_ENTER)u->selected=(uint16_t)step_page(u->selected,alarm_pages(s),direction);
         break;
     case PANEL_PAGE_SETTINGS:{
         if(key==DIRECT_KEY_ENTER){
@@ -446,12 +561,9 @@ bool panel_ui_key(panel_ui_t *u,uint8_t key,const panel_snapshot_t *s,panel_comm
         unsigned count=panel_setting_group_count(u->setting_group);
         unsigned position=panel_setting_group_position(u->setting_group,u->selected);
         if(!count)break;
-        if(key==DIRECT_KEY_LEFT || key==DIRECT_KEY_RIGHT){
-            unsigned pages=(count+SETTINGS_PAGE_ROWS-1)/SETTINGS_PAGE_ROWS;
-            unsigned page=move(position/SETTINGS_PAGE_ROWS,pages,direction);
-            position=page*SETTINGS_PAGE_ROWS+position%SETTINGS_PAGE_ROWS;
-            if(position>=count)position=count-1;
-        }else position=move(position,count,direction);
+        if(key==DIRECT_KEY_LEFT || key==DIRECT_KEY_RIGHT)
+            position=move_page(position,count,SETTINGS_PAGE_ROWS,direction);
+        else position=move(position,count,direction);
         u->selected=(uint16_t)panel_setting_group_index(u->setting_group,position);
         break;
     }
@@ -460,20 +572,19 @@ bool panel_ui_key(panel_ui_t *u,uint8_t key,const panel_snapshot_t *s,panel_comm
             u->setting_group=(uint8_t)u->selected;
             u->selected=(uint16_t)panel_setting_group_index(u->setting_group,0);
             u->page=PANEL_PAGE_SETTINGS;
-        }else{
-            int offset=key==DIRECT_KEY_UP?-3:key==DIRECT_KEY_DOWN?3:direction;
-            u->selected=(uint16_t)((u->selected+(int)PANEL_SETTING_GROUPS+offset)%(int)PANEL_SETTING_GROUPS);
-        }
+        }else
+            u->selected=(uint16_t)move_grid(u->selected,PANEL_SETTING_GROUPS,PANEL_SETTING_GROUP_COLUMNS,key);
         break;
     case PANEL_PAGE_POWER:
         if(key==DIRECT_KEY_ENTER){
-            u->draft=u->selected==0?1:u->selected==1?2:0;
+            u->draft=power_request(u->selected);
             if(panel_setting_allowed(s,0x4123,u->draft))u->review=true;
             else {
                 const char *reason=panel_setting_restriction(s,0x4123);
                 snprintf(u->message,sizeof(u->message),"%s",*reason?reason:"当前运行状态禁止设置");
             }
-        }else u->selected=(uint16_t)move(u->selected,3,direction);
+        }else if(key==DIRECT_KEY_UP || key==DIRECT_KEY_DOWN)
+            u->selected=(uint16_t)move(u->selected,3,direction);
         break;
     case PANEL_PAGE_COMM:
         if(key==DIRECT_KEY_ENTER){
@@ -485,7 +596,7 @@ bool panel_ui_key(panel_ui_t *u,uint8_t key,const panel_snapshot_t *s,panel_comm
         }else u->selected=(uint16_t)move(u->selected,5,direction);
         break;
     case PANEL_PAGE_DIAG:
-        if(key!=DIRECT_KEY_ENTER)u->detail=(uint8_t)move(u->detail,2,direction);
+        if(key!=DIRECT_KEY_ENTER)u->detail=(uint8_t)step_page(u->detail,2,direction);
         break;
     }
     return false;
@@ -530,7 +641,7 @@ static void detail_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view
         {0x50,0x51,0x52,0x53,0x58,0x5b,0x5d},
         {0x80,0x81,0x84,0x85,0x154,0x177,0x178},
         {0x96,0x97,0x98,0x99,0x9a,0x9b,0xa0},
-        {0x88,0x89,0x8a,0x8b,0x8f,0x91,0x92},
+        {0}, /* Battery telemetry comes from the panel BMS link. */
         {0x330,0x331,0x332,0x333,0x334,0x335,0x336},
         {0x54,0x55,0x56,0x57,0x350,0x42,0x44},
         {0x9c,0x9d,0x58,0x59,0x5a,0x5b,0x5c},
@@ -538,15 +649,15 @@ static void detail_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view
     static const char *const labels[PANEL_DETAIL_PAGES][7]={
         {"市电电压","市电电流","市电频率","市电功率","负载电压","负载功率","负载比例"},
         {"电池电压","电池电流","电池电量","电池功率","母线电压","恒压目标","浮充目标"},
-        {"PV1电压","PV1电流","PV1功率","PV2电压","PV2电流","PV2功率","光伏总功率"},
-        {"BMS电压","BMS电流","BMS电量","BMS温度","BMS通信","BMS故障","BMS告警"},
-        {"PV1温度","逆变温度","充电温度","充电2温度","环境温度","放电温度","PV2温度"},
+        {"光伏1电压","光伏1电流","光伏1功率","光伏2电压","光伏2电流","光伏2功率","光伏总功率"},
+        {"电池电压","电池电流","电池电量","电池通信","","",""},
+        {"光伏1温度","逆变温度","充电温度","充电2温度","环境温度","放电温度","光伏2温度"},
         {"发电机电压","发电机电流","发电机频率","发电机功率","功能状态","运行状态","能流状态"},
         {"光伏今日电量","光伏累计电量","输出电压","输出电流","输出频率","输出功率","输出视在功率"},
-        {"运行模式","输出优先级","充电优先级","电池类型","并机模式","功能开关","功能开关2"}};
+        {"输入范围","输出优先级","充电优先级","电池类型","并机模式","功能开关","功能开关2"}};
     static const unsigned divs[PANEL_DETAIL_PAGES][7]={{10,100,100,1,10,1,10},{10,10,10,1,10,10,10},{10,100,1,10,100,1,1},{10,10,1,10,1,1,1},{10,10,10,10,10,10,10},
         {10,100,100,1,1,1,1},{10,10,10,100,100,1,1},{1,1,1,1,1,1,1}};
-    static const char *const units[PANEL_DETAIL_PAGES][7]={{"V","A","Hz","W","V","W","%"},{"V","A","%","W","V","V","V"},{"V","A","W","V","A","W","W"},{"V","A","%","C","","",""},{"C","C","C","C","C","C","C"},
+    static const char *const units[PANEL_DETAIL_PAGES][7]={{"V","A","Hz","W","V","W","%"},{"V","A","%","W","V","V","V"},{"V","A","W","V","A","W","W"},{"V","A","%","","","",""},{"℃","℃","℃","℃","℃","℃","℃"},
         {"V","A","Hz","W","","",""},{"kWh","kWh","V","A","Hz","W","VA"},{"","","","","","",""}};
     unsigned page=u->detail%PANEL_DETAIL_PAGES;
     const bool is_3ku=panel_is_3ku(s);
@@ -557,16 +668,25 @@ static void detail_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view
     for(unsigned i=0;i<7;i++){
         char value[24];
         unsigned divisor=divs[page][i];
-        if(is_3ku && page==3 && i==1)divisor=100;
-        if(is_3ku && ((page==3 && i==3) || page==4))divisor=1;
+        if(page==3){
+            if(i<4)detail_text(v,i,labels[page][i],"--",false);
+            continue;
+        }
+        if(is_3ku && page==2){
+            if(i>=3 && i<=5)continue; /* 3KU has one MPPT. */
+            if(i==1)divisor=100;
+            if(i==2)divisor=1;
+        }
+        if(is_3ku && page==4)divisor=1;
         if(is_3ku && page==4 && (i==3 || i>=5))continue;
         number(s,regs[page][i],divisor,(signed_fields[page]&(1U<<i))!=0,value,sizeof(value));
         size_t end=strlen(value);
         bool stale=end && value[end-1]=='*';
         if(stale)value[end-1]=0;
         const char *unit=strcmp(value,"--")?units[page][i]:"";
-        snprintf(v->rows[i],sizeof(v->rows[i]),"%s",labels[page][i]);
-        snprintf(v->values[i],sizeof(v->values[i]),"%s%s%s%s",value,*unit?" ":"",unit,stale?"*":"");
+        const char *space=*unit && page!=4?" ":"";
+        snprintf(v->rows[i],sizeof(v->rows[i]),"%s",is_3ku && page==4 && !i?"光伏温度":labels[page][i]);
+        snprintf(v->values[i],sizeof(v->values[i]),"%s%s%s%s",value,space,unit,stale?"*":"");
     }
     if(page==0){
         int32_t power;
@@ -602,7 +722,6 @@ static void detail_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view
             detail_text(v,3,label,watts,!power_fresh);
         }
     }
-    if(page==3)for(unsigned i=4;i<7;i++)v->rows[i][0]=v->values[i][0]=0;
     if(page==5){
         uint16_t raw;
         bool known=panel_value(s,0x350,&raw);
@@ -636,12 +755,7 @@ static void detail_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view
             detail_text(v,5+i,labels[i],value,known && !panel_fresh(s,0x351));
         }
     }
-    for(unsigned i=0;i<7;i++)if(strchr(v->values[i],'*')){
-        size_t used=strlen(v->subtitle);
-        snprintf(v->subtitle+used,sizeof(v->subtitle)-used,"  上次数据");
-        break;
-    }
-    snprintf(v->footer,sizeof(v->footer),"上下翻页  确认目录  返回");
+    snprintf(v->footer,sizeof(v->footer),"方向键换页  确认目录  返回");
 }
 
 static void alarm_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v)
@@ -657,7 +771,8 @@ static void alarm_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_
         [7]="过温",[11]="发电机掉电",[14]="并机配置不兼容",
         [20]="保留位",[21]="保留位",[22]="电池辅助电源故障",
         [23]="保留位",[24]="保留位",[25]="保留位",[26]="保留位",[27]="保留位",[28]="保留位"};
-    unsigned total=0,current=0,shown=0,skip=(u->selected%alarm_pages(s))*5;
+    unsigned pages=alarm_pages(s),page=u->selected<pages?u->selected:pages-1;
+    unsigned total=0,current=0,shown=0,skip=page*5;
     uint16_t bits[4]={0};
     unsigned known=0,fresh=0;
     for(unsigned i=0;i<4;i++){
@@ -668,8 +783,8 @@ static void alarm_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_
             }
         }
     }
-    snprintf(v->title,sizeof(v->title),"故障告警 %u/%u",u->selected%alarm_pages(s)+1,alarm_pages(s));
-    snprintf(v->footer,sizeof(v->footer),"%s",known!=fresh?"上下翻页  返回  历史仅供参考":"上下翻页  返回退出");
+    snprintf(v->title,sizeof(v->title),"故障告警 %u/%u",page+1,pages);
+    snprintf(v->footer,sizeof(v->footer),"%s",known!=fresh?"方向键翻页  返回  历史仅供参考":"方向键翻页  返回退出");
     if(!known){snprintf(v->rows[0],sizeof(v->rows[0]),"-- 尚未收到告警数据");return;}
     /* Put fresh alarms first, even when cached fault bits are still set. */
     for(unsigned stale=0;stale<2;stale++)for(unsigned i=0;i<4;i++){
@@ -723,7 +838,7 @@ static void key_labels(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_
         if(!s->command_busy && (u->page!=PANEL_PAGE_SETTINGS || u->draft!=0xffff))
             key[KEY_ENTER]=u->review?KEY_SEND:u->page==PANEL_PAGE_SETTINGS?KEY_SAVE:KEY_OK;
         if(u->editing){
-            key[KEY_LEFT]=KEY_MINUS;key[KEY_RIGHT]=KEY_PLUS;
+            key[KEY_LEFT]=KEY_PLUS;key[KEY_RIGHT]=KEY_MINUS;
             const panel_setting_t *setting=u->page==PANEL_PAGE_SETTINGS?panel_setting(u->selected):NULL;
             bool fast=setting && setting_uses_fast_step(setting);
             key[KEY_DOWN]=fast?KEY_FAST_DOWN:KEY_MINUS;
@@ -731,21 +846,35 @@ static void key_labels(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_
         }
         return;
     }
-    if(u->page==PANEL_PAGE_HOME){key[KEY_LEFT]=key[KEY_RIGHT]=KEY_OPEN;key[KEY_ENTER]=KEY_OPEN;return;}
-    bool pages=u->page==PANEL_PAGE_DETAILS || u->page==PANEL_PAGE_ALARMS || u->page==PANEL_PAGE_DIAG;
-    if(u->page!=PANEL_PAGE_ALARMS || alarm_pages(s)>1){
-        key[KEY_LEFT]=KEY_PREV;key[KEY_RIGHT]=KEY_NEXT;
-        key[KEY_UP]=pages?KEY_PREV:KEY_UPWARD;key[KEY_DOWN]=pages?KEY_NEXT:KEY_DOWNWARD;
+    if(u->page==PANEL_PAGE_DETAILS || u->page==PANEL_PAGE_ALARMS || u->page==PANEL_PAGE_DIAG){
+        if(u->page!=PANEL_PAGE_ALARMS || alarm_pages(s)>1){
+            key[KEY_LEFT]=key[KEY_UP]=KEY_PREV;
+            key[KEY_DOWN]=key[KEY_RIGHT]=KEY_NEXT;
+        }
+        if(u->page==PANEL_PAGE_DETAILS)key[KEY_ENTER]=KEY_INDEX;
+        return;
     }
+    if(u->page==PANEL_PAGE_SETTING_GROUPS || u->page==PANEL_PAGE_DETAIL_GROUPS){
+        key[KEY_LEFT]=KEY_ARROW_LEFT;
+        key[KEY_UP]=KEY_UPWARD;
+        key[KEY_DOWN]=KEY_DOWNWARD;
+        key[KEY_RIGHT]=KEY_ARROW_RIGHT;
+        key[KEY_ENTER]=KEY_OPEN;
+        return;
+    }
+    if(u->page==PANEL_PAGE_HOME){key[KEY_LEFT]=key[KEY_RIGHT]=KEY_OPEN;key[KEY_ENTER]=KEY_OPEN;return;}
+    if(u->page==PANEL_PAGE_SETTINGS && panel_setting_group_count(u->setting_group)>SETTINGS_PAGE_ROWS){
+        key[KEY_LEFT]=KEY_PREV;key[KEY_RIGHT]=KEY_NEXT;
+    }
+    key[KEY_UP]=KEY_PREV_ITEM;key[KEY_DOWN]=KEY_NEXT_ITEM;
     if(u->page==PANEL_PAGE_SETTINGS){
-        if(panel_setting_group_count(u->setting_group)<=SETTINGS_PAGE_ROWS)
-            key[KEY_LEFT]=key[KEY_RIGHT]=KEY_NONE;
         if(!s->command_busy)key[KEY_ENTER]=
             access==PANEL_ACCESS_EDITABLE?KEY_EDIT:KEY_INFO;
-    }else if(u->page==PANEL_PAGE_POWER || u->page==PANEL_PAGE_COMM){
-        if(!s->command_busy)key[KEY_ENTER]=u->page==PANEL_PAGE_POWER?KEY_OK:u->selected==4?KEY_SCAN:KEY_EDIT;
-    }else if(u->page!=PANEL_PAGE_ALARMS && u->page!=PANEL_PAGE_DIAG)key[KEY_ENTER]=KEY_OPEN;
-    if(pages)key[KEY_LEFT]=key[KEY_RIGHT]=KEY_NONE;
+    }else if(u->page==PANEL_PAGE_POWER){
+        if(!s->command_busy)key[KEY_ENTER]=panel_setting_allowed(s,0x4123,power_request(u->selected))?KEY_REVIEW:KEY_INFO;
+    }else if(u->page==PANEL_PAGE_COMM){
+        if(!s->command_busy)key[KEY_ENTER]=u->selected==4?KEY_SCAN:KEY_EDIT;
+    }else key[KEY_ENTER]=KEY_OPEN;
 }
 
 bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v)
@@ -756,6 +885,7 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
     panel_setting_access_t access=selected_setting && !u->editing && !u->have_result && !u->pending?
         panel_setting_access(s,selected_setting->address):PANEL_ACCESS_EDITABLE;
     bool setting_notice=false;
+    const char *selected_help="";
     key_labels(u,s,v,access);
     status_line(s,v->subtitle,sizeof(v->subtitle));
     snprintf(v->footer,sizeof(v->footer),"确认进入  返回退出");
@@ -764,14 +894,12 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
         char a[32],b[32];
         snprintf(v->title,sizeof(v->title),"逆变器控制面板");
         snprintf(v->rows[0],sizeof(v->rows[0]),"运行: %s%s",run_state(s),panel_fresh(s,0x42)?"":"*");
-        number(s,0x50,10,true,a,sizeof(a));number(s,0x53,1,true,b,sizeof(b));
-        if(panel_is_3ku(s)){
-            int32_t grid;
-            bool fresh;
-            if(panel_grid_watts(s,&grid,&fresh))
-                snprintf(b,sizeof(b),"%ld%s",(long)grid,fresh?"":"*");
-            else snprintf(b,sizeof(b),"--");
-        }
+        number(s,0x50,10,true,a,sizeof(a));
+        int32_t grid;
+        bool fresh;
+        if(panel_grid_watts(s,&grid,&fresh))
+            snprintf(b,sizeof(b),"%ld%s",(long)grid,fresh?"":"*");
+        else snprintf(b,sizeof(b),"--");
         snprintf(v->rows[1],sizeof(v->rows[1]),"市电: %sV  %sW",a,b);
         field(s,v->rows[2],sizeof(v->rows[2]),"光伏",0xa0,1,false,"W");
         if(panel_is_3ku(s)){
@@ -793,18 +921,13 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
         break;
     case PANEL_PAGE_DETAILS:
         detail_view(u,s,v);v->detail_dashboard=true;v->illustration=u->detail;
-        if(u->detail==3){
-            memset(v->values,0,sizeof(v->values));
-            for(unsigned i=0;i<7;i++)if(v->rows[i][0])snprintf(v->values[i],sizeof(v->values[i]),"--");
-        }
         break;
     case PANEL_PAGE_DETAIL_GROUPS:{
-        unsigned start=(u->selected%PANEL_DETAIL_PAGES)/DETAIL_INDEX_ROWS*DETAIL_INDEX_ROWS;
-        snprintf(v->title,sizeof(v->title),"运行数据 %u/2",start/DETAIL_INDEX_ROWS+1);
-        for(unsigned row=0;row<DETAIL_INDEX_ROWS;row++)snprintf(v->rows[row],sizeof(v->rows[row]),"%s",detail_titles[start+row]);
-        v->selected=u->selected%DETAIL_INDEX_ROWS;
-        v->detail_groups=true;v->illustration=(uint8_t)start;
-        snprintf(v->footer,sizeof(v->footer),"上下选择  左右翻页  确认进入");
+        snprintf(v->title,sizeof(v->title),"运行数据");
+        snprintf(v->subtitle,sizeof(v->subtitle),"选择分类，确认进入");
+        v->selected=u->selected%PANEL_DETAIL_PAGES;
+        v->detail_groups=true;
+        snprintf(v->footer,sizeof(v->footer),"选择分类，确认进入");
         break;
     }
     case PANEL_PAGE_ALARMS:alarm_view(u,s,v);break;
@@ -813,18 +936,25 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
         const panel_setting_t *setting=selected_setting;
         unsigned count=panel_setting_group_count(u->setting_group);
         unsigned position=panel_setting_group_position(u->setting_group,u->selected);
-        snprintf(v->title,sizeof(v->title),"%s %u/%u",panel_setting_group_name(u->setting_group),position+1,count);
+        unsigned page=position/SETTINGS_PAGE_ROWS+1;
+        unsigned pages=(count+SETTINGS_PAGE_ROWS-1)/SETTINGS_PAGE_ROWS;
+        snprintf(v->title,sizeof(v->title),"%s %u/%u",panel_setting_group_name(u->setting_group),page,pages);
         if(!setting)break;
-        if(setting){v->setting_addresses[0]=setting->address;v->setting_count=1;}
-        char current[64],draft[64];uint16_t raw;
-        bool verified=true,stale=false;
-        bool have_current=displayed_setting(s,setting,&raw,&verified,&stale);
-        if(have_current){
-            panel_setting_format(s,setting->address,raw,current,sizeof(current));
-        }else snprintf(current,sizeof(current),"%s",setting_read_status(s,setting?setting->address:0,false));
-        snprintf(v->subtitle,sizeof(v->subtitle),"当前: %s",current);
-        if(u->blocked && setting){
+        bool charge_switch_reserved=panel_charge_switch_reserved(s);
+        bool reserved=charge_switch_reserved && setting->address==0x4124;
+        if(!reserved){v->setting_addresses[0]=setting->address;v->setting_count=1;}
+        selected_help=setting_help(setting->address);
+        char current[64],draft[64];
+        bool verified=true,stale=false,have_current=false;
+        if(u->blocked || u->editing){
+            uint16_t raw;
+            have_current=!reserved && displayed_setting(s,setting,&raw,&verified,&stale);
+            if(have_current)panel_setting_format(s,setting->address,raw,current,sizeof(current));
+            else snprintf(current,sizeof(current),"%s",reserved?"未定义":setting_read_status(s,setting->address,false));
+        }
+        if(u->blocked){
             snprintf(v->title,sizeof(v->title),"%s",setting->label);
+            snprintf(v->subtitle,sizeof(v->subtitle),"当前: %s",current);
             snprintf(v->rows[0],sizeof(v->rows[0]),"暂不能修改");
             bool model=setting_can_configure_model(s,access);
             bool waits=setting_waits_for_state(access);
@@ -833,22 +963,24 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
             snprintf(v->rows[3],sizeof(v->rows[3]),"%s",model?"候选型号不等于已确认机型":"未向逆变器发送设置");
             if(model || waits)snprintf(v->rows[4],sizeof(v->rows[4]),"%s",
                 model?"请核对逆变器铭牌后再选择":"条件恢复后可以重新尝试");
+            else if(reserved && access==PANEL_ACCESS_UNSUPPORTED)
+                snprintf(v->rows[4],sizeof(v->rows[4]),"仅 3KU 协议定义此开关");
             snprintf(v->footer,sizeof(v->footer),"%s",model?"确认机型设置  返回参数列表":
                 "返回参数列表");
             v->alert=true;
-        }else if(u->editing && setting){
+        }else if(u->editing){
             v->setting_editor=true;
             snprintf(v->title,sizeof(v->title),"%s",setting->label);
             panel_setting_format(s,setting->address,u->draft,draft,sizeof(draft));
-            snprintf(v->subtitle,sizeof(v->subtitle),"调整后确认保存");
+            snprintf(v->subtitle,sizeof(v->subtitle),"%s",setting_edit_help(s,setting->address,u->draft));
             snprintf(v->rows[0],sizeof(v->rows[0]),"%s",setting->label);
             detail_text(v,1,verified?"当前值":"设备返回值",current,stale);
             if(!have_current)setting_read_flags(v,s,setting->address,1);
             detail_text(v,2,"拟设值",draft,false);
             snprintf(v->rows[3],sizeof(v->rows[3]),"%s",u->draft==0xffff?"请先选择拟设值":
-                     u->battery_draft?"来自电池，确认后应用":"修改只影响这一项参数");
+                     u->battery_draft?"来自电池，确认后应用":"");
             snprintf(v->rows[4],sizeof(v->rows[4]),"%s",
-                setting_uses_fast_step(setting)?"左减右加，上加下减快调":"方向键切换选项");
+                setting_uses_fast_step(setting)?"左加右减，上加下减快调":"方向键切换选项");
             v->selected=2;
             setting_notice=u->draft==0xffff;
             snprintf(v->footer,sizeof(v->footer),"%s",setting_notice?
@@ -860,8 +992,13 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
             for(unsigned row=0;row<SETTINGS_PAGE_ROWS;row++){
                 const panel_setting_t *item=panel_setting(panel_setting_group_index(u->setting_group,first+row));
                 if(item){
-                    v->setting_addresses[v->setting_count++]=item->address;
                     snprintf(v->rows[row],sizeof(v->rows[row]),"%s",item->label);
+                    if(charge_switch_reserved && item->address==0x4124){
+                        snprintf(v->values[row],sizeof(v->values[row]),"未定义");
+                        v->unread_rows|=(uint8_t)(1U<<row);
+                        continue;
+                    }
+                    v->setting_addresses[v->setting_count++]=item->address;
                     uint16_t value;
                     bool item_verified,item_stale;
                     if(displayed_setting(s,item,&value,&item_verified,&item_stale)){
@@ -881,38 +1018,38 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
         }
         break;
     }
-    case PANEL_PAGE_SETTING_GROUPS:{
-        snprintf(v->title,sizeof(v->title),"逆变器设置 %u/%u",u->selected/6+1,(PANEL_SETTING_GROUPS+5)/6);
+    case PANEL_PAGE_SETTING_GROUPS:
+        snprintf(v->title,sizeof(v->title),"逆变器设置");
         snprintf(v->subtitle,sizeof(v->subtitle),"选择分类，确认进入");
-        if(s->config.profile_override==PANEL_PROFILE_UNKNOWN)
+        if(panel_effective_profile(s)==PANEL_PROFILE_UNKNOWN)
             snprintf(v->subtitle,sizeof(v->subtitle),"先在维护诊断确认逆变器机型");
-        unsigned first=u->selected/6*6;
-        v->setting_groups=true;v->illustration=(uint8_t)first;
-        for(unsigned row=0;row<6 && first+row<PANEL_SETTING_GROUPS;row++){
-            unsigned group=first+row,count=panel_setting_group_count(group);
-            snprintf(v->rows[row],sizeof(v->rows[row]),"%s (%u)",panel_setting_group_name(group),count);
+        v->setting_groups=true;v->selected=u->selected;
+        break;
+    case PANEL_PAGE_POWER:{
+        static const char *const actions[]={"开启逆变器","关闭逆变器","停用远程开关机"};
+        static const char *const effects[]={"开启后负载可能通电","关闭后负载可能断电","逆变器将退出远程开关机模式"};
+        v->power_action=u->review || u->pending;
+        unsigned operation=v->power_action?(u->draft==1?0U:u->draft==2?1U:2U):u->selected%3U;
+        if(v->power_action){
+            const char *title=u->pending?"开关机处理中":"确认开关机";
+            snprintf(v->title,sizeof(v->title),"%s",title);
+            snprintf(v->rows[0],sizeof(v->rows[0]),"%s",actions[operation]);
+            snprintf(v->rows[1],sizeof(v->rows[1]),"%s",effects[operation]);
+            if(operation<2)snprintf(v->rows[2],sizeof(v->rows[2]),"同时启用远程开关机");
+            v->selected=0;
+        }else{
+            snprintf(v->title,sizeof(v->title),"开关机操作");
+            for(unsigned i=0;i<3;i++)snprintf(v->rows[i],sizeof(v->rows[i]),"%s",actions[i]);
+            snprintf(v->rows[4],sizeof(v->rows[4]),"%s",effects[operation]);
+            if(operation<2)snprintf(v->rows[5],sizeof(v->rows[5]),"同时启用远程开关机");
+            v->selected=u->selected;
         }
-        v->selected=u->selected%6;break;
-    }
-    case PANEL_PAGE_POWER:
-        snprintf(v->title,sizeof(v->title),"开关机操作");
-        snprintf(v->rows[0],sizeof(v->rows[0]),"开启逆变器");
-        snprintf(v->rows[1],sizeof(v->rows[1]),"关闭逆变器");
-        snprintf(v->rows[2],sizeof(v->rows[2]),"停用远程开关机");
-        unsigned operation=u->review?(u->draft==1?0U:u->draft==2?1U:2U):u->selected;
-        static const char *const effects[]={
-            "开启后负载可能通电",
-            "关闭后负载可能断电",
-            "逆变器将退出远程开关机模式"
-        };
-        snprintf(v->rows[4],sizeof(v->rows[4]),"%s",effects[operation%3]);
-        if(operation<2)snprintf(v->rows[5],sizeof(v->rows[5]),"同时启用远程开关机");
-        v->selected=u->selected;
         if(u->review){
             v->alert=true;
             snprintf(v->footer,sizeof(v->footer),"确认发送  返回取消操作");
         }
         break;
+    }
     case PANEL_PAGE_COMM:{
         const panel_config_t *c=u->editing?&u->comm_draft:&s->config;
         snprintf(v->title,sizeof(v->title),"%s%s",u->model_setup?"确认逆变器机型":"通信配置",u->review?" - 确认":"");
@@ -922,10 +1059,10 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
         snprintf(v->rows[3],sizeof(v->rows[3]),"%s: %s",s->profile_locked?"出厂机型":"机型",
             c->profile_override==PANEL_PROFILE_UNKNOWN?"自动 / 待确认":panel_profile_name(c->profile_override));
         snprintf(v->rows[4],sizeof(v->rows[4]),"只读搜索从机地址");
-        snprintf(v->rows[5],sizeof(v->rows[5]),"候选机型: %s",panel_profile_name(s->detected_profile));
+        snprintf(v->rows[5],sizeof(v->rows[5]),"运行机型: %s",panel_profile_name(panel_effective_profile(s)));
         if(s->scanning)snprintf(v->rows[6],sizeof(v->rows[6]),"搜索地址 %u/247",s->scan_address);
         else if(s->scan_found)snprintf(v->rows[6],sizeof(v->rows[6]),"找到地址%u，请手动选择",s->scan_found);
-        else snprintf(v->rows[6],sizeof(v->rows[6]),"请核对铭牌，再确认机型");
+        else if(panel_effective_profile(s)==PANEL_PROFILE_UNKNOWN)snprintf(v->rows[6],sizeof(v->rows[6]),"请核对铭牌，再确认机型");
         v->selected=u->selected;
         if(u->editing)snprintf(v->footer,sizeof(v->footer),"左右调整  确认复核  返回取消");
         if(u->review)snprintf(v->footer,sizeof(v->footer),"确认保存本机配置  返回编辑");
@@ -979,9 +1116,9 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
         break;
     }
     }
+    bool verify_output=panel_power_changes_output(u->result_address,u->result_value);
     if(u->have_result){
         const panel_setting_t *setting=panel_setting_find(u->result_address);
-        v->setting_count=setting?1:0;v->setting_addresses[0]=u->result_address;
         v->result=true;
         v->stale_rows=v->unread_rows=v->read_error_rows=0;
         char target[64];panel_setting_format_profile(u->result_profile,u->result_address,u->result_value,target,sizeof(target));
@@ -1002,23 +1139,24 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
         }
         if(u->last_result==PANEL_WRITE_PROTOCOL_ACCEPTED)
             snprintf(v->rows[4],sizeof(v->rows[4]),"逆变器已返回完成应答");
-        uint16_t actual;
-        bool verified,stale;
-        if(setting && u->result_profile==s->config.profile_override &&
-           displayed_setting(s,setting,&actual,&verified,&stale)){
-            char value[48];panel_setting_format(s,setting->address,actual,value,sizeof(value));
-            detail_text(v,1,verified?"当前值":"设备返回值",value,stale);
-            if(verified && !stale && actual!=u->result_value &&
-               (u->last_result==PANEL_WRITE_PROCESSED || u->last_result==PANEL_WRITE_UNCERTAIN)){
+        if(setting && u->result_readback_valid && u->result_profile==panel_effective_profile(s)){
+            char value[48];panel_setting_format(s,setting->address,u->result_readback,value,sizeof(value));
+            detail_text(v,1,"当前值",value,false);
+            if(u->last_result==PANEL_WRITE_PROCESSED){
                 snprintf(v->rows[2],sizeof(v->rows[2]),"读回值与目标不一致");
                 snprintf(v->rows[4],sizeof(v->rows[4]),"逆变器当前值与目标不同");
             }
-        }else if(setting && (u->last_result==PANEL_WRITE_PROCESSED || u->last_result==PANEL_WRITE_UNCERTAIN)){
-            detail_text(v,1,"读取状态",setting_read_status(s,setting->address,false),false);
+        }
+        if(verify_output && u->last_result==PANEL_WRITE_CONFIRMED){
+            snprintf(v->rows[2],sizeof(v->rows[2]),"%s",u->result_value==1?"开机成功":"关机成功");
+            snprintf(v->rows[4],sizeof(v->rows[4]),"已通过输出电压确认");
+        }else if(verify_output && u->last_result==PANEL_WRITE_UNCERTAIN){
+            snprintf(v->rows[2],sizeof(v->rows[2]),"未确认输出变化");
+            snprintf(v->rows[4],sizeof(v->rows[4]),"请检查逆变器状态");
         }
         if((u->last_result==PANEL_WRITE_PROCESSED || u->last_result==PANEL_WRITE_UNCERTAIN) && !v->rows[4][0])
-            snprintf(v->rows[4],sizeof(v->rows[4]),"未收到有效完成应答，请稍后重试");
-        if(u->last_result==PANEL_WRITE_REJECTED || u->last_result==PANEL_WRITE_UNCERTAIN)
+            snprintf(v->rows[4],sizeof(v->rows[4]),"未能核对当前值，请稍后重试");
+        if(u->last_result==PANEL_WRITE_REJECTED || (u->last_result==PANEL_WRITE_UNCERTAIN && !verify_output))
             snprintf(v->rows[5],sizeof(v->rows[5]),"返回后可以重新设置");
         v->selected=-1;
         v->alert=u->last_result!=PANEL_WRITE_CONFIRMED && u->last_result!=PANEL_WRITE_PROTOCOL_ACCEPTED;
@@ -1027,7 +1165,10 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
         const char *progress="命令处理中，请等待";
         if(u->pending_type==PANEL_CMD_SCAN_CANCEL)progress="正在停止搜索";
         else if(u->pending_type==PANEL_CMD_SCAN)progress=s->scanning?"正在搜索，返回键停止":"等待开始搜索";
-        else if(u->pending_type==PANEL_CMD_WRITE)progress="正在保存并检查结果";
+        else if(u->pending_type==PANEL_CMD_WRITE){
+            if(verify_output)progress="正在检测输出电压";
+            else if(u->page!=PANEL_PAGE_POWER)progress="正在保存并检查结果";
+        }
         snprintf(v->footer,sizeof(v->footer),"%s",progress);
     }else if(u->message[0] && !u->blocked)snprintf(v->footer,sizeof(v->footer),"%s",u->message);
     else if(s->command_busy)snprintf(v->footer,sizeof(v->footer),"其他操作进行中，可浏览或返回");
@@ -1040,7 +1181,12 @@ bool panel_ui_view(const panel_ui_t *u,const panel_snapshot_t *s,panel_view_t *v
     }
     if(v->setting_list && !v->result && (!setting_notice || access==PANEL_ACCESS_OFFLINE) &&
        v->stale_rows && !u->pending && !u->message[0] && !u->show_recovery)
-        snprintf(v->footer,sizeof(v->footer),"%s",panel_online(s)?"显示上次读取值，正在刷新":"通信已断开，显示上次数据");
+        snprintf(v->footer,sizeof(v->footer),"%s",panel_online(s)?"显示上次读取值":"通信已断开，显示上次数据");
+    if(v->setting_list && !v->result && !setting_notice && *selected_help && !v->stale_rows &&
+       !u->pending && !s->command_busy && !u->message[0] && !u->show_recovery){
+        snprintf(v->footer,sizeof(v->footer),"%s",selected_help);
+        setting_notice=true;
+    }
     v->footer_notice=setting_notice || u->pending || (!u->blocked && (u->message[0] || u->show_recovery)) || s->command_busy ||
         (v->setting_list && v->stale_rows);
     v->language_en=u->language_en;
@@ -1061,8 +1207,27 @@ void panel_ui_draw(const panel_view_t *v,uint16_t *pixels,int y0,int height)
     direct_gfx_rect(&g,10,9,3,12,t.accent);
     direct_gfx_rect(&g,8,29,304,1,t.line);
     direct_gfx_text(&g,19,5,v->title,16,t.text);
-    direct_gfx_text(&g,12,34,v->subtitle,16,v->alert?t.warning:t.muted);
-    for(int row=0;row<7;row++){
+    char detail_status[sizeof(v->subtitle)+16];
+    const char *subtitle=v->subtitle;
+    if(v->detail_dashboard && v->stale_rows){
+        snprintf(detail_status,sizeof(detail_status),"%s  %s",subtitle,v->language_en?"Last data":"上次数据");
+        subtitle=detail_status;
+    }
+    direct_gfx_text(&g,12,34,subtitle,16,v->alert?t.warning:t.muted);
+    if(v->setting_groups || v->detail_groups){
+        bool settings=v->setting_groups;
+        unsigned columns=settings?PANEL_SETTING_GROUP_COLUMNS:PANEL_DETAIL_COLUMNS,groups=settings?PANEL_SETTING_GROUPS:PANEL_DETAIL_PAGES;
+        int card_width=settings?96:148,card_height=settings?48:36;
+        for(unsigned group=0;group<groups;group++){
+            const int x=8+(int)(group%columns)*(card_width+8),y=56+(int)(group/columns)*(card_height+4);
+            const char *name=settings?panel_setting_group_label(group,v->language_en):panel_detail_group_label(group,v->language_en);
+            bool selected=(int)group==v->selected;
+            panel_card(&g,x,y,card_width,card_height,selected?t.selected:t.surface);
+            int width=direct_gfx_text_width(name,16);
+            direct_gfx_text(&g,x+(card_width-width)/2,y+(card_height-20)/2,name,16,selected?t.accent:t.text);
+        }
+    }
+    for(int row=0;!v->setting_groups && !v->detail_groups && row<7;row++){
         int y=57+22*row;
         if(v->result && row==2){
             uint16_t ink=v->alert?t.warning:t.accent;
@@ -1086,7 +1251,7 @@ void panel_ui_draw(const panel_view_t *v,uint16_t *pixels,int y0,int height)
         direct_gfx_text(&g,17,y,v->rows[row],16,selected?t.accent:t.text);
         const char *value=v->values[row];
         if(*value){
-            bool old_or_missing=strchr(value,'*') || !strcmp(value,"--");
+            bool old_or_missing=(v->stale_rows&(1U<<row)) || !strcmp(value,"--");
             direct_gfx_text(&g,305-direct_gfx_text_width(value,16),y,value,16,
                             old_or_missing?t.muted:selected?t.accent:t.text);
         }

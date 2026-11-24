@@ -54,22 +54,25 @@ void ble_prov_resume(void);
  * host-reset callbacks. Full lifecycle operations serialize on one mutex, while
  * notification callbacks use only the separate producer gate below.
  *
- * OTA and MQTT each hold an idempotent pause owner (not a nesting counter).
- * Only the last owner's restore restarts BLE; start cannot bypass either owner.
+ * OTA, MQTT and weather each hold an idempotent pause owner.
+ * Only the last owner's restore restarts BLE; start cannot bypass any owner.
  * Failed suspend acquires no owner. Call the matching restore to recover after
  * a partial teardown failure; it never releases the other owner's pause.
  * Failed restore retains ownership for a later retry.
- * BOTH owners are idle-only: active/racing phone connections reject suspend;
- * remote OTA must defer/fail on false, never force a phone/local OTA offline. */
+ * All owners are idle-only: active or racing phone connections reject suspend. */
 bool ble_prov_suspend_for_ota(void);
 bool ble_prov_restore_after_ota(void);
-/* Both OTA and MQTT disable advertising, wait for a default host queue barrier,
+/* Suspend disables advertising, waits for a default host queue barrier,
  * then recheck the connection. Stop/ACK errors leave the host alive and restore
  * advertising. ACK waiting is bounded to 1s; the SDK NPL enqueue itself can
  * block on a full queue. A timed-out event remains pending; its late ACK cannot
  * admit a later attempt, which must enqueue and acknowledge its own barrier. */
 bool ble_prov_suspend_for_mqtt(void);
 bool ble_prov_restore_after_mqtt(void);
+/* Contiguous restart allowance for the configured idle-weather BLE profile. */
+int ble_prov_weather_restore_block(void);
+bool ble_prov_suspend_for_weather(void);
+bool ble_prov_restore_after_weather(void);
 /* Atomic snapshot of the producer gate. true means host producers are paused,
  * NOT that stop/deinit succeeded or that all BLE RAM has been reclaimed.
  * Suitable for excluding competing MQTT handshakes during lifecycle work;

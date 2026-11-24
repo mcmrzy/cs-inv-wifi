@@ -8,7 +8,7 @@
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static esp_timer_handle_t s_timer;
 static bool s_enabled = true;
-static uint16_t s_duration_ms = 70;
+static uint16_t s_duration_ms = CONFIG_DIRECT_BUZZ_PULSE_MS;
 static int64_t s_off_at;
 
 static void output(bool on)

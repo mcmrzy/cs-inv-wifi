@@ -6,13 +6,16 @@
 #include "lvgl.h"
 #include "panel_home_art.h"
 #include "panel_font_codec.h"
+#include "panel_catalog.h"
 #include "panel_wifi.h"
 #include "panel_key_labels.h"
 #include "direct_boot_logo.h"
 #include <stdio.h>
 #include <string.h>
 
-enum { WIDTH=320, HEIGHT=240, ROWS=9, HOME_CARD_WIDTH=94, HOME_CARD_HEIGHT=82, SCENE_ALARMS=0x104U };
+enum { WIDTH=320, HEIGHT=240, ROWS=9, HOME_CARD_WIDTH=94, HOME_CARD_HEIGHT=82,
+       SCENE_SETTING_EDITOR=0x101U, SCENE_ALARMS=0x104U, SCENE_DASHBOARD=0x105U,
+       SCENE_POWER_ACTION=0x106U };
 typedef struct { lv_obj_t *card,*label,*value; } row_t;
 typedef struct {
     uint32_t bg,card,selected,text,muted,blue,line,warning,header,success;
@@ -43,7 +46,8 @@ static uint32_t qr_generation;
 static int home_wifi=-1;
 static bool home_bluetooth;
 static bool home_alarm;
-static uint8_t home_motion,home_reverse,home_phase=UINT8_MAX;
+static uint8_t home_motion,home_reverse;
+static uint32_t home_started[4];
 static unsigned product_mode,product_kind;
 static void product_tile(lv_draw_ctx_t *ctx,const lv_area_t *area,unsigned index);
 static int menu_focus=255;
@@ -264,12 +268,7 @@ static void chrome_draw(lv_event_t *event)
         text.align=LV_TEXT_ALIGN_CENTER;
         for(int i=0;i<KEY_SLOTS;i++){
             int left=i*WIDTH/KEY_SLOTS,right=(i+1)*WIDTH/KEY_SLOTS;
-            if(i){lv_area_t divider={left,223,left,235};lv_draw_rect(ctx,&ink,&divider);}
             if(!key_hints[i][0])continue;
-            if(i==KEY_SLOTS-1){
-                const lv_area_t action={left+3,221,right-4,237};
-                outline_card(ctx,&action,theme->selected,theme->selected);
-            }
             text.color=lv_color_hex(scene==UI_HOME && i==KEY_LEFT && home_alarm?theme->warning:
                 i==KEY_ENTER?theme->blue:theme->muted);
             lv_area_t key={left,220,right-1,239};
@@ -289,7 +288,7 @@ static void chrome_draw(lv_event_t *event)
             if(bms_soc)icon_bar(ctx,116,87,(int)(184*bms_soc/100),6,bms_live?theme->blue:theme->muted);
         }
     }
-    if(scene==0x101U){
+    if(scene==SCENE_SETTING_EDITOR){
         const lv_area_t draft={164,58,311,161};
         outline_card(ctx,&draft,theme->selected,theme->blue);
     }
@@ -325,6 +324,17 @@ static void text_align(lv_obj_t *obj,lv_text_align_t align)
     if(lv_obj_get_style_text_align(obj,0)!=align)lv_obj_set_style_text_align(obj,align,0);
 }
 
+static void text_spacing(lv_obj_t *obj,int spacing)
+{
+    if(lv_obj_get_style_text_letter_space(obj,0)!=spacing)
+        lv_obj_set_style_text_letter_space(obj,spacing,0);
+}
+
+static void text_long_mode(lv_obj_t *obj,lv_label_long_mode_t mode)
+{
+    if(lv_label_get_long_mode(obj)!=mode)lv_label_set_long_mode(obj,mode);
+}
+
 static void label(lv_obj_t *obj,const char *text,uint32_t rgb)
 {
     lv_color_t color=lv_color_hex(rgb);
@@ -337,8 +347,7 @@ static void footer_label(const char *text)
     int spacing=footer_spacing(text,312);
     lv_point_t extent;
     lv_txt_get_size(&extent,text,&panel_lvgl_body_font,spacing,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
-    if(lv_obj_get_style_text_letter_space(footer,0)!=spacing)
-        lv_obj_set_style_text_letter_space(footer,spacing,0);
+    text_spacing(footer,spacing);
     lv_label_long_mode_t mode=extent.x>312?LV_LABEL_LONG_SCROLL_CIRCULAR:LV_LABEL_LONG_CLIP;
     if(lv_label_get_long_mode(footer)!=mode)lv_label_set_long_mode(footer,mode);
     label(footer,text,theme->muted);
@@ -374,12 +383,13 @@ static void key_caption(unsigned slot,const char *text)
 static void key_codes(const uint8_t keys[KEY_SLOTS],bool zh)
 {
     static const char *const captions[][2]={
-        {"",""},{"Back","返回"},{"Prev","上页"},{"Next","下页"},{"Up","上移"},{"Down","下移"},
+        {"",""},{"Back","返回"},{"Prev","上一页"},{"Next","下一页"},{"Up","上移"},{"Down","下移"},
         {"Open","进入"},{"Edit","修改"},{"Save","保存"},{"OK","确认"},{"Cancel","取消"},
         {"Send","发送"},{"Scan","扫描"},{"Refresh","刷新"},{"City","城市"},{"Auto","自动"},
         {"Search","搜索"},{"Type","输入"},{"Close","关闭"},{"-","减小"},{"+","增大"},
         {"Left","左移"},{"Right","右移"},{"Join","连接"},{"Update","升级"},{"Mode","切换"},{"Del","删除"},
-        {"Fast+","快加"},{"Fast-","快减"},{"Info","说明"},
+        {"Fast+","快加"},{"Fast-","快减"},{"Info","说明"},{"Prev","上一项"},{"Next","下一项"},
+        {"Index","目录"},{"Review","下一步"},
     };
     for(unsigned i=0;i<KEY_SLOTS;i++)key_caption(i,captions[keys[i]][zh]);
 }
@@ -461,24 +471,22 @@ static void tile_background(lv_draw_ctx_t *ctx,const lv_area_t *a,bool active)
     outline_card(ctx,a,active?theme->selected:theme->card,border);
 }
 
-#include "panel_semantic_icons.inc"
+#include "panel_category_art.inc"
 /* One device portrait plus semantic menu icons. */
 static void menu_icon(lv_event_t *event)
 {
     unsigned index=(unsigned)(uintptr_t)lv_event_get_user_data(event);
-    if(index>=6)return;
+    if(product_mode<3 && (scene!=UI_MENU || index>=5))return;
     lv_area_t a;lv_obj_get_coords(lv_event_get_target(event),&a);
     lv_draw_ctx_t *ctx=lv_event_get_draw_ctx(event);
     if(product_mode>=3){product_tile(ctx,&a,index);return;}
-    if(scene!=UI_MENU || index>=5)return;
     tile_background(ctx,&a,selection==(int)index);
-    if(index==4){
-        product_icon(ctx,6,a.x1+(lv_area_get_width(&a)-32)/2,a.y1+14,theme->blue);
-        return;
-    }
-    static const panel_indexed_art_t *const art[]={&solar_art,&inverter_art,&power_art,&alarm_art};
-    int left=a.x1+(lv_area_get_width(&a)-art[index]->width)/2;
-    panel_indexed_art_draw(ctx,art[index],left,a.y1+(index==1?48:8));
+    static const panel_indexed_art_t *const icons[]={
+        &energy_category_art,&inverter_art,&power_category_art,&alarm_category_art,&system_category_art};
+    panel_indexed_art_t art=*icons[index];
+    if(index==4 && theme==&light)art.palette=system_category_light_palette;
+    int left=a.x1+(lv_area_get_width(&a)-art.width)/2;
+    panel_indexed_art_draw(ctx,&art,left,a.y1+(index==1?48:12));
 }
 
 bool panel_lvgl_init(uint16_t *buffer,panel_lvgl_flush_fn flush,uint32_t now)
@@ -507,7 +515,7 @@ bool panel_lvgl_init(uint16_t *buffer,panel_lvgl_flush_fn flush,uint32_t now)
     footer=text_obj(screen,4,220,312);
     for(unsigned i=0;i<ROWS;i++){
         rows[i].card=box(screen,2);
-        if(i<6)lv_obj_add_event_cb(rows[i].card,menu_icon,LV_EVENT_DRAW_MAIN,(void *)(uintptr_t)i);
+        lv_obj_add_event_cb(rows[i].card,menu_icon,LV_EVENT_DRAW_MAIN,(void *)(uintptr_t)i);
         rows[i].label=text_obj(rows[i].card,10,0,280);
         rows[i].value=text_obj(rows[i].card,204,0,84);
         lv_obj_set_style_text_align(rows[i].value,LV_TEXT_ALIGN_RIGHT,0);
@@ -519,30 +527,36 @@ bool panel_lvgl_init(uint16_t *buffer,panel_lvgl_flush_fn flush,uint32_t now)
     return true;
 }
 
-static void apply_row(unsigned i,int x,int y,int w,int h,const char *left,const char *right,bool active)
+static row_t *place_row(unsigned i,int x,int y,int w,int h)
 {
     row_t *r=&rows[i];
+    visible(r->card,true);
+    place(r->card,x,y,w,h);
+    if(lv_obj_get_style_border_width(r->card,0))lv_obj_set_style_border_width(r->card,0,0);
+    if(lv_label_get_long_mode(r->label)!=LV_LABEL_LONG_DOT)lv_label_set_long_mode(r->label,LV_LABEL_LONG_DOT);
+    return r;
+}
+
+static void apply_row(unsigned i,int x,int y,int w,int h,const char *left,const char *right,bool active)
+{
+    if(!*left && !*right){visible(rows[i].card,false);return;}
+    row_t *r=place_row(i,x,y,w,h);
     bool battery=scene==UI_BMS;
     bool soc=battery && bms_overview && i==1;
-    visible(r->card,*left || *right);
-    if(!*left && !*right)return;
-    place(r->card,x,y,w,h);
     fill(r->card,active?theme->selected:theme->card);
-    background_opacity(r->card,LV_OPA_COVER);
-    if(lv_obj_get_style_border_width(r->card,0))lv_obj_set_style_border_width(r->card,0,0);
+    background_opacity(r->card,active?LV_OPA_COVER:LV_OPA_TRANSP);
     text_font(r->label,&panel_lvgl_body_font);
-    if(lv_obj_get_style_text_letter_space(r->label,0))
-        lv_obj_set_style_text_letter_space(r->label,0,0);
+    text_spacing(r->label,0);
     text_align(r->label,(*right || (battery && i!=0) || scene==UI_HOME)?
                LV_TEXT_ALIGN_LEFT:LV_TEXT_ALIGN_CENTER);
+    text_long_mode(r->value,LV_LABEL_LONG_CLIP);
     text_font(r->value,soc?&headline_font:&panel_lvgl_body_font);
-    if(lv_obj_get_style_text_letter_space(r->value,0))
-        lv_obj_set_style_text_letter_space(r->value,0,0);
+    text_spacing(r->value,0);
     text_align(r->value,LV_TEXT_ALIGN_RIGHT);
-    if(lv_label_get_long_mode(r->label)!=LV_LABEL_LONG_DOT)lv_label_set_long_mode(r->label,LV_LABEL_LONG_DOT);
     lv_point_t size;lv_txt_get_size(&size,right,&panel_lvgl_body_font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
     int value_width=*right?size.x+4:0;
-    if(value_width>w/2)value_width=w/2;
+    int value_limit=scene==UI_HELP?w*2/3:w/2;
+    if(value_width>value_limit)value_width=value_limit;
     if(soc)value_width=114;
     int label_y=(h-(int)lv_font_get_line_height(&panel_lvgl_body_font))/2;
     int value_y=(h-(int)lv_font_get_line_height(soc?&headline_font:&panel_lvgl_body_font))/2;
@@ -585,7 +599,7 @@ static void base(uint32_t next,bool light_mode,const char *heading,const char *h
         /* Screen-level artwork can change outside any retained label/card. */
         lv_obj_invalidate(screen);
         scene=next;selection=-1;qr_generation=UINT32_MAX;
-        home_phase=UINT8_MAX;
+        home_motion=0;
         menu_focus=255;
         lv_anim_del(marker,NULL);lv_anim_del(indicator,NULL);waiting=false;
         for(unsigned i=0;i<ROWS;i++)lv_anim_del(rows[i].card,card_opa);
@@ -593,9 +607,19 @@ static void base(uint32_t next,bool light_mode,const char *heading,const char *h
         visible(qr_box,false);
     }
     fill(screen,theme->bg);
+    if(next!=SCENE_DASHBOARD)text_spacing(subtitle,0);
+    if(next==UI_HOME){
+        text_font(subtitle,&panel_lvgl_body_font);
+        visible(page_number,false);
+        place(title,10,3,72,-1);
+        text_align(title,LV_TEXT_ALIGN_LEFT);
+        label(title,heading,theme->text);
+        place(subtitle,136,3,130,-1);
+        text_align(subtitle,LV_TEXT_ALIGN_RIGHT);
+        return;
+    }
     place(subtitle,14,29,292,-1);
     text_align(subtitle,LV_TEXT_ALIGN_CENTER);
-    text_font(subtitle,&panel_lvgl_body_font);
     char header[96];snprintf(header,sizeof(header),"%s",heading);
     char *counter=strrchr(header,' ');
     const char *number=NULL;
@@ -605,7 +629,11 @@ static void base(uint32_t next,bool light_mode,const char *heading,const char *h
     if(number)label(page_number,number,theme->blue);
     place(title,number?50:10,3,number?220:300,-1);
     text_align(title,LV_TEXT_ALIGN_CENTER);
-    label(title,header,theme->text);label(subtitle,hint,theme->muted);
+    label(title,header,theme->text);
+    if(next!=SCENE_DASHBOARD){
+        text_font(subtitle,&panel_lvgl_body_font);
+        label(subtitle,hint,theme->muted);
+    }
 }
 
 static void layout(unsigned count,int top,int pitch,int selected,bool result,bool busy)
@@ -635,13 +663,16 @@ void panel_lvgl_show_modbus(const panel_view_t *v)
 {
     product_begin(v->setting_groups?3:v->detail_groups?4:v->detail_dashboard?2:
         (v->setting_list || v->setting_editor) && !v->result?1:0,v->illustration);
-    base(v->alarm_list?SCENE_ALARMS:0x100U+v->setting_editor+2U*v->result,
-         v->theme_light,v->title,v->subtitle);
+    bool power_action=v->power_action && !v->result;
+    uint32_t next=power_action?SCENE_POWER_ACTION:v->detail_dashboard?SCENE_DASHBOARD:v->alarm_list?SCENE_ALARMS:
+        0x100U+v->setting_editor+2U*v->result;
+    base(next,v->theme_light,v->title,v->subtitle);
     bool has_notice=v->footer_notice && !v->result && v->footer[0];
-    notice(has_notice?v->footer:"");
+    notice(has_notice && !v->detail_dashboard?v->footer:"");
     key_codes(v->key_labels,!v->language_en);
+    if(power_action){product_power_action(v);return;}
     if(v->setting_groups || v->detail_groups){product_gallery(v);return;}
-    if(v->detail_dashboard){product_dashboard(v);return;}
+    if(v->detail_dashboard){product_dashboard(v,has_notice);return;}
     if(v->alarm_list){
         layout(7,0,20,-1,false,false);
         apply_row(0,8,52,304,27,v->rows[0],"",v->alert);
@@ -668,6 +699,7 @@ void panel_lvgl_show_modbus(const panel_view_t *v)
     if(v->result){
         layout(6,54,23,-1,false,false);
         apply_row(0,10,53,300,23,v->rows[0],"",false);
+        if(v->rows[0][0])product_fit(rows[0].label,v->rows[0],&panel_lvgl_body_font,276);
         apply_row(1,10,78,300,23,v->rows[1],v->values[1],false);
         apply_row(2,10,106,300,38,v->rows[2],"",true);
         label(rows[2].label,v->rows[2],v->alert?theme->warning:theme->success);
@@ -692,27 +724,96 @@ void panel_lvgl_show_modbus(const panel_view_t *v)
     if(v->result && v->alert)fill(marker,theme->warning);
 }
 
-static void home_flow(const direct_ui_data_t *d)
+static row_t *home_row(unsigned index,int x,int y,int width,int height)
 {
-    direct_home_values_t value;direct_home_values(d,&value);
+    row_t *row=place_row(index,x,y,width,height);
+    background_opacity(row->card,LV_OPA_TRANSP);
+    text_spacing(row->label,0);
+    text_long_mode(row->value,LV_LABEL_LONG_CLIP);
+    text_spacing(row->value,0);
+    return row;
+}
+
+static void home_text(unsigned index,int x,int y,int width,const char *text,const lv_font_t *font,uint32_t color)
+{
+    row_t *row=home_row(index,x,y,width,20);
+    text_font(row->label,font);
+    text_align(row->label,LV_TEXT_ALIGN_CENTER);
+    place(row->label,0,0,width,-1);
+    label(row->label,text,color);
+    label(row->value,"",theme->text);
+}
+
+static void home_history_mark(char text[16])
+{
+    size_t length=strlen(text);
+    if(length<15){text[length]='*';text[length+1]=0;}
+}
+
+static void home_flow(const direct_ui_data_t *d,const panel_home_readings_t *readings)
+{
+    direct_home_values_t value;
+    if(readings)memset(&value,0,sizeof(value));
+    else direct_home_values(d,&value);
+    char *const power[]={value.grid_power,value.pv_power,value.battery_power,value.load_power};
+    char *const voltage[]={value.grid_voltage,value.pv_voltage,value.battery_voltage,value.load_voltage};
+    bool active[]={d->run.ACInWatt!=0,d->run.Ppv!=0,value.battery_watts!=0,d->run.OutputWatt!=0};
+    bool reverse[]={d->run.ACInWatt<0,false,value.battery_state==DIRECT_HOME_CHARGING,d->run.OutputWatt>=0};
+    unsigned available[PANEL_HOME_COUNT],fresh[PANEL_HOME_COUNT];
+    for(unsigned i=0;i<PANEL_HOME_COUNT;i++){
+        available[i]=d->dsp_online || d->dsp_display_held?PANEL_HOME_POWER|PANEL_HOME_VOLTAGE:0;
+        fresh[i]=d->dsp_online?available[i]:0;
+        if(!readings)continue;
+        const panel_home_meter_t *meter=&readings->meter[i];
+        available[i]=meter->available;fresh[i]=meter->fresh;
+        if(available[i]&PANEL_HOME_POWER)direct_home_format_power(power[i],meter->watts);
+        else strcpy(power[i],"--W");
+        if(available[i]&PANEL_HOME_VOLTAGE)snprintf(voltage[i],16,"%u.%uV",meter->decivolts/10U,meter->decivolts%10U);
+        else strcpy(voltage[i],"--V");
+        active[i]=meter->watts!=0;
+        reverse[i]=i==PANEL_HOME_GRID?meter->watts<0:i==PANEL_HOME_LOAD && meter->watts>=0;
+    }
+    unsigned battery=PANEL_HOME_BATTERY;
+    if(readings){
+        active[battery]=active[battery] && readings->battery_direction!=0;
+        reverse[battery]=readings->battery_direction<0;
+        if(available[battery]&PANEL_HOME_SOC)
+            snprintf(value.battery_soc,sizeof(value.battery_soc),"%u%%",readings->battery_soc);
+        else strcpy(value.battery_soc,"--%");
+    }
     bool direct=full_battery_source(d)==FULL_BATTERY_DIRECT;
-    bool direct_only=direct && !d->dsp_online;
+    bool direct_only=direct && (readings?(!(available[battery]&PANEL_HOME_POWER) ||
+        (d->bms_online && !(fresh[battery]&PANEL_HOME_POWER))):!d->dsp_online);
     if(direct_only){
         unsigned soc=direct_bms_percent(&d->bms,d->bms.soc_percent);
         snprintf(value.battery_power,sizeof(value.battery_power),"%u%%",soc>100?100:soc);
         snprintf(value.battery_voltage,sizeof(value.battery_voltage),"%u.%uV",
             (unsigned)(d->bms.voltage_10mv/100),(unsigned)(d->bms.voltage_10mv/10%10));
+        available[battery]=PANEL_HOME_POWER|PANEL_HOME_VOLTAGE;
+        fresh[battery]=d->bms_online?available[battery]:0;
+        active[battery]=false;
     }else if(direct && d->bms_online){
         snprintf(value.battery_soc,sizeof(value.battery_soc),"%u%%",direct_bms_percent(&d->bms,d->bms.soc_percent));
+        available[battery]|=PANEL_HOME_SOC;fresh[battery]|=PANEL_HOME_SOC;
     }
     const char *const cn[]={"电网","光伏","电池","负载"},*const en[]={"Grid","Solar","Battery","Load"};
-    const char *const power[]={value.grid_power,value.pv_power,value.battery_power,value.load_power};
-    const char *const voltage[]={value.grid_voltage,value.pv_voltage,value.battery_voltage,value.load_voltage};
-    const bool active[]={d->run.ACInWatt!=0,d->run.Ppv!=0,value.battery_watts!=0,d->run.OutputWatt!=0};
-    const bool reverse[]={d->run.ACInWatt<0,false,value.battery_state==DIRECT_HOME_CHARGING,d->run.OutputWatt>=0};
+    bool all_live=d->dsp_online,any_live=d->dsp_online,history=d->dsp_display_held;
+    if(readings){
+        all_live=true;any_live=false;history=false;
+        for(unsigned i=0;i<PANEL_HOME_COUNT;i++){
+            all_live=all_live && (fresh[i]&(PANEL_HOME_POWER|PANEL_HOME_VOLTAGE))==(PANEL_HOME_POWER|PANEL_HOME_VOLTAGE);
+            any_live=any_live || fresh[i];
+            unsigned old=available[i]&~fresh[i];
+            if(old&PANEL_HOME_POWER)home_history_mark(power[i]);
+            if(old&PANEL_HOME_VOLTAGE)home_history_mark(voltage[i]);
+            if(old&PANEL_HOME_SOC)home_history_mark(value.battery_soc);
+            if(old){history=true;all_live=false;}
+        }
+    }
     char status[48];
-    const char *state=d->dsp_online?(d->language_zh?"实时":"Live"):
-        d->dsp_display_held?(d->language_zh?"上次数据":"Last data"):(d->language_zh?"等待数据":"Waiting");
+    const char *state=all_live?(d->language_zh?"实时":"Live"):
+        any_live?(d->language_zh?"部分实时":"Partial live"):
+        history?(d->language_zh?"上次数据":"Last data"):(d->language_zh?"等待数据":"Waiting");
     if(d->clock_valid)snprintf(status,sizeof(status),"%s %02d:%02d",state,d->hour,d->minute);
     else snprintf(status,sizeof(status),"%s",state);
     base(UI_HOME,d->theme_light,d->language_zh?"能源概览":"Energy",status);
@@ -722,54 +823,50 @@ static void home_flow(const direct_ui_data_t *d)
         const lv_area_t icons={270,3,314,25};lv_obj_invalidate_area(screen,&icons);
         home_wifi=wifi;home_bluetooth=d->bluetooth_connected;
     }
-    place(title,10,3,72,-1);place(subtitle,151,3,115,-1);
-    text_align(title,LV_TEXT_ALIGN_LEFT);
-    lv_obj_set_style_text_align(subtitle,LV_TEXT_ALIGN_RIGHT,0);
-    lv_obj_set_style_text_font(subtitle,&panel_lvgl_body_font,0);
-    label(subtitle,status,d->dsp_online?theme->success:d->dsp_display_held?theme->warning:theme->muted);
+    label(subtitle,status,all_live?theme->success:any_live || history?theme->warning:theme->muted);
     uint8_t motion=0,directions=0;
+    const int power_width=HOME_CARD_WIDTH-8;
     for(unsigned i=0;i<4;i++){
         const int x=home_cards[i].x,y=home_cards[i].y;
         const char *name=d->language_zh?cn[i]:en[i];
-        if(d->dsp_online && i==0 && active[i])
+        bool power_live=(fresh[i]&PANEL_HOME_POWER)!=0;
+        if(power_live && i==PANEL_HOME_GRID && active[i])
             name=reverse[i]?(d->language_zh?"电网馈电":"Grid out"):(d->language_zh?"电网取电":"Grid in");
-        if(d->dsp_online && i==2 && active[i])
+        if(power_live && i==PANEL_HOME_BATTERY && active[i])
             name=reverse[i]?(d->language_zh?"电池充电":"Charge"):(d->language_zh?"电池放电":"Discharge");
-        apply_row(i,x,y,HOME_CARD_WIDTH,HOME_CARD_HEIGHT,name,"",false);
-        background_opacity(rows[i].card,LV_OPA_TRANSP);
-        place(rows[i].label,13,5,HOME_CARD_WIDTH-20,-1);
-        label(rows[i].label,name,theme->muted);
-        bool live=i==2 && direct_only?d->bms_online:d->dsp_online;
-        label(rows[i].value,power[i],live?theme->text:theme->muted);
-        lv_point_t extent;lv_txt_get_size(&extent,power[i],&value_font,0,0,LV_COORD_MAX,LV_TEXT_FLAG_NONE);
-        text_font(rows[i].value,extent.x<=HOME_CARD_WIDTH-16?&value_font:&panel_lvgl_body_font);
-        text_align(rows[i].value,LV_TEXT_ALIGN_CENTER);
-        place(rows[i].value,8,28,HOME_CARD_WIDTH-16,-1);
+        row_t *row=home_row(i,x,y,HOME_CARD_WIDTH,HOME_CARD_HEIGHT);
+        text_font(row->label,&panel_lvgl_body_font);
+        text_align(row->label,LV_TEXT_ALIGN_LEFT);
+        place(row->label,13,5,HOME_CARD_WIDTH-20,-1);
+        label(row->label,name,theme->muted);
+        const lv_font_t *power_font=d->language_zh && product_text_width(power[i],&value_font,0)<=power_width?
+            &value_font:&panel_lvgl_body_font;
+        text_font(row->value,power_font);
+        text_align(row->value,LV_TEXT_ALIGN_CENTER);
+        place(row->value,4,d->language_zh?28:32,power_width,-1);
+        uint32_t power_color=power_live?theme->text:
+            readings && (available[i]&PANEL_HOME_POWER)?theme->warning:theme->muted;
+        label(row->value,power[i],power_color);
 
         char detail[40];
         if(i==2 && !direct_only && strcmp(value.battery_soc,"--%"))
             snprintf(detail,sizeof(detail),"%s  %s",voltage[i],value.battery_soc);
         else snprintf(detail,sizeof(detail),"%s",voltage[i]);
-        unsigned auxiliary=i+4;
-        apply_row(auxiliary,x+5,y+57,HOME_CARD_WIDTH-10,20,detail,"",false);
-        background_opacity(rows[auxiliary].card,LV_OPA_TRANSP);
-        text_font(rows[auxiliary].label,&small_font);
-        text_align(rows[auxiliary].label,LV_TEXT_ALIGN_CENTER);
-        place(rows[auxiliary].label,0,0,HOME_CARD_WIDTH-10,-1);
-        label(rows[auxiliary].label,detail,theme->muted);
-        if(d->dsp_online && !d->ota_busy && active[i])motion|=(uint8_t)(1U<<i);
+        uint32_t detail_color=readings && (available[i]&~fresh[i]&(PANEL_HOME_VOLTAGE|PANEL_HOME_SOC))?
+            theme->warning:theme->muted;
+        home_text(i+4,x+5,y+57,HOME_CARD_WIDTH-10,detail,&small_font,detail_color);
+        if(power_live && !d->ota_busy && active[i])motion|=(uint8_t)(1U<<i);
         if(reverse[i])directions|=(uint8_t)(1U<<i);
     }
-    if(home_motion!=motion || home_reverse!=directions)home_phase=UINT8_MAX;
+    unsigned restart=motion & (~home_motion | (home_reverse^directions));
+    for(unsigned i=0;i<4;i++)if(restart&(1U<<i))home_started[i]=tick_ms;
     home_motion=motion;home_reverse=directions;
     home_alarm=full_inverter_alarm_active(d);
-    const char *device=home_alarm?(d->language_zh?"查看告警":"View alarms"):direct_only?(d->language_zh?(d->bms_online?"电池已连接":"电池已断联"):
+    bool legend=readings && history;
+    const char *device=home_alarm?(d->language_zh?"查看告警":"View alarms"):
+        legend?(d->language_zh?"* 上次数据":"* Last data"):direct_only?(d->language_zh?(d->bms_online?"电池已连接":"电池已断联"):
         (d->bms_online?"Battery online":"Battery offline")):(d->language_zh?"逆变器":"Inverter");
-    apply_row(8,105,191,110,20,device,"",false);
-    background_opacity(rows[8].card,LV_OPA_TRANSP);
-    text_align(rows[8].label,LV_TEXT_ALIGN_CENTER);
-    place(rows[8].label,0,0,110,-1);
-    label(rows[8].label,device,home_alarm?theme->warning:theme->muted);
+    home_text(8,105,191,110,device,&panel_lvgl_body_font,home_alarm || legend?theme->warning:theme->muted);
 }
 
 static const char *localized(const char *text,bool zh,char out[128])
@@ -791,7 +888,7 @@ static void show_local(const direct_ui_state_t *u,const direct_ui_data_t *d,
     char a[128],b[128],keys[128]="";
     if(u->message[0])snprintf(keys,sizeof(keys),"%s",localized(u->message,d->language_zh,a));
     if(u->page==UI_HOME){
-        home_flow(d);
+        home_flow(d,NULL);
         return;
     }
     if(u->page==UI_BMS){
@@ -833,12 +930,12 @@ static void show_local(const direct_ui_state_t *u,const direct_ui_data_t *d,
             qr_data=q;qr_generation=q?q->generation:0;lv_obj_invalidate(qr_box);
         }
         visible(qr_box,ready);
-        apply_row(0,166,50,144,25,d->language_zh?"1 打开手机 App":"1 Open the App","",false);
-        apply_row(1,166,82,144,25,has_wifi?(d->language_zh?"2 添加设备":"2 Add device"):
+        apply_row(0,162,50,148,25,d->language_zh?"1 打开手机 App":"1 Open the App","",false);
+        apply_row(1,162,82,148,25,has_wifi?(d->language_zh?"2 添加设备":"2 Add device"):
                   (d->language_zh?"2 配网并添加":"2 Set up Wi-Fi"),"",false);
-        apply_row(2,166,114,144,25,d->language_zh?"配对 PIN":"Pairing PIN","",false);
-        apply_row(3,166,145,144,26,pin_ready?pin:"--","",true);
-        apply_row(4,166,176,144,21,bound?(d->language_zh?"已绑定":"Device linked"):
+        apply_row(2,162,114,148,25,d->language_zh?"配对 PIN":"Pairing PIN","",false);
+        apply_row(3,162,145,148,26,pin_ready?pin:"--","",true);
+        apply_row(4,162,176,148,21,bound?(d->language_zh?"已绑定":"Device linked"):
                   (d->language_zh?"可稍后设置":"Set up later"),"",false);
         snprintf(b,sizeof(b),"SN %s",d->sn&&d->sn[0]?d->sn:"--");
         apply_row(5,10,199,300,19,b,"",false);
@@ -881,11 +978,13 @@ static void show_local(const direct_ui_state_t *u,const direct_ui_data_t *d,
         for(unsigned i=0;i<8;i++){
             apply_row(i,10+(int)i*38,76,34,35," ","",false);
             unsigned c=255*i/7;fill(rows[i].card,(c<<16)|(c<<8)|c);
+            background_opacity(rows[i].card,LV_OPA_COVER);
         }
         static const uint32_t rgb[]={0xff0000,0x00ff00,0x0000ff};
         for(unsigned i=0;i<3;i++){
             visible(dots[i],true);place(dots[i],10+(int)i*101,116,93,12);
             fill(dots[i],rgb[i]);
+            background_opacity(dots[i],LV_OPA_COVER);
         }
         apply_row(8,10,135,300,36,"0123456789  52.4 V","",true);
         return;
@@ -951,12 +1050,8 @@ static void show_local(const direct_ui_state_t *u,const direct_ui_data_t *d,
     }
 }
 
-void panel_lvgl_show_local(const direct_ui_state_t *u,const direct_ui_data_t *d,
-                           const direct_ui_view_t *v,const onboarding_qr_t *q,
-                           const char *pin,bool has_wifi,bool bound)
+static void local_keys(const direct_ui_state_t *u,const direct_ui_data_t *d,const direct_ui_view_t *v)
 {
-    product_begin(0,0);
-    show_local(u,d,v,q,pin,has_wifi,bound);
     bool connected=u->page==UI_WIFI || u->page==UI_WEATHER || (u->page==UI_UPGRADE && !d->ota_busy);
     if(connected)key_codes(v->key_labels,d->language_zh);
     else{
@@ -977,6 +1072,23 @@ void panel_lvgl_show_local(const direct_ui_state_t *u,const direct_ui_data_t *d,
             key_caption(i,localized(hint,d->language_zh,text));
         }
     }
+}
+
+void panel_lvgl_show_home(const direct_ui_state_t *u,const direct_ui_data_t *d,const panel_home_readings_t *readings)
+{
+    product_begin(0,0);
+    home_flow(d,readings);
+    local_keys(u,d,NULL);
+    notice("");
+}
+
+void panel_lvgl_show_local(const direct_ui_state_t *u,const direct_ui_data_t *d,
+                           const direct_ui_view_t *v,const onboarding_qr_t *q,
+                           const char *pin,bool has_wifi,bool bound)
+{
+    product_begin(0,0);
+    show_local(u,d,v,q,pin,has_wifi,bound);
+    local_keys(u,d,v);
     if(u->message[0] && (u->page==UI_APPEARANCE || u->page==UI_TIME || u->page==UI_FACTORY ||
        (!u->editing && (u->page==UI_WIFI || u->page==UI_WEATHER)))){
         char text[128];
@@ -1008,21 +1120,21 @@ void panel_lvgl_refresh(uint32_t now,bool redraw)
         }
     }
     if(scene==UI_HOME){
-        uint8_t phase=home_motion?(uint8_t)((now/90U)%16U):0;
-        if(phase!=home_phase){
-            home_phase=phase;
-            for(unsigned i=0;i<4;i++){
-                bool moving=(home_motion&(1U<<i))!=0;
-                visible(dots[i],moving);
-                if(!moving)continue;
-                int step=(phase+(int)i*3)%16;
-                if(home_reverse&(1U<<i))step=15-step;
-                const lv_point_t *p=wires[i]+step/8;
-                int t=step%8;
-                bool horizontal=p[0].y==p[1].y;
-                place(dots[i],p[0].x+(p[1].x-p[0].x)*t/8-1,p[0].y+(p[1].y-p[0].y)*t/8-1,horizontal?7:2,horizontal?2:7);
-                fill(dots[i],home_color(i));
-            }
+        for(unsigned i=0;i<4;i++){
+            bool moving=(home_motion&(1U<<i))!=0;
+            visible(dots[i],moving);
+            if(!moving)continue;
+            const lv_point_t *p=wires[i];
+            int horizontal=LV_ABS(p[1].x-p[0].x);
+            int length=horizontal+LV_ABS(p[2].y-p[1].y);
+            int distance=(int)(((now-home_started[i])/32U)%(unsigned)(length+1));
+            int edge=LV_MIN(distance,length-distance);
+            if(home_reverse&(1U<<i))distance=length-distance;
+            int x=p[0].x+(p[1].x>p[0].x?1:-1)*LV_MIN(distance,horizontal);
+            int y=p[1].y+(p[2].y>p[1].y?1:-1)*LV_MAX(0,distance-horizontal);
+            place(dots[i],x-2,y-2,5,5);
+            fill(dots[i],home_color(i));
+            background_opacity(dots[i],(lv_opa_t)(LV_MIN(edge,5)*51));
         }
     }
     if(redraw)lv_obj_invalidate(screen);

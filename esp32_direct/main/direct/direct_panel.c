@@ -133,8 +133,10 @@ void direct_panel_prepare_boot(void)
 #if CONFIG_DIRECT_LCD_NOCS_BOOT
     /* Reset must be asserted before any clock-pin mux/level change. */
     ESP_ERROR_CHECK(gpio_set_level(CONFIG_DIRECT_LCD_RST_PIN, 0));
+    const int bl_pin = CONFIG_DIRECT_LCD_BL_PIN;
+    if (bl_pin >= 0) ESP_ERROR_CHECK(gpio_set_level(bl_pin, 0));
     gpio_config_t reset = {
-        .pin_bit_mask = pin_mask(CONFIG_DIRECT_LCD_RST_PIN),
+        .pin_bit_mask = pin_mask(CONFIG_DIRECT_LCD_RST_PIN) | pin_mask(bl_pin),
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_ERROR_CHECK(gpio_config(&reset));
@@ -365,6 +367,8 @@ static bool panel_hardware_initialize(void)
 {
     const unsigned errors_before=atomic_load(&s_lcd_tx_errors);
     const int rst_pin=CONFIG_DIRECT_LCD_RST_PIN;
+    if (CONFIG_DIRECT_LCD_BL_PIN >= 0)
+        gpio_set_level(CONFIG_DIRECT_LCD_BL_PIN, 0);
     if(rst_pin>=0){
         gpio_set_level(rst_pin,0);
         ESP_LOGW(TAG,"LCD_RESET hold_low_ms=20");
@@ -409,9 +413,12 @@ void direct_panel_show_band(int y, uint16_t *pixels)
 
 void direct_panel_enable_display(void)
 {
+    const unsigned errors_before = atomic_load(&s_lcd_tx_errors);
     command(0x29);
     vTaskDelay(pdMS_TO_TICKS(20));
-    if(CONFIG_DIRECT_LCD_BL_PIN>=0)gpio_set_level(CONFIG_DIRECT_LCD_BL_PIN,1);
+    if (CONFIG_DIRECT_LCD_BL_PIN >= 0 &&
+        atomic_load(&s_lcd_tx_errors) == errors_before)
+        gpio_set_level(CONFIG_DIRECT_LCD_BL_PIN, 1);
     ESP_LOGI(TAG,"LCD_BOOT_VISIBLE: complete background written before DISPON");
 }
 
@@ -444,6 +451,14 @@ static void panel_isolation_loop(void)
             if (running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
                 state == ESP_OTA_IMG_PENDING_VERIFY)
                 ESP_ERROR_CHECK(esp_ota_mark_app_valid_cancel_rollback());
+        }
+        if (pattern == 0U && CONFIG_DIRECT_LCD_BL_PIN >= 0) {
+            /* Keep each polarity for a full set of patterns and long enough
+               to measure TFT-BL with a multimeter. */
+            const unsigned level = ((frame / 6U) & 1U) == 0U;
+            ESP_ERROR_CHECK(gpio_set_level(CONFIG_DIRECT_LCD_BL_PIN, level));
+            ESP_LOGI(TAG, "LCD_BL_TEST GPIO%d=%u for next color cycle",
+                     CONFIG_DIRECT_LCD_BL_PIN, level);
         }
         ESP_LOGI(TAG, "LCD_ISOLATION sent frame=%u pattern=%s tx=%u errors=%u hold_ms=2000",
                  frame, names[pattern], atomic_load(&s_spi_transfers),
@@ -498,6 +513,7 @@ void direct_panel_init(void)
 #endif
     const int rst_pin = CONFIG_DIRECT_LCD_RST_PIN;
     const int bl_pin = CONFIG_DIRECT_LCD_BL_PIN;
+    if (bl_pin >= 0) ESP_ERROR_CHECK(gpio_set_level(bl_pin, 0));
     uint64_t output_mask = pin_mask(rst_pin) | pin_mask(bl_pin);
 #if CONFIG_DIRECT_LCD_GPIO_SPI
     output_mask |= pin_mask(CONFIG_DIRECT_LCD_SCLK_PIN) |

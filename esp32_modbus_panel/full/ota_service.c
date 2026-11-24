@@ -4,7 +4,7 @@
 #include "ota_image_identity.h"
 #include "firmware_identity.h"
 #include "factory_identity.h"
-#include "factory_service.h"
+#include "panel_usb_service.h"
 #include "direct_panel.h"
 #include "direct_link.h"
 #include "direct_dsp_ota_transport.h"
@@ -88,7 +88,6 @@ static TaskHandle_t g_remote_coordinator;
 static StackType_t g_remote_coordinator_stack[OTA_COORDINATOR_STACK_SIZE / sizeof(StackType_t)];
 static StaticTask_t g_remote_coordinator_tcb;
 static bool g_remote_cleanup_busy;
-static bool g_remote_reboot_pending;
 static atomic_bool g_cancel_requested;
 static atomic_uint_fast32_t g_main_loop_tick;
 static bool g_active;
@@ -340,7 +339,7 @@ static void boot_health_check(void)
 #endif
     const uint32_t missing=direct_ota_health_missing(now,last_alive,
         pdMS_TO_TICKS(OTA_HEALTH_MAX_AGE_MS),direct_panel_software_healthy(),
-        direct_link_software_healthy(),factory_service_software_healthy(),identity_healthy);
+        direct_link_software_healthy(),panel_usb_service_software_healthy(),identity_healthy);
     if (missing) {
         char detail[128];snprintf(detail,sizeof(detail),
             "Startup health failed mask=0x%02lX (main=1 display=2 UART=4 USB=8 identity=16)",(unsigned long)missing);
@@ -1382,15 +1381,13 @@ static void remote_worker(void* parameter)
     } else if (result != OTA_RESULT_OK) {
         finish_failure(result, detail);
     } else if (manifest.target == OTA_TARGET_ESP) {
-        g_remote_reboot_pending = ota_service_schedule_reboot(1000);
-        if (!g_remote_reboot_pending)
+        if (!ota_service_schedule_reboot(1000))
             finish_failure(OTA_RESULT_TASK_CREATE_FAILED, "Unable to schedule OTA reboot");
     }
 
     ESP_LOGI("OTA", "remote worker stack_min_free=%u",
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    /* The coordinator deletes this worker before restoring BLE. Self-delete
-     * would defer stack reclamation to idle and race BLE allocations. */
+    /* The coordinator owns worker completion and stack reclamation. */
     xTaskNotifyGive(g_remote_coordinator);
     vTaskSuspend(NULL);
 }
@@ -1412,9 +1409,7 @@ static void remote_coordinator(void* parameter)
         ESP_LOGW("OTA", "prepare remote OTA (background drained) free=%u largest=%u",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-        if (!ble_prov_suspend_for_ota()) {
-            finish_failure(OTA_RESULT_INTERNAL, "Unable to pause BLE for remote OTA");
-        } else if (cancel_requested()) {
+        if (cancel_requested()) {
             finish_failure(OTA_RESULT_OK, "OTA cancelled");
         } else if (!create_ota_task_with_retry(remote_worker, "ota_remote",
                                               OTA_TASK_STACK_SIZE, &g_manifest,
@@ -1424,10 +1419,6 @@ static void remote_coordinator(void* parameter)
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             vTaskDelete(g_remote_task);
             g_remote_task = NULL;
-        }
-        if (!g_remote_reboot_pending && !ble_prov_restore_after_ota()) {
-            ESP_LOGE("OTA", "BLE restore failed after remote OTA");
-            mqtt_publish_ota_trace("ble-restore", "BLE restore failed; restart required");
         }
         telemetry_set_quiet(false);
         offline_cache_set_quiet(false);
@@ -1461,7 +1452,6 @@ OtaResult ota_service_start_remote(const OtaManifest* manifest)
         return OTA_RESULT_INTERNAL;
     }
     g_remote_cleanup_busy = true;
-    g_remote_reboot_pending = false;
     xSemaphoreGive(g_lock);
     if (!g_remote_coordinator) {
         xSemaphoreTake(g_lock, portMAX_DELAY);

@@ -1,16 +1,21 @@
-"""Build a board-owned glyph subset from reachable product text.
+"""Rasterize the board's MiSans Medium glyphs at the sizes used on the LCD.
 
-Reuse existing licensed Noto glyphs; rasterize only missing CJK supplements.
-Never link the original controller's entire parameter/alarm font dictionary.
+Pass MiSans/ttf/MiSans-Medium.ttf from the official MiSans.zip download.
 """
-from pathlib import Path
-import re
+import argparse
 import hashlib
 import heapq
+import re
 from collections import Counter
+from pathlib import Path
+
+from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
-root=Path(__file__).resolve().parents[1]
-base=(root.parent/'esp32_direct/main/direct/direct_gfx_assets.c').read_text(encoding='utf-8')
+
+root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('font', type=Path, help='Official MiSans-Medium.ttf')
+args = parser.parse_args()
 paths=[p for p in (root/'main').glob('*.c') if p.name!='panel_fonts.c']
 paths+=list((root/'main').glob('panel_locale*.inc'))
 paths+=[root/'full'/name for name in ['direct_ui.c','direct_ui_scene.c','direct_ui_locale.c','full_panel_runtime.inc','panel_lvgl.c','panel_wifi_ui.inc','panel_firmware_ui.inc','panel_weather_ui.inc','panel_weather_art.inc']]
@@ -21,14 +26,22 @@ for path in paths:
     source=path.read_text(encoding='utf-8')
     literals+=re.findall(r'"(?:[^"\\]|\\.)*"',source)
 needed=set(range(32,127))|{ord(c) for c in ''.join(literals) if ord(c)>=128}
-body=re.search(r'static const entry_t body\[\]=\{(.*?)\};',base,re.S).group(1)
-entries={int(cp,16):(cp,value) for cp,value in re.findall(r'\{0x([0-9a-f]+),(\{[^}]+\})\}',body)}
-definitions={name:text for name,text in re.findall(r'(body_[0-9a-f]+)(\[\]=\{[^;]*;)',base)}
-lines=['/* Generated board-only glyph subset. Noto Sans CJK SC Medium: SIL OFL 1.1. */',
+font_sha256 = hashlib.sha256(args.font.read_bytes()).hexdigest()
+with TTFont(args.font) as source:
+    cmap = source.getBestCmap()
+missing = sorted(needed - cmap.keys())
+if missing:
+    parser.error('MiSans is missing required glyphs: ' + ', '.join(f'U+{cp:04X}' for cp in missing))
+if ImageFont.truetype(args.font, 16).getname() != ('MiSans', 'Medium'):
+    parser.error('Expected the official MiSans Medium face')
+
+lines=['/* Generated board glyphs from MiSans Medium.',
+       ' * Copyright 2020-2025 Beijing Xiaomi Mobile Software Co., Ltd.',
+       ' * https://hyperos.mi.com/font/download',
+       f' * Source font SHA256: {font_sha256} */',
        '#include "direct_gfx_assets.h"','#include <string.h>',
        'typedef struct {uint16_t cp;uint8_t width,height,stride,advance;uint16_t offset;} entry_t;',
        '_Static_assert(sizeof(entry_t)==8,"packed flash metrics");']
-selected=[]
 raw_glyphs={}
 encoded_glyphs={}
 def encoded(name,raw):
@@ -45,71 +58,74 @@ def encoded(name,raw):
                 i+=1
             out.append(i-start-1);out.extend(raw[start:i])
     encoded_glyphs[name]=bytes(out)
-    return '@@'+name+'@@'
-for cp in sorted(needed & entries.keys()):
-    key,value=entries[cp];name='body_'+key
-    raw=re.search(r'\{([^}]+)\}',definitions[name]).group(1)
-    lines.append(encoded(name,[int(x,0) for x in raw.split(',') if x.strip()]));selected.append((cp,value))
-font=ImageFont.truetype(str(root.parent/'esp32_direct/tests/font-source/noto/NotoSansCJKsc-Medium.otf'),16)
-missing=sorted(needed-entries.keys())
-for cp in missing:
-    width=8 if cp<128 else 16
-    # Share the original atlas' 20px cell and baseline. Ink-top anchoring puts
-    # punctuation at the top and gives each supplemental glyph a new baseline.
-    im=Image.new('L',(width,20));ImageDraw.Draw(im).text((0,15),chr(cp),font=font,fill=255,anchor='ls')
-    pixels=list(im.tobytes())
-    packed=[(pixels[i]*15//255<<4)|(pixels[i+1]*15//255) for i in range(0,width*20,2)]
-    name=f'body_{cp:x}'
-    lines.append(encoded(name,packed))
-    selected.append((cp,'{'+f'{width},20,{width//2},{width},{name},4'+'}'))
-lines.append('static const entry_t body[]={')
-lines += [f'{{0x{cp:x},{value}}},' for cp,value in sorted(selected)]
-lines.append('};')
-digest=hashlib.sha256()
-for cp,value in sorted(selected):
-    fields=value.strip('{}').split(',');w,h,stride,advance=map(int,fields[:4]);name=fields[4];bpp=int(fields[5])
-    assert stride*h==len(raw_glyphs[name]) and stride*h<=256
-    digest.update(cp.to_bytes(4,'little')+bytes([w,h,stride,advance,bpp])+raw_glyphs[name])
-lines.append('/* Body bitmap SHA256: '+digest.hexdigest()+' */')
-# Phone pairing PIN and LCD test use native 22/24px numeric glyphs.
-large=re.search(r'(static const uint8_t large24_.*?)(?=static const uint8_t large28_)',base,re.S).group(1)
-large=re.sub(r'static const uint8_t (large24_[0-9a-f]+)\[\]=\{([^}]+)\};',
-             lambda m:encoded(m[1],[int(x,0) for x in m[2].split(',') if x.strip()]),large)
-lines.append(large)
-small_font=ImageFont.truetype(str(root.parent/'esp32_direct/tests/font-source/noto/NotoSansCJKsc-Medium.otf'),12)
-small=[]
-for cp in sorted(set(map(ord,'0123456789 .%+-:/WVAkHz'))):
-    ch=chr(cp);width=max(3,int(small_font.getlength(ch)+1));stride=(width+1)//2
-    im=Image.new('L',(stride*2,12));ImageDraw.Draw(im).text((0,10),ch,font=small_font,fill=255,anchor='ls')
-    pixels=list(im.tobytes());data=[(pixels[i]*15//255<<4)|(pixels[i+1]*15//255) for i in range(0,len(pixels),2)]
-    name=f'small_{cp:x}';lines.append(encoded(name,data))
-    small.append(f'{{0x{cp:x},{{{width},12,{stride},{width},{name},4}}}}')
-lines.append('static const entry_t small12[]={'+','.join(small)+'};')
-headline_font=ImageFont.truetype(str(root.parent/'esp32_direct/tests/font-source/noto/NotoSansCJKsc-Medium.otf'),32)
-headline=[]
-for cp in sorted(set(map(ord,'0123456789 .%-VHzAkW'))):
-    ch=chr(cp);width=max(5,int(headline_font.getlength(ch)+1));stride=(width+1)//2
-    im=Image.new('L',(stride*2,32));ImageDraw.Draw(im).text((0,29),ch,font=headline_font,fill=255,anchor='ls')
-    pixels=list(im.tobytes());data=[(pixels[i]*15//255<<4)|(pixels[i+1]*15//255) for i in range(0,len(pixels),2)]
-    name=f'headline_{cp:x}'
-    if cp==32:
-        lines.append(encoded(name,[]))
-        headline.append(f'{{0x{cp:x},{{0,0,0,{width},{name},4}}}}')
-    else:
-        lines.append(encoded(name,data))
-        headline.append(f'{{0x{cp:x},{{{width},32,{stride},{width},{name},4}}}}')
-lines.append('static const entry_t headline32[]={'+','.join(headline)+'};')
-def table_map(text):
-    return {int(cp,16):fields.split(',') for cp,fields in re.findall(r'\{0x([0-9a-f]+),\{([^}]+)\}\}',text)}
-body_map={cp:value.strip('{}').split(',') for cp,value in selected}
-face_digest=hashlib.sha256()
-for size,face_entries in [(12,table_map(','.join(small))),(24,table_map(large)),(32,table_map(','.join(headline)))]:
-    for cp in range(32,127):
-        fields=face_entries.get(cp,body_map[cp]);w,h,stride,advance=map(int,fields[:4]);bpp=int(fields[5])
-        assert bpp==4 and stride*h<=512
-        face_digest.update(size.to_bytes(4,'little')+cp.to_bytes(4,'little')+
-                           bytes([w,h,stride,advance,bpp])+raw_glyphs[fields[4]])
-lines.append('/* Face bitmap SHA256: '+face_digest.hexdigest()+' */')
+
+
+def rasterize(face, size, height, baseline, codepoints):
+    font = ImageFont.truetype(args.font, size, layout_engine=ImageFont.Layout.BASIC)
+    digits = '0123456789'
+    digit_width = max(round(font.getlength(digit)) for digit in digits)
+    metrics = {}
+    for cp in sorted(codepoints):
+        char = chr(cp)
+        left, top, right, bottom = font.getbbox(char, anchor='ls')
+        assert -baseline <= top <= bottom <= height - baseline, (size, char, top, bottom)
+        advance = max(1, round(font.getlength(char)))
+        x = max(0, -left)
+        if char in digits:
+            x += (digit_width - advance) // 2
+            advance = digit_width
+        width = max(advance, right + x)
+        stride = (width + 1) // 2
+        if size == 32 and char == ' ':
+            width = stride = glyph_height = 0
+            bitmap = b''
+        else:
+            glyph_height = height
+            image = Image.new('L', (stride * 2, height))
+            ImageDraw.Draw(image).text((x, baseline), char, font=font, fill=255, anchor='ls')
+            alpha = image.tobytes()
+            bitmap = bytes((alpha[i]*15+127)//255 << 4 | (alpha[i+1]*15+127)//255
+                           for i in range(0, len(alpha), 2))
+        assert stride * glyph_height == len(bitmap) <= (256 if size == 16 else 512)
+        name = f'{face}_{cp:x}'
+        encoded(name, bitmap)
+        metrics[cp] = (width, glyph_height, stride, advance, name, 4)
+    return metrics
+
+
+def write_table(name, glyphs):
+    lines.append(f'static const entry_t {name}[]={{')
+    for cp, fields in glyphs.items():
+        lines.append(f'{{0x{cp:x},' + ','.join(map(str, fields)) + '},')
+    lines.append('};')
+
+
+def update_digest(digest, cp, glyph):
+    width, height, stride, advance, name, bpp = glyph
+    digest.update(cp.to_bytes(4, 'little') + bytes((width, height, stride, advance, bpp))
+                  + raw_glyphs[name])
+
+
+body = rasterize('body', 16, 20, 15, needed)
+write_table('body', body)
+digest = hashlib.sha256()
+for cp, glyph in body.items():
+    update_digest(digest, cp, glyph)
+lines.append(f'/* Body bitmap SHA256: {digest.hexdigest()} */')
+
+# Pairing PINs, power readings and other numeric labels use native-size glyphs.
+small = rasterize('small', 12, 12, 10, map(ord, '0123456789 .%+-:/WVAkHz'))
+large = rasterize('large24', 24, 24, 21, map(ord, '0123456789 .-+%VWAmkHzhdins'))
+headline = rasterize('headline', 32, 32, 29, map(ord, '0123456789 .%-VHzAkW'))
+write_table('small12', small)
+write_table('large24', large)
+write_table('headline32', headline)
+face_digest = hashlib.sha256()
+for size, face in [(12, small), (24, large), (32, headline)]:
+    for cp in range(32, 127):
+        face_digest.update(size.to_bytes(4, 'little'))
+        update_digest(face_digest, cp, face.get(cp, body[cp]))
+lines.append(f'/* Face bitmap SHA256: {face_digest.hexdigest()} */')
 counts=Counter(b for data in encoded_glyphs.values() for b in data)
 
 def prefix_codes(frequencies):
@@ -179,8 +195,8 @@ for name,data in encoded_glyphs.items():
     blob=blobs[name.split('_',1)[0]]
     offsets[name]=len(blob)
     blob.extend([mode,*payload])
-lines=[re.sub(r'@@[a-z0-9_]+@@\n?', '', re.sub(r',((?:body|small|large24|headline)_[0-9a-f]+),4(?=\}\})',
-              lambda m:','+str(offsets[m[1]]),line)) for line in lines]
+lines=[re.sub(r',((?:body|small|large24|headline)_[0-9a-f]+),4(?=\})',
+              lambda m:','+str(offsets[m[1]]),line) for line in lines]
 for face,blob in blobs.items():
     blob.append(0)  # The prefix decoder peeks one byte ahead.
     assert len(blob)<=65536
@@ -239,8 +255,6 @@ const direct_gfx_glyph_t *direct_gfx_glyph(uint32_t cp,int size){
  decoded=*g;decoded.data=pixels;
  return &decoded;
 }''']
-assert all(cp<=0xffff for cp,value in selected)
-result='\n'.join(lines)+'\n'
-result=re.sub(r'\{(0x[0-9a-f]+),\{([^}]+)\}\}',r'{\1,\2}',result)
-(root/'main/panel_fonts.c').write_text(result,encoding='utf-8')
-print(f'Generated board glyph subset: {len(selected)} body glyphs, {len(entries)-len(needed&entries.keys())} old body glyphs removed, {len(missing)} supplements')
+assert all(cp<=0xffff for cp in body)
+(root/'main/panel_fonts.c').write_text('\n'.join(lines)+'\n',encoding='utf-8',newline='\r\n')
+print(f'Generated {len(body)} MiSans body glyphs and {len(small) + len(large) + len(headline)} numeric glyphs')

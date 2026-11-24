@@ -9,10 +9,13 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_tls_errors.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mbedtls/ssl.h"
 #include "nvs.h"
+#include <errno.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -30,16 +33,17 @@
 #define CONFIG_PANEL_CITY_SEARCH_URL "https://geocoding-api.open-meteo.com/v1/search"
 #endif
 
-enum { RESPONSE_MAX=4096, REFRESH_MS=1800000, RETRY_MS=60000, STALE_MS=7200000,
-       SETTLE_MS=250, ADMIT_MS=1500, MIN_HEAP=36*1024, MIN_BLOCK=12*1024 };
+enum { RESPONSE_MAX=4096, RESPONSE_CHUNK=512, REFRESH_MS=1800000, RETRY_MS=60000, RETRY_MAX_MS=900000, STALE_MS=7200000,
+       SETTLE_MS=250, ADMIT_MS=1500, MIN_HEAP=36*1024, MIN_BLOCK=12*1024,
+       BLE_RESTORE_HEAP=64*1024, BLE_RESTORE_ATTEMPTS=3, BLE_RECOVERY_MS=30000 };
 typedef struct {
     char city[PANEL_WEATHER_CITY_BYTES], country[3];
     int32_t latitude_e6,longitude_e6;
 } weather_place_t;
 typedef struct {
     char *body;
-    size_t used;
-    bool failed;
+    size_t used, capacity;
+    bool connected, failed;
 } http_body_t;
 
 static StaticSemaphore_t mutex_store;
@@ -50,10 +54,15 @@ static nvs_handle_t prefs;
 static bool prefs_ready;
 static bool wifi_online, wanted=true, search_pending;
 static uint32_t retry_ms, last_fetch_ms, wifi_epoch;
+static uint32_t retry_delay_ms=RETRY_MS;
 static char search_name[33];
 static atomic_bool network_owned, worker_done;
 static atomic_uint release_ms;
 static bool mqtt_paused, awaiting_heap;
+static enum { BLE_UNCHANGED, BLE_SUSPENDED, BLE_SUSPEND_FAILED } weather_ble_state;
+static void *ble_restore_reserve;
+static unsigned ble_restore_failures;
+static uint32_t ble_recovery_ms;
 extern bool full_mqtt_client_resident(void);
 
 static uint32_t clock_ms(void){return (uint32_t)(esp_timer_get_time()/1000);}
@@ -61,6 +70,15 @@ static bool lock(void){return mutex && xSemaphoreTake(mutex,pdMS_TO_TICKS(50))==
 static void unlock(void){xSemaphoreGive(mutex);}
 static bool due(uint32_t now,uint32_t deadline){return (int32_t)(now-deadline)>=0;}
 static int32_t round_value(double value){return (int32_t)(value+(value<0?-0.5:0.5));}
+
+/* Called with the weather lock held. Repeated failures should not drop MQTT every minute. */
+static void schedule_fetch(uint32_t now,bool success)
+{
+    uint32_t delay=success?REFRESH_MS:retry_delay_ms;
+    retry_ms=now+delay;
+    retry_delay_ms=success?RETRY_MS:retry_delay_ms>=RETRY_MAX_MS/2?RETRY_MAX_MS:retry_delay_ms*2;
+    if(!success)ESP_LOGW("weather","automatic retry in %u ms",(unsigned)delay);
+}
 
 static bool place_valid(const weather_place_t *place)
 {
@@ -90,14 +108,23 @@ static bool read_place(cJSON *obj,const char *name,weather_place_t *out)
 
 static esp_err_t http_event(esp_http_client_event_t *event)
 {
-    if(event->event_id!=HTTP_EVENT_ON_DATA)return ESP_OK;
     http_body_t *r=event->user_data;
+    if(event->event_id==HTTP_EVENT_ON_CONNECTED)r->connected=true;
+    if(event->event_id!=HTTP_EVENT_ON_DATA)return ESP_OK;
+    if(r->failed)return ESP_FAIL;
     if(event->data_len<0 || (size_t)event->data_len>RESPONSE_MAX-r->used){
         r->failed=true;
         return ESP_FAIL;
     }
-    if(!r->body)r->body=malloc(RESPONSE_MAX+1);
-    if(!r->body){r->failed=true;return ESP_FAIL;}
+    size_t required=r->used+(size_t)event->data_len+1;
+    if(required>r->capacity){
+        size_t capacity=((required+RESPONSE_CHUNK-1)/RESPONSE_CHUNK)*RESPONSE_CHUNK;
+        if(capacity>RESPONSE_MAX+1)capacity=RESPONSE_MAX+1;
+        char *body=realloc(r->body,capacity);
+        if(!body){r->failed=true;return ESP_FAIL;}
+        r->body=body;
+        r->capacity=capacity;
+    }
     memcpy(r->body+r->used,event->data,(size_t)event->data_len);
     r->used+=(size_t)event->data_len;
     r->body[r->used]=0;
@@ -107,22 +134,41 @@ static esp_err_t http_event(esp_http_client_event_t *event)
 static cJSON *fetch_json(const char *url,bool *timed_out)
 {
     if(strncmp(url,"https://",8))return NULL;
+    ESP_LOGI("weather","HTTPS request %s",url);
     http_body_t r={0};
     esp_http_client_config_t config={
-        .url=url,.timeout_ms=4000,.crt_bundle_attach=esp_crt_bundle_attach,
+        .url=url,.timeout_ms=12000,.crt_bundle_attach=esp_crt_bundle_attach,
         .event_handler=http_event,.user_data=&r,.buffer_size=1024,
         .buffer_size_tx=512,.disable_auto_redirect=true,
     };
     cJSON *json=NULL;
     esp_http_client_handle_t client=esp_http_client_init(&config);
     if(client){
+        uint32_t started=clock_ms();
         esp_err_t error=esp_http_client_perform(client);
-        if(error==ESP_ERR_HTTP_EAGAIN || error==ESP_ERR_TIMEOUT)*timed_out=true;
+        unsigned elapsed=(unsigned)(clock_ms()-started);
         int status=esp_http_client_get_status_code(client);
+        int socket_error=0, tls_code=0, tls_flags=0;
+        esp_err_t tls_error=ESP_OK;
+        if(error!=ESP_OK){
+            socket_error=esp_http_client_get_errno(client);
+            tls_error=esp_http_client_get_and_clear_last_tls_error(client,&tls_code,&tls_flags);
+            if(error==ESP_ERR_HTTP_EAGAIN || error==ESP_ERR_TIMEOUT ||
+               socket_error==ETIMEDOUT || tls_error==ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT ||
+               tls_code==-MBEDTLS_ERR_SSL_TIMEOUT)*timed_out=true;
+        }
+        /* The response buffer is ours; free TLS before allocating the JSON tree. */
+        esp_http_client_cleanup(client);
         if(error==ESP_OK && !r.failed && r.used && status==200)
             json=cJSON_ParseWithLengthOpts(r.body,r.used+1,NULL,true);
-        if(!json)ESP_LOGW("weather","HTTP err=%x status=%d bytes=%u",error,status,(unsigned)r.used);
-        esp_http_client_cleanup(client);
+        if(!json){
+            const char *phase=!r.connected?"connect":status<=0?"request_or_headers":"body";
+            ESP_LOGW("weather","HTTP err=%x status=%d bytes=%u body_failed=%u phase=%s elapsed_ms=%u tls=%x mbedtls=%x flags=%x errno=%d",
+                     (unsigned)error,status,(unsigned)r.used,(unsigned)r.failed,phase,elapsed,
+                     (unsigned)tls_error,(unsigned)tls_code,(unsigned)tls_flags,socket_error);
+        }
+    }else{
+        ESP_LOGW("weather","HTTP client init failed");
     }
     free(r.body);
     return json;
@@ -245,6 +291,8 @@ static void weather_task(void *arg)
                 CONFIG_PANEL_FORECAST_URL,place.latitude_e6/1000000.0,place.longitude_e6/1000000.0);
             cJSON *json=n>0 && n<(int)sizeof(url)?fetch_json(url,&timed_out):NULL;
             ok=parse_forecast(json,&forecast);
+            if(json && !ok)ESP_LOGW("weather","forecast rejected: invalid fields, dates or current timestamp now=%lld",
+                                  (long long)time(NULL));
             cJSON_Delete(json);
         }
         if(lock()){
@@ -257,9 +305,11 @@ static void weather_task(void *arg)
                     view.updated_at=forecast.updated_at;view.days=forecast.days;
                     memcpy(view.daily,forecast.daily,sizeof(view.daily));
                     last_fetch_ms=clock_ms();view.state=PANEL_WEATHER_READY;
+                    ESP_LOGI("weather","ready city=%s temperature_10=%d days=%u",
+                             view.city,(int)view.temperature_10,(unsigned)view.days);
                 }else view.state=timed_out?PANEL_WEATHER_TIMEOUT:
                     place_valid(&place)?PANEL_WEATHER_ERROR:PANEL_WEATHER_LOCATION_FAILED;
-                retry_ms=clock_ms()+(ok?REFRESH_MS:RETRY_MS);
+                schedule_fetch(clock_ms(),ok);
             }
             unlock();
         }
@@ -284,13 +334,40 @@ bool panel_weather_network_busy(void){return atomic_load(&network_owned);}
 static void admit_weather(uint32_t now,bool reserved)
 {
     uint32_t elapsed=now-atomic_load(&release_ms);
-    if(elapsed<SETTLE_MS || !lock())return;
+    if(elapsed<SETTLE_MS)return;
     unsigned caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
     unsigned free=heap_caps_get_free_size(caps),largest=heap_caps_get_largest_free_block(caps);
-    bool usable=!reserved && wifi_sta_is_connected() && !ble_prov_is_connected();
-    if(usable && (free<MIN_HEAP || largest<MIN_BLOCK) && elapsed<ADMIT_MS){unlock();return;}
+    bool usable=!reserved && weather_ble_state!=BLE_SUSPEND_FAILED &&
+        wifi_sta_is_connected() && !ble_prov_is_connected();
+    bool enough_heap=free>=MIN_HEAP && largest>=MIN_BLOCK;
+    if(usable && !enough_heap){
+        if(elapsed<ADMIT_MS)return;
+        if(weather_ble_state==BLE_UNCHANGED && !full_mqtt_client_resident() && ble_prov_is_ready()){
+            ESP_LOGI("weather","releasing idle BLE for TLS heap=%u block=%u",free,largest);
+            /* A failed teardown can still require BLE lifecycle recovery. */
+            if(ble_prov_suspend_for_weather()){
+                weather_ble_state=BLE_SUSPENDED;
+                atomic_store(&release_ms,clock_ms());
+                return;
+            }
+            weather_ble_state=BLE_SUSPEND_FAILED;
+            ESP_LOGW("weather","BLE suspension failed");
+            now=clock_ms();
+        }
+    }
+    if(!lock())return;
     awaiting_heap=false;
-    if(usable && free>=MIN_HEAP && largest>=MIN_BLOCK &&
+    if(usable && enough_heap && weather_ble_state==BLE_SUSPENDED){
+        /* Keep the BLE controller's contiguous restart block out of TLS allocations. */
+        const unsigned restore_block=(unsigned)ble_prov_weather_restore_block();
+        ble_restore_reserve=heap_caps_malloc(restore_block,caps);
+        free=heap_caps_get_free_size(caps);
+        largest=heap_caps_get_largest_free_block(caps);
+        enough_heap=ble_restore_reserve && free>=MIN_HEAP && largest>=MIN_BLOCK;
+        if(!enough_heap)ESP_LOGW("weather","BLE restore reservation unavailable; deferring weather");
+        else ESP_LOGI("weather","BLE restore block reserved bytes=%u",restore_block);
+    }
+    if(usable && enough_heap && !ble_prov_is_connected() &&
        xTaskCreate(weather_task,"panel_weather",8192,(void *)(uintptr_t)wifi_epoch,4,NULL)==pdPASS){
         ESP_LOGI("weather","start heap=%u block=%u",free,largest);
         unlock();
@@ -298,7 +375,7 @@ static void admit_weather(uint32_t now,bool reserved)
     }
     ESP_LOGW("weather","defer heap=%u block=%u",free,largest);
     if(search_pending){search_pending=false;view.search_state=PANEL_CITY_ERROR;}
-    else{view.state=PANEL_WEATHER_ERROR;retry_ms=now+RETRY_MS;}
+    else{view.state=PANEL_WEATHER_ERROR;schedule_fetch(now,false);}
     atomic_store(&release_ms,now);
     atomic_store(&worker_done,true);
     unlock();
@@ -310,7 +387,32 @@ void panel_weather_process(bool reserved)
     if(panel_weather_network_busy()){
         if(awaiting_heap){admit_weather(now,reserved);return;}
         if(atomic_load(&worker_done) && now-atomic_load(&release_ms)>=SETTLE_MS){
-            if(mqtt_paused)mqtt_resume_after_local();
+            /* Reallocate the BLE controller before the MQTT client fragments the heap. */
+            if(weather_ble_state!=BLE_UNCHANGED && ble_restore_failures<BLE_RESTORE_ATTEMPTS){
+                if(ble_restore_reserve){
+                    heap_caps_free(ble_restore_reserve);
+                    ble_restore_reserve=NULL;
+                }
+                if(ble_prov_restore_after_weather()){
+                    weather_ble_state=BLE_UNCHANGED;
+                    ESP_LOGI("weather","BLE restored");
+                    atomic_store(&release_ms,clock_ms());
+                    return;
+                }
+                ble_restore_failures++;
+                if(ble_restore_failures<BLE_RESTORE_ATTEMPTS){
+                    ESP_LOGW("weather","BLE restore pending attempt=%u",ble_restore_failures);
+                    atomic_store(&release_ms,clock_ms());
+                    return;
+                }
+                ble_recovery_ms=clock_ms()+BLE_RECOVERY_MS;
+                ESP_LOGW("weather","BLE restore deferred; returning network to MQTT");
+            }
+            if(mqtt_paused && !mqtt_resume_after_local()){
+                ESP_LOGW("weather","MQTT client restore pending; retaining network ownership");
+                atomic_store(&release_ms,now);
+                return;
+            }
             mqtt_paused=false;
             ota_service_admin_end();
             atomic_store(&network_owned,false);
@@ -323,49 +425,69 @@ void panel_weather_process(bool reserved)
     if(!lock())return;
     bool wifi=wifi_sta_is_connected();
     if(wifi!=wifi_online){
-        wifi_online=wifi;wifi_epoch++;wanted=true;retry_ms=now;ip_city.city[0]=0;
+        wifi_online=wifi;wifi_epoch++;wanted=true;retry_ms=now;retry_delay_ms=RETRY_MS;ip_city.city[0]=0;
         view.state=wifi?PANEL_WEATHER_IDLE:PANEL_WEATHER_OFFLINE;
         if(!wifi && search_pending){search_pending=false;view.search_state=PANEL_CITY_ERROR;}
     }
     bool pending=wifi && (search_pending || (due(now,retry_ms) && (wanted || view.state!=PANEL_WEATHER_IDLE)));
     unlock();
+    if(weather_ble_state!=BLE_UNCHANGED){
+        /* BLE recovery debt must leave cloud commands and alarms able to reconnect. */
+        const unsigned caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
+        if(reserved || !due(now,ble_recovery_ms) || mqtt_is_connecting() ||
+           heap_caps_get_free_size(caps)<BLE_RESTORE_HEAP ||
+           heap_caps_get_largest_free_block(caps)<(unsigned)ble_prov_weather_restore_block() || !ota_service_admin_begin())return;
+        ble_recovery_ms=now+BLE_RECOVERY_MS;
+        if(ble_prov_restore_after_weather()){
+            weather_ble_state=BLE_UNCHANGED;
+            ESP_LOGI("weather","BLE recovered in background");
+        }else ESP_LOGW("weather","BLE background restore pending");
+        ota_service_admin_end();
+        return;
+    }
     if(!pending || reserved || mqtt_is_connecting() || ble_prov_is_connected() || !ota_service_admin_begin())return;
-    if(mqtt_is_connected()){
-        unsigned caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
-        if(heap_caps_get_free_size(caps)<MIN_HEAP ||
-           heap_caps_get_largest_free_block(caps)<MIN_BLOCK){
-            if(lock()){
-                if(search_pending){search_pending=false;view.search_state=PANEL_CITY_ERROR;}
-                else{wanted=false;view.state=PANEL_WEATHER_ERROR;retry_ms=now+RETRY_MS;}
-                unlock();
-            }
+    unsigned caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
+    unsigned free=heap_caps_get_free_size(caps);
+    unsigned largest=heap_caps_get_largest_free_block(caps);
+    bool low_heap=free<MIN_HEAP || largest<MIN_BLOCK;
+    bool release_client=full_mqtt_client_resident() && (!mqtt_is_connected() || low_heap);
+    if(release_client){
+        ESP_LOGI("weather","releasing MQTT for TLS heap=%u block=%u",free,largest);
+        if(!mqtt_pause_for_local()){
+            /* The shared pause API sets its pause flag before admission. */
+            mqtt_resume_after_local();
             ota_service_admin_end();
             return;
         }
     }
-    bool release_client=full_mqtt_client_resident() && !mqtt_is_connected();
-    if(release_client && !mqtt_pause_for_local()){ota_service_admin_end();return;}
     mqtt_paused=release_client;
+    ble_restore_failures=0;
+    atomic_store(&worker_done,false);
+    atomic_store(&release_ms,clock_ms());
+    atomic_store(&network_owned,true);
     if(!lock()){
-        if(mqtt_paused)mqtt_resume_after_local();
-        mqtt_paused=false;ota_service_admin_end();return;
+        atomic_store(&worker_done,true);
+        return;
     }
     bool searching=search_pending;
     if(!searching){
         wanted=false;
         view.state=place_valid(&saved_city)||place_valid(&ip_city)?PANEL_WEATHER_LOADING:PANEL_WEATHER_LOCATING;
     }
-    atomic_store(&worker_done,false);
-    atomic_store(&network_owned,true);
-    atomic_store(&release_ms,now);
     awaiting_heap=true;
     unlock();
 }
 
 void panel_weather_refresh(void)
 {
+    const unsigned caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
+    ESP_LOGI("weather","refresh requested wifi=%u mqtt=%u connecting=%u ble=%u busy=%u heap=%u block=%u",
+             (unsigned)wifi_sta_is_connected(),(unsigned)mqtt_is_connected(),
+             (unsigned)mqtt_is_connecting(),(unsigned)ble_prov_is_connected(),
+             (unsigned)panel_weather_network_busy(),(unsigned)heap_caps_get_free_size(caps),
+             (unsigned)heap_caps_get_largest_free_block(caps));
     if(lock()){
-        wanted=true;retry_ms=clock_ms();
+        wanted=true;retry_ms=clock_ms();retry_delay_ms=RETRY_MS;
         unlock();
     }
 }
@@ -389,7 +511,7 @@ bool panel_weather_set_city(int index)
     if(saved){
         saved_city=next;
         view.valid=false;view.location_valid=false;view.days=0;view.city[0]=0;
-        wanted=true;retry_ms=clock_ms();view.state=PANEL_WEATHER_IDLE;view.search_state=PANEL_CITY_IDLE;view.city_count=0;
+        wanted=true;retry_ms=clock_ms();retry_delay_ms=RETRY_MS;view.state=PANEL_WEATHER_IDLE;view.search_state=PANEL_CITY_IDLE;view.city_count=0;
     }
     unlock();
     return saved;

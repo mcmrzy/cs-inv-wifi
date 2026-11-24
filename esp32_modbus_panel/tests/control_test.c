@@ -38,7 +38,7 @@ static void setup(panel_snapshot_t *s,fake_t *f)
     memset(s,0,sizeof(*s)); memset(f,0,sizeof(*f));
     f->now=100; f->marker=true; f->match=true;
     s->now_ms=100; s->config.address=1;
-    s->valid[panel_slot(0x42)]=true; s->values[panel_slot(0x42)]=3; s->updated_ms[panel_slot(0x42)]=100;
+    assert(panel_store(s,0x42,3,100));
 }
 static void incremental(void)
 {
@@ -79,8 +79,8 @@ static void incremental(void)
         panel_store(&s,0x46,0,f.now);alarm_samples++;
         f.now+=100;
     }
-    assert(finished==1 && f.writes==1 && f.now-started>=3000 && core_samples>=30 && alarm_samples>=30);
-    assert(s.write_state==PANEL_WRITE_UNCERTAIN && f.now-panel_stamp(&s,0x50)<=100);
+    assert(finished==1 && f.writes==1 && f.reads==1 && f.now-started>=500 && core_samples>=6 && alarm_samples>=6);
+    assert(s.write_state==PANEL_WRITE_PROCESSED && c.readback_valid && c.readback_value==2 && f.now-panel_stamp(&s,0x50)<=100);
     unsigned before=f.reads+f.writes;assert(!panel_control_tick(&c,&s,&io));assert(before==f.reads+f.writes);
     /* A marker never substitutes for actual adoption. Sampling continues
      * while an independent readback refuses the target value. */
@@ -103,19 +103,101 @@ static void incremental(void)
     assert(panel_control_begin(&c,&s,0x4103,1,&io));
     f.now+=599U;assert(!panel_control_tick(&c,&s,&io) && !f.writes);
     f.now++;assert(!panel_control_tick(&c,&s,&io) && f.writes==1);
-    assert(!panel_control_tick(&c,&s,&io));
-    assert(panel_control_tick(&c,&s,&io) && s.write_state==PANEL_WRITE_CONFIRMED);
-    /* A silent confirmation register receives 500ms backoff, while the
-     * operation's absolute 3s deadline remains unchanged. */
+    assert(!panel_control_tick(&c,&s,&io) && f.reads==0);
+    f.now+=500;
+    assert(panel_control_tick(&c,&s,&io) && f.reads==1 && s.write_state==PANEL_WRITE_CONFIRMED);
+    /* Unavailable actual data causes one completion-marker read. */
     setup(&s,&f);c=(panel_control_t){0};f.read_error=true;
     assert(panel_control_begin(&c,&s,0x4103,1,&io));
     assert(!panel_control_tick(&c,&s,&io) && f.writes==1);
-    assert(!panel_control_tick(&c,&s,&io) && f.reads==1);
-    f.now+=499;assert(!panel_control_tick(&c,&s,&io) && f.reads==1);
-    f.now++;assert(!panel_control_tick(&c,&s,&io) && f.reads==2);
-    f.now=c.started_ms+3000;assert(panel_control_tick(&c,&s,&io) && s.write_state==PANEL_WRITE_UNCERTAIN);
+    f.now+=499;assert(!panel_control_tick(&c,&s,&io) && f.reads==0);
+    f.now++;assert(!panel_control_tick(&c,&s,&io) && f.reads==1);
+    assert(panel_control_tick(&c,&s,&io) && f.reads==2 && s.write_state==PANEL_WRITE_UNCERTAIN);
     puts("PASS incremental control: one transaction/tick, sampling during marker/adoption waits, single completion/write, delayed admission and uptime wrap");
 }
+
+static void power_voltage(void)
+{
+    enum { OUTPUT_VOLTAGE=0x58 };
+    panel_snapshot_t s;fake_t f;panel_control_t c;
+    panel_control_io_t io={&f,now,sleep_ms,read_reg,write_reg,publish};
+    for(unsigned action=1;action<=2;action++){
+        uint16_t initial=action==1?30:2310;
+        uint16_t target=action==1?2310:30;
+        for(unsigned response=PANEL_IO_OK;response<=PANEL_IO_ERROR;response+=2){
+            setup(&s,&f);c=(panel_control_t){0};f.result=(panel_io_result_t)response;
+            s.config.profile_override=PANEL_PROFILE_3KU;
+            f.now=UINT32_MAX-1000U;
+            panel_store(&s,0x42,action==1?2:3,f.now);
+            panel_store(&s,OUTPUT_VOLTAGE,initial,f.now);
+            assert(panel_control_begin(&c,&s,0x4123,action,&io));
+            assert(!panel_control_tick(&c,&s,&io) && f.writes==1);
+
+            f.now+=4100U; /* Slower than the old protocol deadline. */
+            assert(!panel_control_tick(&c,&s,&io));
+            panel_store(&s,OUTPUT_VOLTAGE,target,f.now);
+            assert(!panel_control_tick(&c,&s,&io));
+            for(unsigned i=0;i<6;i++){
+                f.now+=200U;
+                assert(!panel_control_tick(&c,&s,&io)); /* One cached reading stays one sample. */
+            }
+            panel_store(&s,OUTPUT_VOLTAGE,0xffff,f.now);
+            assert(!panel_control_tick(&c,&s,&io));
+            f.now+=500U;panel_store(&s,OUTPUT_VOLTAGE,target,f.now);
+            assert(!panel_control_tick(&c,&s,&io));
+            f.now+=500U;panel_store(&s,OUTPUT_VOLTAGE,target,f.now);
+            assert(!panel_control_tick(&c,&s,&io));
+            f.now+=500U;panel_store(&s,OUTPUT_VOLTAGE,target,f.now);
+            assert(panel_control_tick(&c,&s,&io) && s.write_state==PANEL_WRITE_CONFIRMED);
+            assert(f.writes==1 && !f.reads);
+        }
+    }
+    for(unsigned scenario=0;scenario<5;scenario++){
+        setup(&s,&f);c=(panel_control_t){0};
+        f.override_actual=true;f.actual=5; /* Running status and receipt alone are insufficient. */
+        f.now=6000;panel_store(&s,0x42,2,f.now);
+        if(scenario!=4)
+            panel_store(&s,OUTPUT_VOLTAGE,scenario==1?2300:0,scenario==2?100:f.now);
+        assert(panel_control_begin(&c,&s,0x4123,1,&io));
+        assert(!panel_control_tick(&c,&s,&io));
+        for(unsigned i=1;i<12;i++){
+            f.now+=1000;
+            if(scenario!=3){
+                uint16_t voltage=scenario==0?(i%2?1900:2300):2300;
+                panel_store(&s,OUTPUT_VOLTAGE,voltage,f.now);
+            }
+            assert(!panel_control_tick(&c,&s,&io));
+        }
+        f.now+=1000;
+        assert(panel_control_tick(&c,&s,&io) && s.write_state==PANEL_WRITE_UNCERTAIN);
+        assert(f.writes==1 && !f.reads);
+    }
+
+    setup(&s,&f);c=(panel_control_t){0};f.result=PANEL_IO_EXCEPTION;
+    panel_store(&s,OUTPUT_VOLTAGE,2300,f.now);
+    assert(panel_control_begin(&c,&s,0x4123,2,&io));
+    assert(panel_control_tick(&c,&s,&io) && s.write_state==PANEL_WRITE_REJECTED && s.exception==3);
+
+    setup(&s,&f);c=(panel_control_t){0};f.result=PANEL_IO_ERROR;
+    panel_store(&s,OUTPUT_VOLTAGE,2300,f.now);
+    assert(panel_control_begin(&c,&s,0x4123,2,&io));
+    assert(!panel_control_tick(&c,&s,&io));
+    s.context_generation++;
+    assert(panel_control_tick(&c,&s,&io) && s.write_state==PANEL_WRITE_UNCERTAIN && f.writes==1);
+
+    setup(&s,&f);c=(panel_control_t){0};
+    panel_control_write(&c,&s,0x4123,0,&io);
+    assert(f.writes==1 && f.reads==1 && s.write_state==PANEL_WRITE_PROTOCOL_ACCEPTED);
+    setup(&s,&f);c=(panel_control_t){0};
+    panel_store(&s,OUTPUT_VOLTAGE,2300,f.now);
+    assert(panel_control_begin(&c,&s,0x4123,2,&io));
+    c.require_opposite_output=true;
+    panel_store(&s,OUTPUT_VOLTAGE,0,f.now);
+    assert(panel_control_tick(&c,&s,&io) && s.write_state==PANEL_WRITE_REJECTED);
+    assert(f.writes==0);
+    puts("PASS power: voltage transition plus three fresh samples, missing ACK, timeout, rejection, context change, no retransmission");
+}
+
 int main(void)
 {
     static panel_snapshot_t s; fake_t f; panel_control_t c={0};
@@ -128,20 +210,22 @@ int main(void)
         s.config.profile_override=PANEL_PROFILE_6KU;panel_store(&s,0x150,4,f.now);
         f.override_actual=true;f.actual=552;
         panel_control_write(&c,&s,voltage_regs[i],552,&io);
-        assert(f.writes==1 && f.reads==2 && s.write_state==PANEL_WRITE_CONFIRMED);
-        assert(c.marker_seen && c.marker_raw==0xffff && c.actual_seen && c.actual_raw==552);
+        assert(f.writes==1 && f.reads==1 && s.write_state==PANEL_WRITE_CONFIRMED);
+        assert(!c.marker_seen && c.actual_seen && c.actual_raw==552);
         assert(panel_stamp(&s,0x177+i)==f.now);
         setup(&s,&f);c=(panel_control_t){0};
         s.config.profile_override=PANEL_PROFILE_6KU;panel_store(&s,0x150,4,f.now);
         f.override_actual=true;f.actual=540;
+        s.setting_reads[0]=(panel_setting_read_t){voltage_regs[i],550,s.now_ms,PANEL_SETTING_VALUE,true};
         panel_control_write(&c,&s,voltage_regs[i],552,&io);
         assert(f.writes==1 && s.write_state==PANEL_WRITE_PROCESSED);
         uint16_t actual;assert(panel_value(&s,0x177+i,&actual) && actual==540);
+        assert(f.reads==1 && s.setting_reads[0].value==540 && s.setting_reads[0].independent);
     }
     setup(&s,&f);
     panel_control_write(&c,&s,0x4103,1,&io);
     assert(f.writes==1 && s.write_state==PANEL_WRITE_CONFIRMED);
-    assert(s.valid[panel_slot(0x140)] && s.values[panel_slot(0x140)]==1);
+    uint16_t actual;assert(panel_value(&s,0x140,&actual) && actual==1);
     panel_control_write(&c,&s,0x4103,0,&io);
     assert(f.writes==2 && f.write_time[1]-f.write_time[0]>=600);
 
@@ -154,7 +238,7 @@ int main(void)
 
     setup(&s,&f); c=(panel_control_t){0}; f.marker=false;
     panel_control_write(&c,&s,0x4103,1,&io);
-    assert(f.writes==1 && s.write_state==PANEL_WRITE_CONFIRMED && f.reads==2);
+    assert(f.writes==1 && s.write_state==PANEL_WRITE_CONFIRMED && f.reads==1);
     setup(&s,&f);c=(panel_control_t){0};f.marker_error=true;
     panel_control_write(&c,&s,0x4103,1,&io);
     assert(f.writes==1 && s.write_state==PANEL_WRITE_CONFIRMED && c.actual_seen);
@@ -175,7 +259,7 @@ int main(void)
     assert(panel_store(&s,0x2a0,2200,f.now));
     f.override_actual=true;f.actual=2300;
     panel_control_write(&c,&s,0x4100,2,&io);
-    assert(f.writes==1 && f.reads==2 && s.write_state==PANEL_WRITE_CONFIRMED);
+    assert(f.writes==1 && f.reads==1 && s.write_state==PANEL_WRITE_CONFIRMED);
     uint16_t previous;
     assert(panel_value(&s,0x2a0,&previous) && previous==2300);
     setup(&s,&f);c=(panel_control_t){0};s.config.profile_override=PANEL_PROFILE_6KU;
@@ -193,19 +277,10 @@ int main(void)
     setup(&s,&f);c=(panel_control_t){0};s.config.profile_override=PANEL_PROFILE_6KU;
     f.override_actual=true;f.actual=1200;
     panel_control_write(&c,&s,0x4100,2,&io);
-    assert(f.writes==1 && s.write_state==PANEL_WRITE_PROCESSED); /* Wrong voltage family. */
+    assert(f.writes==1 && s.write_state==PANEL_WRITE_PROTOCOL_ACCEPTED && !c.readback_valid); /* Invalid independent encoding. */
     setup(&s,&f); c=(panel_control_t){0};s.config.profile_override=PANEL_PROFILE_6KU;f.marker=false;
     panel_control_write(&c,&s,0x4100,2,&io);
     assert(f.writes==1 && s.write_state==PANEL_WRITE_UNCERTAIN);
-    setup(&s,&f); c=(panel_control_t){0}; f.marker=true;
-    panel_control_write(&c,&s,0x4123,1,&io);
-    assert(s.write_state==PANEL_WRITE_PROCESSED); /* state 1=initializing, not confirmed powered */
-    setup(&s,&f);c=(panel_control_t){0};f.override_actual=true;f.actual=2;
-    panel_control_write(&c,&s,0x4123,1,&io);
-    assert(f.writes==1 && s.write_state==PANEL_WRITE_PROCESSED); /* standby is not proof of operation */
-    setup(&s,&f);c=(panel_control_t){0};f.override_actual=true;f.actual=5;
-    panel_control_write(&c,&s,0x4123,1,&io);
-    assert(f.writes==1 && s.write_state==PANEL_WRITE_CONFIRMED);
     setup(&s,&f);c=(panel_control_t){0};f.override_actual=true;f.actual=6000;
     panel_control_write(&c,&s,0x4101,1,&io);
     assert(s.write_state==PANEL_WRITE_CONFIRMED && panel_stamp(&s,0x2a1)==f.now);
@@ -220,17 +295,14 @@ int main(void)
     panel_control_write(&c,&s,0x4106,6,&io);
     assert(f.writes==1 && f.written==6 && c.actual_reg==0x179 && s.write_state==PANEL_WRITE_CONFIRMED);
     setup(&s,&f);c=(panel_control_t){0};s.config.profile_override=PANEL_PROFILE_3KU;
-    f.override_actual=true;f.actual=2;
-    panel_control_write(&c,&s,0x4123,2,&io);
-    assert(f.writes==1 && s.write_state==PANEL_WRITE_CONFIRMED);
-    setup(&s,&f);c=(panel_control_t){0};s.config.profile_override=PANEL_PROFILE_3KU;
     panel_store(&s,0x150,2,f.now);f.result=PANEL_IO_ERROR;
     panel_control_write(&c,&s,0x4107,0,&io);
     assert(f.writes==1 && s.write_state==PANEL_WRITE_UNCERTAIN && !panel_fresh(&s,0x150));
     assert(!panel_setting_allowed(&s,0x4108,220));
     incremental();
+    power_voltage();
     /* SOC thresholds need both the stored percentage and the enable switch. */
-    const panel_profile_t profiles[]={PANEL_PROFILE_2KU,PANEL_PROFILE_3KU,PANEL_PROFILE_6KU,PANEL_PROFILE_12KU};
+    const panel_profile_t profiles[]={PANEL_PROFILE_2KU,PANEL_PROFILE_3KU,PANEL_PROFILE_6KU,PANEL_PROFILE_6KU_PARALLEL,PANEL_PROFILE_12KU};
     const uint16_t soc_settings[]={0x4120,0x4121,0x4122};
     const uint16_t soc_regs[]={0x19e,0x1a0,0x19f};
     const uint16_t soc_flags[]={4,2,1};

@@ -12,8 +12,8 @@ try {
         @{name='home_model';test='../esp32_direct/tests/home_model_test.c';src=@("$shared/direct_home.c")},
         @{name='alarm';src=@('main/panel_alarm.c','main/panel_modbus.c')},
         @{name='alarm_service';src=@('main/panel_alarm.c','main/panel_modbus.c')},
-        @{name='indicators';src=@('main/panel_indicators.c','main/panel_model.c')},
-        @{name='indicators_hw';src=@('main/panel_indicators.c','main/panel_model.c')},
+        @{name='indicators';src=@('main/panel_indicators.c','main/panel_model.c',"$shared/status_led.c")},
+        @{name='indicators_hw';src=@('main/panel_indicators.c','main/panel_model.c',"$shared/status_led.c")},
         @{name='display_settings';src=@('main/panel_display_settings.c')},
         @{name='core';src=@('main/panel_modbus.c','main/panel_catalog.c','main/panel_model.c')},
         @{name='control';src=@('main/panel_control.c','main/panel_catalog.c','main/panel_model.c')},
@@ -63,11 +63,11 @@ try {
     if($LASTEXITCODE -ne 0){throw 'model registration info regression failed'}
     & 'C:/Users/29538/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -X utf8 tests/control_polling_test.py $Gcc
     if($LASTEXITCODE -ne 0){throw 'control polling regression failed'}
-    foreach($script in @('bus_recovery_test.py','bms_recovery_test.py','bms_diagnostic_runtime_test.py','csergy_bms_test.py','bus_startup_test.py','time_transaction_test.py','wifi_profiles_test.py','json_number_test.py','pairing_test.py','firmware_catalog_test.py','panel_ota_tls_test.py','weather_test.py')) {
+    foreach($script in @('usb_pc_test.py','bus_recovery_test.py','bms_recovery_test.py','bms_diagnostic_runtime_test.py','csergy_bms_test.py','bus_startup_test.py','time_transaction_test.py','wifi_profiles_test.py','json_number_test.py','pairing_test.py','firmware_catalog_test.py','panel_ota_tls_test.py','weather_test.py')) {
         & 'C:/Users/29538/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -X utf8 "tests/$script" $Gcc
         if($LASTEXITCODE -ne 0){throw "$script failed"}
     }
-    foreach($script in @('legacy_protocol_test.py','ble_capability_test.py')) {
+    foreach($script in @('legacy_protocol_test.py','ble_capability_test.py','modbus_cloud_config_test.py')) {
         & 'C:/Users/29538/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' -X utf8 "tests/$script"
         if($LASTEXITCODE -ne 0){throw "$script failed"}
     }

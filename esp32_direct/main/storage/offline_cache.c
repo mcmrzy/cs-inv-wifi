@@ -41,7 +41,12 @@ static const char *TAG = "OFFLINE_CACHE";
 /* ---- Configuration ---- */
 #define SPIFFS_PARTITION  "cache"
 #define SPIFFS_MOUNT      "/cache"
+#ifndef PANEL_FULL_DIRECT
 #define MAX_BATCH_ITEMS   5        /* flush after this many messages */
+#else
+/* Save each panel heartbeat without first allocating a five-item batch. */
+#define MAX_BATCH_ITEMS   1
+#endif
 #define FLUSH_INTERVAL_MS 10000     /* or after this many ms */
 #define MAX_CACHE_FILES   500       /* max batch files on disk */
 #define TTL_DAYS          7

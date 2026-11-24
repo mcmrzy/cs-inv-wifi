@@ -22,6 +22,9 @@
 #include "arm_poll.h"
 #include "direct_panel.h"
 #include "direct_board_pins.h"
+#include "direct_indicators.h"
+#include "direct_link.h"
+#include "status_led_rmt.h"
 #include "telemetry.h"
 #include "cmd_handler.h"
 #include "mqtt_handler.h"
@@ -128,6 +131,8 @@ static void direct_can_idle_init(void)
 static bool direct_board_pins_valid(void)
 {
     const struct { int gpio; direct_pin_role_t role; } pins[] = {
+        {CONFIG_DIRECT_BUZZ_PIN, DIRECT_PIN_OTHER},
+        {CONFIG_DIRECT_LED_GPIO, DIRECT_PIN_LED_DATA},
         {CONFIG_DIRECT_DSP_TX_PIN, DIRECT_PIN_OTHER},
         {CONFIG_DIRECT_DSP_RX_PIN, DIRECT_PIN_OTHER},
         {CONFIG_DIRECT_BMS_TX_PIN, DIRECT_PIN_OTHER},
@@ -148,12 +153,12 @@ static bool direct_board_pins_valid(void)
         {CONFIG_DIRECT_KEY_ROW_DOWN_PIN, DIRECT_PIN_OTHER},
         {CONFIG_DIRECT_KEY_ESC_PIN, DIRECT_PIN_OTHER},
         {CONFIG_DIRECT_KEY_ENTER_PIN, DIRECT_PIN_OTHER},
-#if CONFIG_DIRECT_KEY_BS818A
-        {CONFIG_DIRECT_KEY_CLOCK_PIN, DIRECT_PIN_KEY_CLOCK},
-#else
         {CONFIG_DIRECT_KEY_CLOCK_PIN, DIRECT_PIN_OTHER},
-#endif
+#if CONFIG_DIRECT_KEY_BS818A
+        {CONFIG_DIRECT_KEY_DATA_PIN, DIRECT_PIN_KEY_DATA},
+#else
         {CONFIG_DIRECT_KEY_DATA_PIN, DIRECT_PIN_OTHER},
+#endif
     };
     for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
         int pin = pins[i].gpio;
@@ -355,6 +360,41 @@ static void setup_wifi(void)
     if(!wifi_sta_connect(ssid, pass))ESP_LOGW(TAG,"WiFi connect request rejected; credentials retained");
 }
 
+static void indicators_tick(void)
+{
+    if (!status_led_is_ready()) return;
+
+    static bool cloud_seen, status_seen;
+    static direct_dsp_status_t last_status;
+    RunParamDef measurement;
+    uint32_t received_ms;
+    const bool status_fresh = direct_dsp_get_status(&last_status);
+    const bool measurement_fresh = direct_dsp_get_measurement(&measurement, &received_ms);
+    status_seen |= status_fresh;
+
+    const bool wifi = wifi_sta_is_connected();
+    const bool cloud = mqtt_is_connected();
+    const bool configured = storage_has_wifi_config() || WIFI_DEFAULT_SSID[0];
+    cloud_seen |= cloud;
+    const panel_led_network_t network = {
+        .enabled = configured,
+        .wifi = wifi,
+        .cloud = cloud,
+        .ble = ble_prov_is_connected(),
+        .provisioning = ble_prov_is_ready() && !ble_prov_is_suspended() &&
+            (atomic_load(&s_prov_busy) || !configured),
+        .reconnecting = configured && (!wifi ||
+            (cloud_seen && !cloud && !mqtt_is_paused_for_local())),
+    };
+    const uint32_t now = now_ms();
+    panel_led_t leds[PANEL_LED_COUNT];
+    uint8_t pixels[PANEL_LED_BYTES];
+    direct_indicators_policy(status_seen ? &last_status : NULL, status_fresh,
+                             measurement_fresh ? &measurement : NULL, &network, now, leds);
+    panel_indicators_grb(leds, now, CONFIG_DIRECT_LED_BRIGHTNESS, pixels);
+    status_led_send(pixels);
+}
+
 static void main_loop_task(void *arg)
 {
     (void)arg;
@@ -424,6 +464,7 @@ static void main_loop_task(void *arg)
 
         /* 周期任务 (ARM 轮询始终运行, 与 MQTT 状态无关) */
         arm_poll_tick();
+        indicators_tick();
         cmd_handler_tick();
         ble_ct_cmd_tick();
         telemetry_tick();
@@ -721,8 +762,8 @@ void app_main(void)
 {
 #if CONFIG_DIRECT_LCD_ISOLATION_TEST
     /* Do not initialize NVS, Wi-Fi, BLE, MQTT, DSP/BMS, keys or normal UI. */
-    direct_buzzer_safe_init();
     ESP_ERROR_CHECK(direct_board_pins_valid() ? ESP_OK : ESP_ERR_INVALID_ARG);
+    direct_buzzer_safe_init();
     direct_can_idle_init();
     direct_panel_prepare_boot();
     esp_log_level_set("*", ESP_LOG_INFO);
@@ -731,9 +772,9 @@ void app_main(void)
     direct_panel_init();
     return;
 #endif
-    direct_buzzer_safe_init();
-    atomic_store(&s_boot_stage,BOOT_BUZZ);
-    if (direct_board_pins_valid()) {
+    const bool board_valid = direct_board_pins_valid();
+    if (board_valid) {
+        direct_buzzer_safe_init();
         direct_can_idle_init();
 #if CONFIG_DIRECT_LCD_NOCS_BOOT
         direct_panel_prepare_boot();
@@ -750,7 +791,7 @@ void app_main(void)
     esp_log_level_set("*", ESP_LOG_WARN);
 #endif
     atomic_store(&s_boot_stage, BOOT_BUZZ);
-    ESP_LOGI(TAG, "GPIO8 buzzer disabled at application entry; USB wait=0ms");
+    ESP_LOGI(TAG, "Buzzer GPIO=%d; USB wait=0ms", CONFIG_DIRECT_BUZZ_PIN);
     /* BLE 配对诊断: 放开 NimBLE 协议栈日志 (需 CONFIG_BT_NIMBLE_LOG_LEVEL=DEBUG 编译) */
     esp_log_level_set("NimBLE", ESP_LOG_WARN);
     debug_log_init();   /* 尽早装钩子, 让后续启动日志也进调试缓冲 */
@@ -773,12 +814,13 @@ void app_main(void)
 
     /* Direct DSP/BMS snapshots retain the L10 telemetry API for migration. */
     atomic_store(&s_boot_stage, BOOT_PINS);
-    if (!direct_board_pins_valid()) {
+    if (!board_valid) {
         atomic_store(&s_boot_stage, BOOT_FAILED);
         ESP_LOGE(TAG, "board pin configuration invalid; abort startup");
         return;
     }
     atomic_store(&s_boot_stage, BOOT_DSP_BMS);
+    (void)status_led_init(CONFIG_DIRECT_LED_GPIO);
     arm_poll_init();
     atomic_store(&s_boot_stage, BOOT_LCD);
     if(!cloud_binding_start())ESP_LOGW(TAG,"Cloud binding state unavailable: configure server public key; local operation continues");

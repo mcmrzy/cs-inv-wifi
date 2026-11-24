@@ -118,7 +118,7 @@ static const char *read_preferences(cJSON *actual)
 static const char *read_diagnostics(cJSON *actual)
 {
     uint32_t stamp = panel_stamp(snapshot, 0x42);
-    bool ok = cJSON_AddStringToObject(actual, "model", panel_profile_name(snapshot->config.profile_override)) &&
+    bool ok = cJSON_AddStringToObject(actual, "model", panel_profile_name(panel_effective_profile(snapshot))) &&
         cJSON_AddStringToObject(actual, "detected", panel_profile_name(snapshot->detected_profile)) &&
         cJSON_AddBoolToObject(actual, "online", panel_online(snapshot)) &&
         add_number(actual, "address", snapshot->config.address) &&

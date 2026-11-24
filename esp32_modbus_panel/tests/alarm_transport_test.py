@@ -105,9 +105,13 @@ int main(void){
 for mode in [0,1]:run('alarm_ownership_'+str(mode),harness,['-DPANEL_FULL_DIRECT='+str(mode)])
 
 bus=(root/'main/panel_bus.c').read_text(encoding='utf-8')
-assert 'poll_block(0x41,4);poll_block(0x46,4)' in bus
+status_poll=bus[bus.index('} else if((int32_t)(now-next_status)>=0)'):bus.index('next_status = uptime(NULL) + 500;')]
+assert 'poll_block(0x41, 4)' in status_poll
+assert status_poll.index('poll_realtime(0x46, 4)')>status_poll.index('poll_block(0x41, 4)')
+assert status_poll.index('poll_realtime(0x46, 4)')>status_poll.index('poll_block(0x41, 1)')
 sample=bus[bus.index('bool panel_bus_alarm_sample('):bus.index('bool panel_bus_submit(')]
-assert 's_shared.valid[slot]' in sample and 'PANEL_FRESH_MS' in sample
+assert 'panel_slot_valid(&s_shared,slot)' in sample and 'PANEL_FRESH_MS' in sample
+assert sample.index('xSemaphoreTake(')<sample.index('.now_ms=uptime(')
 assert 's_shared.scanning' in sample and 's_quiet' in sample
 boot=(root/'full/app_main.c').read_text(encoding='utf-8')
 assert 'full_alarm_init();' in boot and 'full_alarm_tick();' in boot

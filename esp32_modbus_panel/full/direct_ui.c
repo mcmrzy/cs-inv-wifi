@@ -14,7 +14,7 @@ static panel_display_settings_t appearance_display(const direct_ui_state_t *u){
 }
 static const char *const menus[] = {"Running parameters", "Inverter settings", "Power control", "Faults / warnings", "Auxiliary settings", "Service"};
 static const char *const sub4[]={"Appearance","Time set","Device information","Phone connection","Firmware upgrade","Wi-Fi setup","Panel BMS protocol"};
-static const char *const sub5[]={"Advanced inverter settings","Communication settings","Communication diagnostics","Screen test","Restart controller","Reset local UI settings","LCD reset","Manufacturing"};
+static const char *const sub5[]={"Advanced inverter settings","Communication settings","Communication diagnostics","Screen test","Restart controller","Reset local UI settings","LCD reset"};
 static const char *const *const submenus[]={NULL,NULL,NULL,NULL,sub4,sub5};
 static const uint8_t subcounts[]={0,0,0,0,sizeof(sub4)/sizeof(*sub4),sizeof(sub5)/sizeof(*sub5)};
 unsigned direct_ui_submenu_count(unsigned menu){return menu<6?subcounts[menu]:0;}
@@ -58,7 +58,7 @@ static bool ota_cancellable(const direct_ui_data_t *d){
 }
 static bool local_page(direct_ui_page_t p){
  return p==UI_HOME || p==UI_MENU || p==UI_SUBMENU || p==UI_APPEARANCE || p==UI_TIME || p==UI_HELP ||
-  p==UI_FACTORY || p==UI_UPGRADE || p==UI_PRODUCTION || p==UI_PHONE_SETUP || p==UI_BMS || p==UI_WEATHER || p==UI_BMS_PROTOCOL;
+  p==UI_FACTORY || p==UI_UPGRADE || p==UI_PHONE_SETUP || p==UI_BMS || p==UI_WEATHER || p==UI_BMS_PROTOCOL;
 }
 static unsigned month_days(int year,int month){
  static const unsigned days[]={31,28,31,30,31,30,31,31,30,31,30,31};
@@ -66,6 +66,10 @@ static unsigned month_days(int year,int month){
  return days[month-1]+(month==2 && year%4==0 && (year%100!=0 || year%400==0));
 }
 void direct_ui_key_hints(const direct_ui_state_t *u,const direct_ui_data_t *d,const char *h[6]){
+ const char *previous_item=d->language_zh?"上一项":"Prev";
+ const char *next_item=d->language_zh?"下一项":"Next";
+ const char *increase=d->language_zh?"增大":"+";
+ const char *decrease=d->language_zh?"减小":"-";
  for(unsigned i=0;i<6;i++)h[i]="--";
  if(u->pending)return;
  h[0]="Back";
@@ -77,7 +81,7 @@ void direct_ui_key_hints(const direct_ui_state_t *u,const direct_ui_data_t *d,co
   h[5]="Link";break;
  case UI_BMS_PROTOCOL:
   if(d->bms_detection!=PANEL_BMS_DETECT_RUNNING){
-   h[2]="Up";h[3]="Down";h[5]=u->editing?"Save":"Open";
+   h[2]=previous_item;h[3]=next_item;h[5]=u->editing?"Save":"Open";
   }
   break;
  case UI_MENU:h[5]="Open";
@@ -88,13 +92,13 @@ void direct_ui_key_hints(const direct_ui_state_t *u,const direct_ui_data_t *d,co
   break;
  case UI_SUBMENU:
   if(direct_ui_submenu_count(u->menu_selected)>DIRECT_UI_SUBMENU_ROWS){h[1]="Prev";h[4]="Next";}
-  h[2]="Up";h[3]="Down";h[5]="Open";break;
+  h[2]=previous_item;h[3]=next_item;h[5]="Open";break;
  case UI_FACTORY:h[1]="NO";h[4]="YES";h[5]=u->confirm?(d->language_zh?"Confirm":"OK"):(d->language_zh?"Choose":"Select");break;
- case UI_TIME:h[1]="-";h[2]="Up";h[3]="Down";h[4]="+";h[5]="Save";break;
+ case UI_TIME:h[1]=increase;h[2]=previous_item;h[3]=next_item;h[4]=decrease;h[5]="Save";break;
  case UI_APPEARANCE:
-  h[0]="Cancel";h[2]="Up";h[3]="Down";h[5]="Save";
-  if(u->selected==2 || u->selected==4){h[1]="-";h[4]="+";}
-  else if(u->selected<PANEL_APPEARANCE_ROWS-1)h[1]=h[4]="Change";
+  h[0]="Cancel";h[2]=previous_item;h[3]=next_item;h[5]="Save";
+  if(u->selected<2)h[1]=h[4]="Change";
+  else if(u->selected<PANEL_APPEARANCE_ROWS-1){h[1]=increase;h[4]=decrease;}
   break;
  case UI_HELP:if(u->menu_selected==5){h[1]="Prev";h[4]="Next";}break;
  case UI_UPGRADE:
@@ -145,7 +149,8 @@ direct_ui_event_t direct_ui_key(direct_ui_state_t *u,uint8_t key,uint32_t now,co
   else if(key==DIRECT_KEY_ENTER){u->page=UI_BMS_PROTOCOL;u->selected=0;u->editing=false;}
   else{
    unsigned pages=full_battery_pages(d),page=full_battery_page(u,d);
-   u->detail_page=(uint8_t)wrap(page,(key==3 || key==4)?-1:1,pages);
+   u->detail_page=(uint8_t)((key==DIRECT_KEY_UP || key==DIRECT_KEY_LEFT)?
+       (page?page-1:0):(page+1<pages?page+1:page));
   }
   break;
  case UI_BMS_PROTOCOL:
@@ -201,7 +206,6 @@ direct_ui_event_t direct_ui_key(direct_ui_state_t *u,uint8_t key,uint32_t now,co
      e.action=FULL_UI_OPEN_MODBUS;e.index=service[n];break;
     }
     if(n==3){u->page=UI_HELP;u->detail_page=1;}
-    else if(n==7){u->page=UI_PRODUCTION;u->detail_page=0;}
     else{u->page=UI_FACTORY;u->group=n==4?1:n==6?2:0;u->confirm=false;}
    }else{
     u->selected=0;
@@ -234,21 +238,22 @@ direct_ui_event_t direct_ui_key(direct_ui_state_t *u,uint8_t key,uint32_t now,co
   if(key==1){return_settings(u);e.action=UI_ACT_APPEARANCE_CANCEL;}
   else if(key==3 || key==5)u->selected=(uint8_t)wrap(u->selected,key==3?-1:1,PANEL_APPEARANCE_ROWS);
   else if((key==4 || key==6) && u->selected<PANEL_APPEARANCE_ROWS-1){
+   int adjustment=key==DIRECT_KEY_LEFT?1:-1;
    if(u->selected==0)u->appearance_theme=!u->appearance_theme;
    else if(u->selected==1)u->appearance_language=!u->appearance_language;
-   else if(u->selected==2){int b=display.brightness+(key==4?-10:10);uint8_t next=(uint8_t)(b<10?10:b>100?100:b);
+   else if(u->selected==2){int b=display.brightness+adjustment*10;uint8_t next=(uint8_t)(b<10?10:b>100?100:b);
     if(next==display.brightness)note(u,"Value limit reached");
     display.brightness=next;}
-   else if(u->selected==3)display.timeout_index=(uint8_t)wrap(display.timeout_index,key==4?-1:1,PANEL_DISPLAY_TIMEOUT_COUNT);
+   else if(u->selected==3)display.timeout_index=(uint8_t)wrap(display.timeout_index,adjustment,PANEL_DISPLAY_TIMEOUT_COUNT);
    else if(u->selected==4){
     int percent=(u->time_fields[2]*100+127)/255;
-    int value=percent+(key==4?-5:5);
+    int value=percent+adjustment*5;
     if(value<0)value=0;
     if(value>100)value=100;
     u->time_fields[2]=(value*255+50)/100;
     u->time_fields[4]|=PANEL_FEEDBACK_LED_EDIT;
    }else{
-    u->time_fields[3]=(int)wrap((unsigned)u->time_fields[3],key==4?-1:1,PANEL_BEEP_COUNT);
+    u->time_fields[3]=(int)wrap((unsigned)u->time_fields[3],adjustment,PANEL_BEEP_COUNT);
     u->time_fields[4]|=PANEL_FEEDBACK_BEEP_EDIT;
    }
    e.action=UI_ACT_APPEARANCE_PREVIEW;
@@ -265,7 +270,8 @@ direct_ui_event_t direct_ui_key(direct_ui_state_t *u,uint8_t key,uint32_t now,co
   static const int low[]={2020,1,1,0,0,0,-720},high[]={2099,12,31,23,59,59,840};
   if(key==1)return_settings(u);
   else if(key==3 || key==5)u->selected=(uint8_t)wrap(u->selected,key==3?-1:1,7);
-  else if(key==4 || key==6){int i=u->selected,value=u->time_fields[i]+(key==4?-1:1)*(i==6?15:1);
+  else if(key==DIRECT_KEY_LEFT || key==DIRECT_KEY_RIGHT){
+   int i=u->selected,value=u->time_fields[i]+(key==DIRECT_KEY_LEFT?1:-1)*(i==6?15:1);
    int maximum=i==2?(int)month_days(u->time_fields[0],u->time_fields[1]):high[i];
    if(value>=low[i] && value<=maximum){
     u->time_fields[i]=value;
@@ -422,20 +428,9 @@ void direct_ui_build(const direct_ui_state_t *u,const direct_ui_data_t *d,direct
     snprintf(v->rows[6],sizeof(v->rows[6]),zh?"最高单体: %u mV":"Maximum cell: %u mV",max);
     snprintf(v->rows[7],sizeof(v->rows[7]),zh?"单体压差: %u mV":"Cell difference: %u mV",max-min);
    }else snprintf(v->rows[5],sizeof(v->rows[5]),"%s",zh?"单体电压: --":"Cell voltages: --");
-   snprintf(v->rows[8],sizeof(v->rows[8]),"%s",zh?"左右键查看单体电压":"Left / right for cell voltages");
+   snprintf(v->rows[8],sizeof(v->rows[8]),"%s",zh?"方向键查看单体电压":"Use arrows for cell voltages");
   }
   }
- }else if(u->page==UI_PRODUCTION){
-  snprintf(v->title,sizeof(v->title),"Manufacturing");
-  snprintf(v->rows[0],sizeof(v->rows[0]),"%s",d->factory_ready?"Identity verified":"Awaiting provisioning");
-  snprintf(v->rows[1],sizeof(v->rows[1]),"%s",d->model?d->model:"CS-MB-PANEL");
-  snprintf(v->rows[2],sizeof(v->rows[2]),"SN: %s",d->sn&&d->sn[0]?d->sn:"--");
-  snprintf(v->rows[3],sizeof(v->rows[3]),"Hardware: %s",d->hardware?d->hardware:"UNSET");
-  snprintf(v->rows[4],sizeof(v->rows[4]),"%s",d->factory_locked?"Identity locked":"Identity unlocked");
-  snprintf(v->rows[5],sizeof(v->rows[5]),"%s",d->factory_write_enabled?"USB provisioning enabled":"USB inspection only");
-  snprintf(v->rows[6],sizeof(v->rows[6]),"Keys: %02lX / 3F",(unsigned long)d->factory_keys);
-  snprintf(v->rows[7],sizeof(v->rows[7]),"Use USB service for provisioning");
-  snprintf(v->footer,sizeof(v->footer),"ESC Back");
  }else if(u->page==UI_UPGRADE){
   snprintf(v->title,sizeof(v->title),"Firmware upgrade");
   static const char *const states[]={"Ready","Accepted","Downloading","Receiving","Verifying","Installing","Cancelling","Cancelled","Restarting","Succeeded","Failed","Rolled back"};
@@ -474,6 +469,7 @@ void direct_ui_build(const direct_ui_state_t *u,const direct_ui_data_t *d,direct
   snprintf(v->rows[2],sizeof(v->rows[2]),"Firmware: %s",d->version?d->version:"");snprintf(v->rows[3],sizeof(v->rows[3]),"SN: %s",d->sn?d->sn:"--");
   snprintf(v->rows[4],sizeof(v->rows[4]),"Wi-Fi: %s",d->wifi_connected?"Connected":"Disconnected");
   snprintf(v->rows[5],sizeof(v->rows[5]),"Cloud: %s",d->network_online?"Connected":"Disconnected");
+  snprintf(v->rows[6],sizeof(v->rows[6]),"%s",d->language_zh?"字体: MiSans":"Font: MiSans");
  }else if(u->page==UI_TIME){
   const char *names[]={"Year","Month","Day","Hour","Minute","Second","Time zone"};snprintf(v->title,sizeof(v->title),"Time set");
   for(unsigned r=0;r<7;r++)snprintf(v->rows[r],sizeof(v->rows[r]),"%s: %d",names[r],u->time_fields[r]);

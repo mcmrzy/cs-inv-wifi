@@ -21,6 +21,7 @@ code=r'''
 #include <stdio.h>
 #include <string.h>
 #define MQTT_RX_MAX 2048
+#define ESP_LOGD(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
 #define ESP_LOGI(...) ((void)0)
 #define ESP_LOGW(...) ((void)0)
@@ -50,6 +51,14 @@ int main(void){
  e.topic=topic;e.topic_len=(int)strlen(topic);e.data_len=2;e.total_data_len=4;e.current_data_offset=0;e.data="ab";e.retain=true;
  receive(&e);e.current_data_offset=2;e.data="cd";e.retain=false;receive(&e);
  assert(command_deliveries==1 && command_retained);
+ char large_payload[1500];memset(large_payload,'a',sizeof(large_payload));
+ large_payload[sizeof(large_payload)-1]='z';
+ e.total_data_len=sizeof(large_payload);e.current_data_offset=0;e.data_len=1000;e.data=large_payload;
+ receive(&e);assert(command_deliveries==1);
+ e.data=large_payload+1000;e.data_len=500;e.current_data_offset=1000;e.topic=NULL;e.topic_len=0;
+ receive(&e);
+ assert(command_deliveries==2 && !command_retained && !g_rx_expected);
+ assert(!memcmp(g_rx_payload,large_payload,sizeof(large_payload)) && g_rx_payload[sizeof(large_payload)]=='\0');
  puts("PASS real MQTT fragment delivery: retained OTA rejected, first-fragment flag retained, ordinary new commands allowed, receive state reset");
 }
 '''

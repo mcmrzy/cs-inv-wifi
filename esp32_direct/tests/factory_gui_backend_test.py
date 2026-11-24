@@ -39,6 +39,17 @@ class Test(unittest.TestCase):
  def test_worker_command_handles_frozen_executable(self):
   with patch.object(sys,'frozen',True,create=True),patch.object(sys,'executable','C:/工位/工具.exe'):
    self.assertEqual(b.worker_command(Path('C:/工位/job.json')),['C:/工位/工具.exe','--worker',str(Path('C:/工位/job.json'))])
+ def test_panel_summary_keeps_usb_identity_separate(self):
+  report={'model':'CS-MB-PANEL','inverter':{'online':True,'automatic':True,'active_model':'3KU',
+   'candidate':'3KU','id38':0,'id39':0x50,'address':1,'baud':9600,'parity':0,'read_errors':4}}
+  self.assertIn('自动 · 3KU',b.inverter_summary(report))
+  self.assertIn('0x0000 / 0x0050',b.inverter_summary(report))
+  self.assertIn('9600 8N1',b.inverter_summary(report))
+  self.assertIn('固件未提供',b.inverter_summary({'model':'CS-MB-PANEL'}))
+ def test_manifest_must_match_usb_product(self):
+  self.assertEqual(b.validate_flash_model('CS-MB-PANEL',{'model':'CS-MB-PANEL'}),'CS-MB-PANEL')
+  with self.assertRaisesRegex(ValueError,'固件型号与当前 USB 设备不一致'):
+   b.validate_flash_model('CS-MB-PANEL',{'model':'CS-L10-6K2'})
  def test_flash_hash_failure_before_packaged_esptool_access(self):
   with tempfile.TemporaryDirectory() as folder:
    root=Path(folder);hashes={}

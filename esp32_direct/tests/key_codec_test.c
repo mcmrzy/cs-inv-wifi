@@ -8,7 +8,13 @@ int main(void)
     assert(direct_key_scan_interval(DIRECT_KEY_NO_FRAME)==20);
     assert(direct_key_scan_interval(DIRECT_KEY_BAD_FRAME)==20);
     assert(direct_key_scan_interval(DIRECT_KEY_NONE)==20);
+#if defined(CONFIG_DIRECT_KEY_NEW_LAYOUT) && CONFIG_DIRECT_KEY_NEW_LAYOUT
+    const uint8_t values[] = {0xdf, 0xfe, 0xf7, 0xef, 0xfb, 0xfd, 0xde};
+    assert(direct_key_decode(0xa1ee) == DIRECT_KEY_BAD_FRAME);
+#else
     const uint8_t values[] = {0xef, 0xfe, 0xdf, 0xf7, 0xfb, 0xfd, 0xee};
+    assert(direct_key_decode(0xa1de) == DIRECT_KEY_BAD_FRAME);
+#endif
     for (unsigned i = 0; i < 7; ++i)
         assert(direct_key_decode(0xa100U | values[i]) == (int)i + 1);
     assert(direct_key_decode(0x9100) == DIRECT_KEY_BAD_FRAME);

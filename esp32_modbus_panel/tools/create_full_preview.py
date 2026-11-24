@@ -25,18 +25,20 @@ fixtures = [
  ('首页 · 告警入口突出显示','lvgl_home_alarm.ppm'),
  ('参数 · 编辑前显示限制','lvgl_setting_info.ppm'),
  ('显示设置 · 保存失败可直接重试','lvgl_appearance_retry.ppm'),
- ('逆变器设置 / 参数分类','lvgl_settings_groups.ppm'),
+ ('逆变器设置 / 九个分类同屏','lvgl_settings_groups.ppm'),
  ('运行参数 / 图示目录','lvgl_detail_groups.ppm'),
  ('运行参数 / 电网仪表','lvgl_detail_dashboard.ppm'),
  ('开关机 / 英文菜单','lvgl_power_en.ppm'),
  ('电压编辑 / 英文对照','lvgl_voltage_editor_en.ppm'),
- ('逆变器设置 / 系统与并机','lvgl_settings_groups_more.ppm'),
- ('逆变器设置 / 英文分类','lvgl_settings_groups_more_en.ppm'),
+ ('逆变器设置 / 英文分类','lvgl_settings_groups_en.ppm'),
  ('输出电压 / 当前与目标并排','lvgl_output_editor.ppm'),
  ('0A 小功率 / 保留实测 3W','lvgl_home_zero_amp.ppm'),
  ('参数编辑 / 浅色对齐','lvgl_voltage_editor_light.ppm'),
- ('设置分类 / 浅色与英文','lvgl_settings_groups_more_light.ppm'),
+ ('设置分类 / 浅色与英文','lvgl_settings_groups_light.ppm'),
  ('长沙 / 七天天气','lvgl_weather_7days.ppm'),
+ ('运行数据 / 电池状态 4/8','lvgl_detail_battery_status.ppm'),
+ ('运行数据 / 温度监控','lvgl_detail_temperature.ppm'),
+ ('运行数据 / 运行模式','lvgl_detail_modes.ppm'),
 ]
 font_path=root.parent/'esp32_direct/tests/font-source/noto/NotoSansCJKsc-Medium.otf'
 font=ImageFont.truetype(str(font_path),16)
@@ -51,7 +53,7 @@ for i,(title,filename) in enumerate(fixtures):
 canvas.save(root/'tmp/full_screen_preview.png')
 review=Image.new('RGB',(1020,902),'#e9edf2');review_draw=ImageDraw.Draw(review)
 review_draw.text((20,12),f'CS-MB-PANEL {version} 界面设计 · 固件渲染与示例数据',font=large,fill='#182b45')
-for i,index in enumerate([0,21,23,4,5,25,26,30,32]):
+for i,index in enumerate([3,21,22,26,27,31,0,4,5]):
  title,filename=fixtures[index];x=10+i%3*340;y=62+i//3*280
  review.paste(Image.open(root/'tmp'/filename).convert('RGB'),(x,y))
  review_draw.text((x,y+247),title,font=font,fill='#182b45')

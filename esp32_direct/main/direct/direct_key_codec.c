@@ -1,4 +1,7 @@
 #include "direct_key_codec.h"
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#endif
 
 uint32_t direct_key_scan_interval(int sample)
 {
@@ -10,8 +13,9 @@ int direct_key_decode(uint16_t frame)
     if ((frame & 0xf000U) != 0xa000U) return DIRECT_KEY_BAD_FRAME;
     if ((frame & 0x0f00U) == 0) return DIRECT_KEY_NONE;
     switch ((uint8_t)frame) {
-#if defined(PANEL_FULL_DIRECT) && PANEL_FULL_DIRECT
-    /* Modbus board KEY1..KEY6: ENTER, RIGHT, DOWN, UP, LEFT, ESC. */
+#if (defined(PANEL_FULL_DIRECT) && PANEL_FULL_DIRECT) || \
+    (defined(CONFIG_DIRECT_KEY_NEW_LAYOUT) && CONFIG_DIRECT_KEY_NEW_LAYOUT)
+    /* New L10 and Modbus boards, KEY1..KEY6: ENTER, RIGHT, DOWN, UP, LEFT, ESC. */
     case 0xfe: return DIRECT_KEY_ENTER;
     case 0xfd: return DIRECT_KEY_RIGHT;
     case 0xfb: return DIRECT_KEY_DOWN;

@@ -6,7 +6,7 @@
 
 #ifndef PANEL_USE_REAL_MODEL
 bool panel_value(const panel_snapshot_t *s,uint16_t a,uint16_t *v){
-    if(!s || a>=PANEL_REG_COUNT || !s->valid[panel_slot(a)])return false;
+    if(a>=PANEL_REG_COUNT || !panel_slot_valid(s,panel_slot(a)))return false;
     if(v)*v=s->values[panel_slot(a)];
     return true;
 }
@@ -18,7 +18,7 @@ static size_t finish(uint8_t *p,size_t n){uint16_t c=panel_mb_crc(p,n);p[n]=(uin
 static bool feed(panel_mb_stream_t *s,const uint8_t *p,size_t n,uint8_t f,uint16_t a,uint16_t c,panel_mb_reply_t *r){
     bool done=false;for(size_t i=0;i<n;i++)done=panel_mb_feed(s,p[i],1,f,a,c,r)||done;return done;
 }
-static panel_snapshot_t snap(void){panel_snapshot_t s={0};s.now_ms=100;s.config.address=1;s.config.profile_override=PANEL_PROFILE_6KU;s.valid[panel_slot(0x42)]=true;s.values[panel_slot(0x42)]=3;s.updated_ms[panel_slot(0x42)]=100;s.valid[panel_slot(0x150)]=true;s.values[panel_slot(0x150)]=4;s.updated_ms[panel_slot(0x150)]=100;return s;}
+static panel_snapshot_t snap(void){panel_snapshot_t s={0};s.now_ms=100;s.config.address=1;s.config.profile_override=PANEL_PROFILE_6KU;panel_store(&s,0x42,3,100);panel_store(&s,0x150,4,100);return s;}
 static void protocol(void){
     /* Exact CRC-valid status reply captured on the user's inverted TTL link. */
     panel_mb_stream_t observed={0};panel_mb_reply_t status={0};
@@ -64,7 +64,7 @@ static void catalog(void){
     s.config.profile_override=PANEL_PROFILE_12KU;assert(!panel_setting_allowed(&s,0x4100,0));assert(!panel_setting_allowed(&s,0x4106,0));assert(!panel_setting_allowed(&s,0x411F,0xFFF2));
     s.config.profile_override=PANEL_PROFILE_4KL;assert(!panel_setting_allowed(&s,0x4107,8));assert(!panel_setting_allowed(&s,0x4101,0));
     s.config.profile_override=PANEL_PROFILE_UNKNOWN;assert(!panel_setting_allowed(&s,0x4108,240));assert(!panel_setting_allowed(&s,0x4107,0));assert(panel_setting_allowed(&s,0x4103,1));assert(panel_setting_allowed(&s,0x4123,2));
-    s=snap();s.valid[panel_slot(0x150)]=false;assert(!panel_setting_allowed(&s,0x410A,550));assert(!panel_setting_allowed(&s,0x4107,4));s=snap();s.now_ms=5101;assert(!panel_setting_allowed(&s,0x4123,2));s=snap();s.values[panel_slot(0x42)]=7;assert(!panel_setting_allowed(&s,0x4103,1));
+    s=snap();panel_invalidate(&s,0x150);assert(!panel_setting_allowed(&s,0x410A,550));assert(!panel_setting_allowed(&s,0x4107,4));s=snap();s.now_ms=5101;assert(!panel_setting_allowed(&s,0x4123,2));s=snap();panel_store(&s,0x42,7,100);assert(!panel_setting_allowed(&s,0x4103,1));
     s=snap();assert(panel_setting_step(&s,0x4105,2,1,&n)&&n==10);assert(panel_setting_step(&s,0x4119,900,1,&n)&&n==0xFFF1);assert(panel_setting_step(&s,0x4119,0xFFF1,1,&n)&&n==0xFFF2);assert(!panel_setting_step(&s,0x4119,0xFFF2,1,&n));
     assert(!panel_setting_allowed(&s,0x4120,0xFFFF));assert(panel_setting_allowed(&s,0x4120,0xFFF1));
     panel_setting_format(&s,0x4106,12,b,sizeof b);assert(strstr(b,"120")!=NULL);panel_setting_format(&s,0x4108,476,b,sizeof b);assert(strstr(b,"47.6")!=NULL);
@@ -124,7 +124,7 @@ static void model_settings(void){
     assert(panel_setting_step(&s,0x418d,55,1,&next) && next==0x8001);
     assert(panel_setting_step(&s,0x418d,0x8001,-1,&next) && next==55);
     assert(!panel_setting_find(0x419e) && !panel_setting_find(0x41a0));
-    const uint16_t retired[]={0x11,0x20,0x70};
+    const uint16_t retired[]={0x20,0x70};
     for(unsigned i=0;i<sizeof(retired)/sizeof(retired[0]);i++){
         s.detected_profile=panel_detect_profile(0,retired[i]);
         assert(s.detected_profile!=PANEL_PROFILE_UNKNOWN && !panel_profile_supported(s.detected_profile));
@@ -132,7 +132,76 @@ static void model_settings(void){
         assert(panel_setting_access(&s,0x4101)==PANEL_ACCESS_UNSUPPORTED);
     }
 }
-int main(void){protocol();catalog();model_settings();
+static void automatic_model(void)
+{
+    panel_snapshot_t s=snap();
+    s.config.profile_override=PANEL_PROFILE_UNKNOWN;
+    assert(!panel_observe_identity(&s,0,0x50,100));
+    assert(panel_effective_profile(&s)==PANEL_PROFILE_UNKNOWN && !panel_setting_allowed(&s,0x4124,1));
+    assert(panel_observe_identity(&s,0,0x50,200));
+    assert(s.config.profile_override==PANEL_PROFILE_UNKNOWN && panel_effective_profile(&s)==PANEL_PROFILE_3KU);
+    assert(panel_setting_allowed(&s,0x4124,1) && !panel_setting_allowed(&s,0x4102,3));
+    assert(!panel_observe_identity(&s,0,0x50,300));
+    assert(panel_observe_identity(&s,0,0x11,400));
+    assert(panel_effective_profile(&s)==PANEL_PROFILE_UNKNOWN);
+    assert(panel_observe_identity(&s,0,0x11,500));
+    assert(panel_effective_profile(&s)==PANEL_PROFILE_6KU_PARALLEL);
+    s.now_ms=5501;
+    assert(panel_effective_profile(&s)==PANEL_PROFILE_UNKNOWN);
+    s.config.profile_override=PANEL_PROFILE_6KU;
+    assert(panel_effective_profile(&s)==PANEL_PROFILE_6KU);
+    panel_config_t config={.address=2,.baud=9600};
+    panel_device_context_reset(&s,&config);
+    assert(panel_effective_profile(&s)==PANEL_PROFILE_UNKNOWN);
+}
+static void six_ku_family_settings(void)
+{
+    panel_snapshot_t s=snap();
+    s.profile_locked=true;s.detected_profile=PANEL_PROFILE_6KU_PARALLEL;
+    panel_store(&s,0x38,0,s.now_ms);panel_store(&s,0x39,0x11,s.now_ms);
+    assert(panel_profile_supported(PANEL_PROFILE_6KU_PARALLEL));
+    assert(panel_detect_profile(0x10,0x11)==PANEL_PROFILE_6KU_PARALLEL);
+    assert(panel_detect_profile(0x11,0x10)==PANEL_PROFILE_6KU_PARALLEL);
+    assert(panel_detect_profile(0x10,0x20)==PANEL_PROFILE_UNKNOWN);
+    assert(panel_setting_access(&s,0x4100)==PANEL_ACCESS_EDITABLE);
+    assert(panel_setting_access(&s,0x4101)==PANEL_ACCESS_EDITABLE);
+    assert(panel_setting_allowed(&s,0x4100,2) && panel_setting_allowed(&s,0x4101,1));
+    assert(panel_setting_allowed(&s,0x4123,1) && panel_setting_allowed(&s,0x4123,2));
+    s.config.profile_override=PANEL_PROFILE_6KU_PARALLEL;
+    assert(panel_setting_allowed(&s,0x4142,24) && !panel_setting_allowed(&s,0x4142,25));
+    assert(panel_setting_allowed(&s,0x4105,10) && !panel_setting_allowed(&s,0x4105,2));
+    assert(panel_setting_allowed(&s,0x4106,1) && !panel_setting_allowed(&s,0x4106,0));
+    assert(panel_setting_allowed(&s,0x4166,1) && !panel_setting_allowed(&s,0x4166,2));
+    const uint16_t parallel_settings[]={0x4110,0x4111,0x4153};
+    for(unsigned i=0;i<sizeof(parallel_settings)/sizeof(parallel_settings[0]);i++)
+        assert(panel_setting_access(&s,parallel_settings[i])==PANEL_ACCESS_STANDBY);
+    panel_store(&s,0x42,2,s.now_ms);
+    assert(panel_setting_allowed(&s,0x4110,4) && !panel_setting_allowed(&s,0x4110,5));
+    assert(panel_setting_allowed(&s,0x4111,8) && !panel_setting_allowed(&s,0x4111,9));
+    assert(panel_setting_allowed(&s,0x4111,0xfff1));
+    assert(panel_setting_allowed(&s,0x4153,1) && !panel_setting_allowed(&s,0x4153,2));
+    uint16_t next;
+    assert(panel_setting_step(&s,0x4111,8,1,&next) && next==0xfff1);
+    assert(panel_setting_step(&s,0x4111,0xfff1,-1,&next) && next==8);
+    for(unsigned i=0;i<sizeof(parallel_settings)/sizeof(parallel_settings[0]);i++)
+        assert(panel_setting_access(&s,parallel_settings[i])==PANEL_ACCESS_EDITABLE);
+    s.config.profile_override=PANEL_PROFILE_6KU;
+    for(unsigned i=0;i<sizeof(parallel_settings)/sizeof(parallel_settings[0]);i++)
+        assert(panel_setting_access(&s,parallel_settings[i])==PANEL_ACCESS_UNSUPPORTED);
+    s.config.profile_override=PANEL_PROFILE_12KU;s.detected_profile=PANEL_PROFILE_12KU;
+    assert(panel_setting_allowed(&s,0x4111,5) && !panel_setting_allowed(&s,0x4111,6));
+    s.config.profile_override=PANEL_PROFILE_6KU_PARALLEL;s.detected_profile=PANEL_PROFILE_6KU_PARALLEL;
+    panel_store(&s,0x42,3,s.now_ms);
+    panel_store(&s,0x150,2,s.now_ms);
+    assert(panel_setting_allowed(&s,0x410b,600) && !panel_setting_allowed(&s,0x410b,601));
+    s.config.profile_override=PANEL_PROFILE_6KU;
+    assert(!panel_setting_allowed(&s,0x410b,600));
+    panel_store(&s,0x42,7,s.now_ms);
+    assert(!panel_setting_allowed(&s,0x4100,2));
+    panel_store(&s,0x42,3,s.now_ms);s.detected_profile=PANEL_PROFILE_3KU;
+    assert(!panel_setting_allowed(&s,0x4100,2));
+}
+int main(void){protocol();catalog();model_settings();automatic_model();six_ku_family_settings();
     uint16_t value;
     assert(panel_setting_decode_readback(0x4101,5000,&value) && value==0);
     assert(panel_setting_decode_readback(0x4101,6000,&value) && value==1);

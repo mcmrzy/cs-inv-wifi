@@ -16,7 +16,7 @@ test=r'''
 #include <string.h>
 typedef int esp_err_t;
 typedef int nvs_handle_t;
-typedef struct {panel_command_t command;uint32_t sequence;} queued_command_t;
+typedef struct {panel_command_t command;uint32_t sequence,context;} queued_command_t;
 #define CONFIG_PANEL_SLAVE_ADDRESS 1
 #define CONFIG_PANEL_BAUD 9600
 #define CONFIG_PANEL_FACTORY_PROFILE 4

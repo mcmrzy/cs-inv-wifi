@@ -1,5 +1,6 @@
 #include "panel_ui.h"
 #include "panel_catalog.h"
+#include "panel_key_labels.h"
 #include "direct_key_codec.h"
 #include <assert.h>
 #include <stdio.h>
@@ -12,7 +13,7 @@ static panel_snapshot_t sample(void)
     s.config = (panel_config_t){1,9600,0,PANEL_PROFILE_6KU};
     const uint16_t regs[] = {0x42,0x50,0x53,0x80,0x81,0x84,0x5b,0xa0,0x150,0x140};
     for (size_t i=0;i<sizeof(regs)/sizeof(regs[0]);i++) {
-        s.valid[panel_slot(regs[i])]=true;s.updated_ms[panel_slot(regs[i])]=1000;
+        assert(panel_store(&s,regs[i],0,1000));
     }
     s.values[panel_slot(0x42)]=3;s.values[panel_slot(0x150)]=4;
     return s;
@@ -32,8 +33,13 @@ int main(void)
     for(unsigned i=0;i<3;i++)assert(!press(&u,&s,DIRECT_KEY_DOWN,&c));
     assert(!press(&u,&s,DIRECT_KEY_ENTER,&c));
     assert(u.page==PANEL_PAGE_POWER);
+    panel_ui_view(&u,&s,&a);
+    assert(!a.power_action && a.key_labels[KEY_ENTER]==KEY_REVIEW);
+    assert(!press(&u,&s,DIRECT_KEY_RIGHT,&c) && u.selected==0);
     assert(!press(&u,&s,DIRECT_KEY_ENTER,&c));
     assert(u.review);
+    panel_ui_view(&u,&s,&a);
+    assert(a.power_action && a.key_labels[KEY_ENTER]==KEY_SEND && a.key_labels[KEY_BACK]==KEY_CANCEL);
     assert(press(&u,&s,DIRECT_KEY_ENTER,&c));
     assert(c.type==PANEL_CMD_WRITE && c.address==0x4123 && c.value==1);
     assert(!press(&u,&s,DIRECT_KEY_ENTER,&c));
@@ -63,15 +69,16 @@ int main(void)
     assert(memcmp(&a,&b,sizeof(a))==0);
     s.now_ms=10000;assert(panel_ui_view(&u,&s,&b));
     assert(memcmp(&a,&b,sizeof(a))!=0);
-    s.valid[panel_slot(0x50)]=false;panel_ui_view(&u,&s,&a);
+    panel_invalidate(&s,0x50);panel_ui_view(&u,&s,&a);
     assert(strstr(a.rows[1],"--")!=NULL);
     /* Communication address cannot wrap to the Modbus broadcast address. */
     panel_ui_init(&u);s=sample();u.page=PANEL_PAGE_COMM;
     assert(!press(&u,&s,DIRECT_KEY_ENTER,&c));
     assert(u.editing);
-    assert(!press(&u,&s,DIRECT_KEY_LEFT,&c));
+    assert(!press(&u,&s,DIRECT_KEY_LEFT,&c) && u.comm_draft.address==2);
+    assert(!press(&u,&s,DIRECT_KEY_RIGHT,&c));
     assert(u.comm_draft.address==1);
-    for(unsigned i=0;i<300;i++)assert(!press(&u,&s,DIRECT_KEY_RIGHT,&c));
+    for(unsigned i=0;i<300;i++)assert(!press(&u,&s,DIRECT_KEY_LEFT,&c));
     assert(u.comm_draft.address==247);
     assert(!press(&u,&s,DIRECT_KEY_BACK,&c));
     assert(!u.editing && !u.pending);
@@ -111,25 +118,25 @@ int main(void)
     while(absent<panel_setting_count() && panel_setting(absent)->read_address!=0xffff)absent++;
     assert(absent<panel_setting_count());u.selected=(uint16_t)absent;
     panel_ui_view(&u,&s,&a);
-    assert(strstr(a.subtitle,"正在读取")!=NULL);
+    assert(a.setting_list && strstr(a.values[a.selected],"正在读取")!=NULL);
     assert(!press(&u,&s,DIRECT_KEY_ENTER,&c) && u.editing);
     panel_ui_view(&u,&s,&a);
     assert(!strcmp(a.values[1],"正在读取") && !strcmp(a.values[2],"--"));
     press(&u,&s,DIRECT_KEY_BACK,&c);
     u.selected=(uint16_t)(panel_setting_find(0x4101)-panel_setting(0));
     panel_ui_view(&u,&s,&a);
-    assert(strstr(a.subtitle,"正在读取")!=NULL);
+    assert(strstr(a.values[a.selected],"正在读取")!=NULL);
     panel_invalidate(&s,0x42);
     panel_ui_view(&u,&s,&a);
-    assert(strstr(a.subtitle,"通信已断开")!=NULL);
+    assert(!strcmp(a.values[a.selected],"已断联"));
     panel_store(&s,0x42,3,s.now_ms);
     panel_store(&s,0x02a1,5000,s.now_ms);
     panel_ui_view(&u,&s,&a);
-    assert(strstr(a.subtitle,"50 Hz")!=NULL);
+    assert(strstr(a.subtitle,"在线")!=NULL && !strcmp(a.values[a.selected],"50 Hz"));
     u.selected=(uint16_t)(panel_setting_find(0x4107)-panel_setting(0));
     s.config.profile_override=PANEL_PROFILE_4KL;
     panel_ui_view(&u,&s,&a);
-    assert(strstr(a.subtitle,"正在读取")!=NULL);
+    assert(strstr(a.values[a.selected],"正在读取")!=NULL);
     u.have_result=true;u.result_address=0x4100;u.result_value=2;
     u.last_result=PANEL_WRITE_PROTOCOL_ACCEPTED;
     panel_ui_view(&u,&s,&a);
@@ -153,7 +160,10 @@ int main(void)
     u.result_address=0x4105;u.result_value=20;u.result_profile=PANEL_PROFILE_6KU;
     s.setting_reads[0].state=PANEL_SETTING_VALUE;s.setting_reads[0].stamp=s.now_ms-PANEL_FRESH_MS-1U;
     panel_ui_view(&u,&s,&a);
-    assert(a.result && (a.stale_rows&2) && strstr(a.footer,"关闭") && !strstr(a.footer,"刷新"));
+    assert(a.result && !a.stale_rows && !a.values[1][0] && strstr(a.footer,"关闭") && !strstr(a.footer,"刷新"));
+    u.have_result=false;s.now_ms+=15000;panel_store(&s,0x42,3,s.now_ms);
+    panel_ui_view(&u,&s,&a);
+    assert(!strcmp(a.values[0],"20 A") && !(a.stale_rows&1) && !strstr(a.footer,"刷新"));
     /* A diagnostic model candidate is not permission to use model voltage limits. */
     panel_ui_init(&u);u.page=PANEL_PAGE_SETTINGS;s=sample();
     s.config.profile_override=PANEL_PROFILE_UNKNOWN;s.detected_profile=PANEL_PROFILE_6KU;
@@ -180,8 +190,72 @@ int main(void)
     u.pending=true;u.pending_sequence=43;s.command_sequence=44;s.command_busy=false;
     panel_result_record(&s,44,PANEL_WRITE_CONFIRMED,0);
     panel_ui_sync(&u,&s);assert(u.pending);
+    const uint8_t directions[]={DIRECT_KEY_LEFT,DIRECT_KEY_UP,DIRECT_KEY_DOWN,DIRECT_KEY_RIGHT};
+    const uint8_t group_keys[]={KEY_RETURN,KEY_ARROW_LEFT,KEY_UPWARD,KEY_DOWNWARD,KEY_ARROW_RIGHT,KEY_OPEN};
+    const uint8_t detail_keys[]={KEY_RETURN,KEY_PREV,KEY_PREV,KEY_NEXT,KEY_NEXT,KEY_INDEX};
+    const uint8_t detail_neighbors[PANEL_DETAIL_PAGES][4]={
+        {0,0,2,1},{0,1,3,1},{2,0,4,3},{2,1,5,3},
+        {4,2,6,5},{4,3,7,5},{6,4,6,7},{6,5,7,7},
+    };
+    panel_ui_init(&u);s=sample();u.page=PANEL_PAGE_MENU;
+    assert(!press(&u,&s,DIRECT_KEY_ENTER,&c) && u.page==PANEL_PAGE_DETAIL_GROUPS);
+    assert(panel_ui_view(&u,&s,&a) && !memcmp(a.key_labels,group_keys,sizeof(group_keys)));
+    for(unsigned group=0;group<PANEL_DETAIL_PAGES;group++){
+        for(unsigned key=0;key<sizeof(directions);key++){
+            u.selected=group;
+            assert(!press(&u,&s,directions[key],&c) && u.selected==detail_neighbors[group][key]);
+        }
+        u.selected=group;
+        assert(!press(&u,&s,DIRECT_KEY_ENTER,&c) && u.page==PANEL_PAGE_DETAILS && u.detail==group);
+        assert(panel_ui_view(&u,&s,&a) && !memcmp(a.key_labels,detail_keys,sizeof(detail_keys)));
+        for(unsigned key=0;key<sizeof(directions);key++){
+            u.detail=group;
+            unsigned expected=key<2?(group?group-1:0):(group+1<PANEL_DETAIL_PAGES?group+1:group);
+            assert(!press(&u,&s,directions[key],&c) && u.detail==expected);
+        }
+        unsigned detail=u.detail;
+        assert(!press(&u,&s,DIRECT_KEY_BACK,&c) && u.page==PANEL_PAGE_DETAIL_GROUPS && u.selected==detail);
+    }
+    panel_ui_init(&u);s=sample();u.page=PANEL_PAGE_ALARMS;
+    for(unsigned reg=0x46;reg<0x4a;reg++)panel_store(&s,reg,0xffff,s.now_ms);
+    const uint8_t page_keys[]={KEY_RETURN,KEY_PREV,KEY_PREV,KEY_NEXT,KEY_NEXT,KEY_NONE};
+    u.selected=11;
+    assert(panel_ui_view(&u,&s,&a) && strstr(a.title,"12/13") &&
+           !memcmp(a.key_labels,page_keys,sizeof(page_keys)));
+    assert(!press(&u,&s,DIRECT_KEY_UP,&c) && u.selected==10);
+    assert(!press(&u,&s,DIRECT_KEY_DOWN,&c) && u.selected==11);
+    assert(!press(&u,&s,DIRECT_KEY_RIGHT,&c) && u.selected==12);
+    assert(!press(&u,&s,DIRECT_KEY_DOWN,&c) && u.selected==12);
+    assert(!press(&u,&s,DIRECT_KEY_LEFT,&c) && u.selected==11);
+    for(unsigned reg=0x46;reg<0x4a;reg++)panel_store(&s,reg,0x00ff,s.now_ms);
+    assert(panel_ui_view(&u,&s,&a) && strstr(a.title,"7/7"));
+    assert(!press(&u,&s,DIRECT_KEY_UP,&c) && u.selected==5);
+    panel_ui_init(&u);s=sample();u.page=PANEL_PAGE_DIAG;
+    assert(panel_ui_view(&u,&s,&a) && !memcmp(a.key_labels,page_keys,sizeof(page_keys)));
+    assert(!press(&u,&s,DIRECT_KEY_DOWN,&c) && u.detail==1);
+    assert(!press(&u,&s,DIRECT_KEY_RIGHT,&c) && u.detail==1);
+    assert(!press(&u,&s,DIRECT_KEY_UP,&c) && u.detail==0);
     panel_ui_init(&u);s=sample();u.page=PANEL_PAGE_MENU;u.selected=2;
     assert(!press(&u,&s,DIRECT_KEY_ENTER,&c) && u.page==PANEL_PAGE_SETTING_GROUPS);
+    assert(panel_ui_view(&u,&s,&a) && !strcmp(a.title,"逆变器设置"));
+    assert(!memcmp(a.key_labels,group_keys,sizeof(group_keys)));
+    const uint8_t neighbors[PANEL_SETTING_GROUPS][4]={
+        {0,0,3,1},{0,1,4,2},{1,2,5,2},
+        {3,0,6,4},{3,1,7,5},{4,2,8,5},
+        {6,3,6,7},{6,4,7,8},{7,5,8,8},
+    };
+    for(unsigned group=0;group<PANEL_SETTING_GROUPS;group++){
+        for(unsigned key=0;key<sizeof(directions);key++){
+            u.selected=group;
+            assert(!press(&u,&s,directions[key],&c) && u.selected==neighbors[group][key]);
+        }
+        u.selected=group;
+        assert(!press(&u,&s,DIRECT_KEY_ENTER,&c));
+        assert(u.page==PANEL_PAGE_SETTINGS && u.setting_group==group);
+        assert(u.selected==panel_setting_group_index(group,0));
+        assert(!press(&u,&s,DIRECT_KEY_BACK,&c));
+        assert(u.page==PANEL_PAGE_SETTING_GROUPS && u.selected==group);
+    }
     u.selected=3;press(&u,&s,DIRECT_KEY_ENTER,&c);
     assert(u.page==PANEL_PAGE_SETTINGS && u.setting_group==3);
     unsigned start=u.selected;
@@ -190,6 +264,9 @@ int main(void)
     press(&u,&s,DIRECT_KEY_BACK,&c);
     assert(u.page==PANEL_PAGE_SETTING_GROUPS && u.selected==3);
     u.selected=0;press(&u,&s,DIRECT_KEY_ENTER,&c);
+    assert(panel_ui_view(&u,&s,&a));
+    assert(a.key_labels[KEY_LEFT]==KEY_PREV && a.key_labels[KEY_RIGHT]==KEY_NEXT);
+    assert(a.key_labels[KEY_UP]==KEY_PREV_ITEM && a.key_labels[KEY_DOWN]==KEY_NEXT_ITEM);
     assert(!press(&u,&s,DIRECT_KEY_RIGHT,&c));
     assert(panel_setting_group_position(0,u.selected)==5);
     assert(!press(&u,&s,DIRECT_KEY_DOWN,&c));

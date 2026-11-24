@@ -21,10 +21,11 @@ class LocalModeTests(unittest.TestCase):
 #include <stdatomic.h>
 #include <stdio.h>
 #include <inttypes.h>
-#define ESP_LOGI(...) ((void)0)
+#define PANEL_FULL_DIRECT 1
+#define ESP_LOGD(...) ((void)0)
 #define PROTO_TOPIC_FMT "cs_inv/%s/%s"
-#define PROTO_ENVELOPE_VERSION 1
 #define OFFLINE_ACK_TIMEOUT_MS 5000
+#define MQTT_REPLAY_KEEP_BLOCK (4U * 1024U)
 #define pdTRUE 1
 #define pdMS_TO_TICKS(x) (x)
 typedef unsigned TickType_t;
@@ -32,19 +33,28 @@ static atomic_bool g_local_paused=true,g_mqtt_connected=true,g_cache_flush_pause
 static void *g_mqtt_client=(void*)1,*g_offline_ack_queue=(void*)2;
 static const char *g_device_sn="SN123",*TAG="test";
 static unsigned published,ticks;
-static bool pending_ack,pause_after_write;
+static bool pending_ack,pause_after_write,low_heap;
 static unsigned xTaskGetTickCount(void){return ticks;}
 static int xQueueReceive(void*q,int *ack,unsigned wait){(void)q;(void)wait;if(!pending_ack)return 0;*ack=17;pending_ack=false;return 1;}
-static int esp_mqtt_client_publish(void*c,const char*t,const char*d,int n,int q,int r){(void)c;(void)t;(void)d;(void)n;(void)q;(void)r;published++;pending_ack=true;if(pause_after_write)atomic_store(&g_local_paused,true);return 17;}
+static uint16_t cache_route_decode(const char **topic){(void)topic;return 1;}
+static bool mqtt_replay_has_room(size_t free_needed,size_t block_needed){
+ assert(free_needed>=block_needed&&block_needed==MQTT_REPLAY_KEEP_BLOCK);return !low_heap;
+}
+static int esp_mqtt_client_enqueue(void*c,const char*t,const char*d,int n,int q,int r,bool store){
+ (void)c;(void)t;(void)d;(void)n;(void)q;(void)r;assert(store);
+ published++;pending_ack=true;if(pause_after_write)atomic_store(&g_local_paused,true);return 17;
+}
 FUNCTION
 int main(void){
  (void)TAG;assert(!offline_send_callback("alarm","{}",123)&&published==0);
- atomic_store(&g_local_paused,false);pause_after_write=true;
+ atomic_store(&g_local_paused,false);low_heap=true;
+ assert(!offline_send_callback("alarm","{}",123)&&published==0);
+ low_heap=false;pause_after_write=true;
  assert(offline_send_callback("alarm","{}",123)&&published==1); /* Preserve confirmed current item. */
  assert(!offline_send_callback("alarm","{}",124)&&published==1); /* Next item stays queued. */
  atomic_store(&g_local_paused,false);atomic_store(&g_cache_flush_paused,true);
  assert(!offline_send_callback("alarm","{}",125)&&published==1);
- puts("PASS existing flush drains only its in-flight PUBACK and leaves later cached items unsent");
+ puts("PASS existing flush leaves later items unsent on low memory or pause");
 }
 '''.replace('FUNCTION',function(mqtt,'offline_send_callback'))
         self.compile_run(harness)
@@ -62,13 +72,20 @@ int main(void){
 #define ESP_LOGW(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
 #define MALLOC_CAP_8BIT 1
+#define PANEL_FULL_DIRECT 1
 static atomic_bool g_local_paused=true,g_mqtt_connected=true;
 static void *g_mqtt_client=(void*)1;
 static const char *TAG="test",*g_device_sn="SN123";
-static unsigned cached,built,published;
-static bool offline_cache_add(const char*t,const char*d,unsigned ts){(void)t;(void)d;(void)ts;cached++;return true;}
+static unsigned cached,built,published,enqueued;
+static bool outbox_full;
+static bool cache_message(const char*t,const char*d,uint32_t ts,uint16_t version){(void)t;(void)d;(void)ts;(void)version;cached++;return true;}
 static int mqtt_envelope_build(const char*d,unsigned ts,unsigned v,char **p,size_t*n){(void)d;(void)ts;(void)v;*p=malloc(8);*n=2;built++;return 0;}
 static int esp_mqtt_client_publish(void*c,const char*t,const char*d,int n,int q,int r){(void)c;(void)t;(void)d;(void)n;(void)q;(void)r;published++;return 1;}
+static int esp_mqtt_client_enqueue(void*c,const char*t,const char*d,int n,int q,int r,bool store){
+ assert(c && t && d && n==2 && q==1 && r==0 && store);
+ if(outbox_full)return -2;
+ enqueued++;return 1;
+}
 static unsigned esp_get_free_heap_size(void){return 80000;}
 static unsigned heap_caps_get_largest_free_block(int c){(void)c;return 40000;}
 FUNCTION
@@ -79,6 +96,10 @@ int main(void){
  assert(publish_core(NULL,"{}",0,0,true,1)==-2&&cached==1);
  atomic_store(&g_local_paused,false);
  assert(publish_core("telemetry","{}",0,0,false,3)==0&&built==1&&published==1);
+ assert(publish_core("config","{}",1,0,false,1)==0&&enqueued==1&&published==1);
+ assert(publish_core("cmd_resp","{}",1,0,false,1)==0&&enqueued==2&&published==1);
+ outbox_full=true;
+ assert(publish_core("config","{}",1,0,false,1)==-4&&enqueued==2&&published==1&&cached==1);
  puts("PASS local pause caches alarms, discards stale telemetry and allocates no TLS envelope");
 }
 '''.replace('FUNCTION',function(mqtt,'publish_core'))

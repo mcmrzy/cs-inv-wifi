@@ -16,8 +16,6 @@
 确认菜单  右键参数  *为旧值|ENTER menu  RIGHT data  * stale
 确认机型设置  返回参数列表|ENTER model setup  BACK list
 确认或返回关闭  方向键继续|ENTER/BACK close  arrows browse
-协议已确认，实际值未核对|Accepted; actual value unverified
-结果未知，请检查实际状态|Unknown result; check inverter
 通信中断，本次修改已取消|Link lost. Edit discarded.
 搜索中，运行数据暂停更新|Searching. Live data paused.
 当前值已失效，请重新编辑|Value is stale. Edit again.
@@ -27,13 +25,11 @@
 候选型号不等于已确认机型|Candidate is not a confirmed model
 请核对逆变器铭牌后再选择|Check the inverter nameplate
 识别地址定义存在版本差异|Model register differs by revision
-请核对逆变器本机实际设置|Verify the inverter's own setting
-未自动重发，请核对后再试|No auto retry; verify before retry
 逆变器机型与选定配置不符|Inverter model mismatch
 此机型仅可读取|Read-only on this model
 缺少最新运行模式数据|Fresh operating mode unavailable
 当前模式使用固定值|Fixed in current mode
-上下翻页  确认目录  返回|Up/down page  ENTER index  BACK
+方向键换页  确认目录  返回|Arrows  ENTER index  BACK
 配置保存失败，查看诊断|Save failed; see diagnostics
 连接已恢复，可继续操作|Connection restored
 按当前波特率和校验搜索|Uses current baud and parity
@@ -43,11 +39,10 @@
 请先用方向键选择拟设值|Use arrow keys to select a value
 已到此机型可设置的边界|Allowed limit reached
 条件恢复后可以重新尝试|Retry when conditions recover
-左减右加，上加下减快调|L -  R +   UP +10  DN -10
+左加右减，上加下减快调|L +  R -   UP +10  DN -10
 请核对铭牌，再确认机型|Check nameplate; confirm model
 主控升级包格式尚未明确|Inverter image format unspecified
 请联系安装人员确认机型|Ask installer to confirm model
-确认重试  返回参数列表|ENTER retry  BACK list
 返回参数列表|BACK to settings
 确认发送  返回取消操作|ENTER send  BACK cancel
 左右切换诊断  返回退出|L/R diagnostics  BACK exit
@@ -60,10 +55,8 @@
 数值未改变，无需发送|Value unchanged; nothing sent
 请按铭牌选择实际机型|Select the model on the nameplate
 修改只影响这一项参数|Only this setting will change
-按用途选择，确认进入|Select a group; press ENTER
 正在搜索，返回键停止|Searching; BACK to stop
 本页无条目，向上翻页|No entries here; scroll up
-按用途浏览逆变器参数|Browse settings by function
 命令失败，查看诊断|Request failed; see diagnostics
 本机通信配置已保存|Local communication saved
 搜索结束，找到地址|Search found address 
@@ -77,13 +70,11 @@
 命令处理中，请等待|Request in progress; please wait
 部分告警数据未收到|Some alarm data is unavailable
 确认搜索  返回取消|ENTER search  BACK cancel
-上下翻页  返回退出|UP/DN pages  BACK exit
+方向键翻页  返回退出|Arrows  BACK exit
 确认进入  返回退出|ENTER open  BACK exit
 返回取消  确认保存|BACK cancel  ENTER save
-上下选择  左右调值|Up/down select  L/R change
 正在发送，请等待|Sending request
 已应答，等待处理|Acknowledged; processing
-实际值已回读确认|Actual value confirmed
 搜索中断，请重试|Search interrupted. Try again.
 逆变器无有效应答|No inverter response
 请先确认实际机型|Confirm the inverter model first
@@ -95,9 +86,7 @@
 未报告故障或告警|No fault or warning reported
 尚未收到告警数据|No alarm data received
 自动检测市电频率|Auto grid frequency
-确认查看参数分类|Enter to view setting groups
 机型已由出厂锁定|Factory model locked
-已保存并读回确认|Saved and verified
 等待逆变器数据|Waiting for inverter data
 请先选择拟设值|Select a target value first
 确认逆变器机型|Confirm inverter model
@@ -143,23 +132,22 @@
 读取超时|Read timeout
 设备读取失败|Read failed
 读回值与目标不一致|Read value differs from target
-当前实际值已显示，请核对后重试|Check displayed value before retry
 未返回|No value
 已断联|Offline
 不支持|Unsupported
 上次数据|Last data
 历史仅供参考|History only
-上下翻页  返回  历史仅供参考|UP/DN pages  BACK  History only
+方向键翻页  返回  历史仅供参考|Arrows  BACK  History only
 历史 |History 
-显示上次读取值，正在刷新|Last values; refreshing
+显示上次读取值|Last read values
 通信已断开，显示上次数据|Disconnected; last values
 设备已受理|Inverter accepted
 设置已生效|Settings applied
 设置未生效|Settings not applied
-设置应答超时|Setting response timed out
+设置结果未确认|Setting result unconfirmed
 选择分类，确认进入|Choose a category
 逆变器当前值与目标不同|Device returned a different value
-未收到有效完成应答，请稍后重试|No completion reply. Try again.
+未能核对当前值，请稍后重试|Could not verify the value.
 返回后可以重新设置|Close to edit again
 正在保存并检查结果|Saving and checking settings
 电池状态|Battery status
@@ -206,6 +194,14 @@
 低功耗省电|Power saving
 光伏总功率|PV total power
 开关机操作|Power control
+确认开关机|Confirm power action
+开关机处理中|Power action in progress
+正在检测输出电压|Checking output voltage
+开机成功|Power on confirmed
+关机成功|Power off confirmed
+已通过输出电压确认|Confirmed by output voltage
+未确认输出变化|Output change unconfirmed
+请检查逆变器状态|Check inverter status
 通信已断开|Link offline
 机型待确认|Model unconfirmed
 可烧录类型|Image target
@@ -232,7 +228,6 @@ CT连接异常|CT connection fault
 日月元 VOL|Voltronic VOL
 操作结果|Operation result
 光伏输入|PV inputs
-逆变器BMS|Inverter BMS
 温度监测|Temperatures
 全部参数|All settings
 均衡充电|Equalization
@@ -243,6 +238,20 @@ CT连接异常|CT connection fault
 市电低压点|Grid low limit
 市电高压点|Grid high limit
 充电功能|Charging
+此机型未定义充电开关|No separate charge switch
+仅 3KU 协议定义此开关|Available on 3KU only
+允许充电|Allow charging
+停止充电|Stop charging
+设置充电来源与优先级|Set charge sources and priority
+限制市电充电电流|Limit grid charging current
+限制光伏和市电的总充电电流|Limit combined solar and grid charge
+恒压充电阶段的目标电压|Target voltage for constant charging
+充电完成后的维持电压|Voltage maintained after full charge
+立即执行一次铅酸均衡充电|Start one lead-acid equalization
+电池电量低于此值时关机|Shut down below this battery level
+电量回升到此值时转电池供电|Switch to battery at this level
+电量降到此值时转市电供电|Switch to grid below this level
+关闭后停止电池充电|Stops battery charging when disabled
 最大放电电流|Max discharge current
 并机无电池运行|Parallel without battery
 电池未接检测|Battery presence check
@@ -289,6 +298,7 @@ CT连接异常|CT connection fault
 通信诊断|Link diagnostics
 从机地址|Slave address
 候选机型|Model candidate
+运行机型|Active model
 未知类型|Unknown type
 升级状态|Update state
 升级能力|Update capability
@@ -341,20 +351,7 @@ PV能量弱|PV energy low
 逆变器电池协议|Inverter battery protocol
 BMS地址|BMS address
 BMS通信|BMS link
-BMS电压|BMS voltage
-BMS电流|BMS current
-BMS电量|BMS SOC
-BMS温度|BMS temperature
 BMS故障|BMS fault
-BMS告警|BMS warning
-PV1电压|PV1 voltage
-PV1电流|PV1 current
-PV1功率|PV1 power
-PV2电压|PV2 voltage
-PV2电流|PV2 current
-PV2功率|PV2 power
-PV1温度|PV1 temperature
-PV2温度|PV2 temperature
 开关机|Power control
 主菜单|Main menu
 波特率|Baud rate
@@ -436,3 +433,77 @@ PV过压|PV overvoltage
 电池辅助电源故障|Battery auxiliary supply fault
 仅可在待机或市电模式修改|Edit in standby or grid mode
 仅可在待机、市电或电池模式修改|Edit in standby, grid or battery mode
+光伏温度|Solar temp
+光伏1温度|Solar 1 temp
+光伏2温度|Solar 2 temp
+输入范围|Input range
+市电优先|Grid first
+光伏优先|Solar first
+光伏、市电、电池|Solar, grid, battery
+光伏、电池、市电|Solar, battery, grid
+宽电压范围|Wide range
+窄电压范围|Narrow range
+发电机输入|Generator input
+光伏与市电|Solar and grid
+仅光伏|Solar only
+单机|Single unit
+单相并机|1-phase parallel
+三相 A 相|3-phase A
+三相 B 相|3-phase B
+三相 C 相|3-phase C
+胶体铅酸|Gel lead-acid
+电池通信|Battery link
+光伏1电压|Solar 1 voltage
+光伏1电流|Solar 1 current
+光伏1功率|Solar 1 power
+光伏2电压|Solar 2 voltage
+光伏2电流|Solar 2 current
+光伏2功率|Solar 2 power
+设置交流输出的额定电压|Set rated AC output voltage
+设置交流输出的额定频率|Set rated AC output frequency
+选择负载优先使用的电源|Choose the preferred load source
+选择逆变器接受的输入电压范围|Choose the accepted input range
+按电池类型选择充电参数|Set charge profile by battery type
+电池电压低于此值时告警|Warn below this battery voltage
+电池电压低于此值时关机|Shut down below this pack voltage
+电池电压降到此值时转市电|Switch to grid below this voltage
+电池电压回升到此值时转电池|Switch to battery above this voltage
+市电电压低于此值时退出市电|Reject grid below this voltage
+市电电压高于此值时退出市电|Reject grid above this voltage
+选择单机或并机相位|Set standalone or parallel phase
+为并机中的逆变器设置编号|Set the unit ID in a parallel system
+设置均衡充电的目标电压|Set the equalization target voltage
+设置均衡充电持续时间|Set equalization duration
+设置均衡充电最长时间|Set the equalization timeout
+设置均衡充电间隔天数|Set days between equalizations
+电压降到此值时关闭输出 2|Cut Output 2 at this pack voltage
+设置输出 2 的供电时间|Set the Output 2 run time
+控制是否允许接入发电机|Enable or disable generator input
+按发电机铭牌设置额定功率|Enter the generator rated power
+设置发电机输入功率上限|Set the generator input power limit
+消除当前的发电机告警|Clear the current generator alarm
+选择逆变器与电池的通信协议|Select the inverter-to-BMS protocol
+设置逆变器通信使用的电池地址|Set the battery communication address
+远程开启或关闭逆变器|Turn the inverter on or off remotely
+控制逆变器屏幕自动关闭|Set inverter display auto-off
+温度恢复后可自动重启|Restart when overheat protection clears
+过载恢复后可自动重启|Restart when overload protection clears
+过载时允许切换到市电旁路|Allow grid bypass on overload
+低负载时启用省电模式|Enable power saving at light loads
+自动检测市电输入频率|Detect grid frequency automatically
+继电器接通后启用软启动|Soft start after relay closes
+电池开路时发出告警|Warn when the battery circuit opens
+控制逆变器蜂鸣器是否静音|Mute the inverter buzzer
+允许逆变器界面自动返回首页|Return to the inverter home screen
+主输入电源变化时发出告警|Warn when the main input changes
+限制电池放电的最大电流|Limit battery discharge current
+电量降到此值时关闭输出 2|Cut Output 2 at this battery SOC
+允许并机系统在无电池时运行|Allow parallel without batteries
+检测逆变器是否接入电池|Detect whether a battery is connected
+电池电量低于此值时告警|Warn below this battery SOC
+选择高温时的功率限制策略|Choose the thermal derating policy
+负载优先使用市电|Use utility first for the load
+光伏优先，再用市电，最后电池|Source order: solar, grid, battery
+光伏优先，再用电池，最后市电|Source order: solar, battery, grid
+发电机优先，不向市电回馈|Generator first. No grid export.
+负载优先使用光伏|Use solar first for the load

@@ -108,18 +108,18 @@ int main(void){
  assert(!panel_pairing_pin(vectors[0].sn,NULL));
  fail_md=true;assert(!panel_pairing_pin(vectors[0].sn,result)&&!result[0]);fail_md=false;
  fail_hmac=true;assert(!panel_pairing_pin(vectors[0].sn,result)&&!result[0]);fail_hmac=false;
- strcpy(g_device_sn,vectors[0].sn);onboarding_inputs_t input=panel_onboarding_inputs(false);
+ strcpy(g_device_sn,vectors[0].sn);onboarding_inputs_t input=panel_onboarding_inputs();
  assert(input.identity_ready&&s_pair_ready&&!strcmp(s_pair_pin,vectors[0].expected));
- unsigned before=hmac_calls;clock_ms++;panel_onboarding_inputs(false);assert(hmac_calls==before);
+ unsigned before=hmac_calls;clock_ms++;panel_onboarding_inputs();assert(hmac_calls==before);
  s_onboarding_qr.ready=true;strcpy(s_onboarding_qr.payload,"old-qr");
- strcpy(g_device_sn,vectors[1].sn);input=panel_onboarding_inputs(false);
+ strcpy(g_device_sn,vectors[1].sn);input=panel_onboarding_inputs();
  assert(input.identity_ready&&!strcmp(s_pair_pin,vectors[1].expected));
  assert(!s_onboarding_qr.ready&&!s_onboarding_qr.payload[0]&&hmac_calls==before+1);
- s_onboarding_qr.ready=true;strcpy(g_device_sn,"INVALID");input=panel_onboarding_inputs(false);
+ s_onboarding_qr.ready=true;strcpy(g_device_sn,"INVALID");input=panel_onboarding_inputs();
  assert(!input.identity_ready&&!s_pair_ready&&!s_pair_pin[0]&&!s_onboarding_qr.ready);
- strcpy(g_device_sn,vectors[0].sn);fail_hmac=true;input=panel_onboarding_inputs(false);
+ strcpy(g_device_sn,vectors[0].sn);fail_hmac=true;input=panel_onboarding_inputs();
  assert(!input.identity_ready&&!s_pair_pin[0]);fail_hmac=false;
- clock_ms+=1000;input=panel_onboarding_inputs(false);assert(input.identity_ready);
+ clock_ms+=1000;input=panel_onboarding_inputs();assert(input.identity_ready);
  puts("PASS pairing: actual mbedTLS legacy vectors, leading zero, invalid SN, crypto failure and immediate SN/PIN/QR invalidation");
 }
 '''.replace('VECTORS',vectors).replace('ONBOARDING',onboarding)

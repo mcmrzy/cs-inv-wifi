@@ -37,7 +37,7 @@ int main(int argc,char **argv){
  unsigned first=20,last=0;
  for(unsigned y=0;y<comma->height;y++)for(unsigned x=0;x<comma->width;x++)
   if((comma->data[y*comma->stride+x/2]>>(x%2?0:4))&15){if(y<first)first=y;last=y;}
- assert(first>=10 && last>=16); /* Noto comma straddles the baseline in the lower half of the cell. */
+ assert(first>=10 && last>=16); /* The fullwidth comma sits near the baseline. */
  return 0;
 }
 ''',encoding='utf-8')

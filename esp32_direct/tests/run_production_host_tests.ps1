@@ -128,8 +128,8 @@ try {
  if($LASTEXITCODE -ne 0){throw 'GUI protocol regression failed'}
  & $python tests/prepare_bms_poll_test.py
  if($LASTEXITCODE -ne 0){throw 'BMS poll extraction failed'}
- & $python tests/prepare_board_can_idle_test.py
- if($LASTEXITCODE -ne 0){throw 'CAN idle extraction failed'}
+ & $python tests/prepare_board_l10_pinout_test.py
+ if($LASTEXITCODE -ne 0){throw 'L10 board pinout extraction failed'}
  $common = @('main/direct/direct_ui.c','main/direct/direct_gfx.c','main/direct/direct_gfx_assets.c','main/direct/direct_ui_assets.c','main/direct/direct_ui_locale.c','main/direct/direct_battery_config.c')
  $cases = @(
  @{name='factory_store';src=@('main/factory/factory_record.c','main/factory/factory_store.c')},
@@ -170,9 +170,11 @@ try {
  @{name='bms_poll_timing';src=@('main/direct/direct_protocol.c')},
  @{name='bms_summary';src=@('main/direct/direct_protocol.c')},
  @{name='key_codec';src=@('main/direct/direct_key_codec.c')},
+ @{name='key_codec_new_layout';test='tests/key_codec_test.c';src=@('main/direct/direct_key_codec.c');defines=@('-DCONFIG_DIRECT_KEY_NEW_LAYOUT=1')},
  @{name='energy';src=@('main/direct/direct_energy_codec.c')},
  @{name='lcd_transport';src=@('main/direct/direct_lcd_codec.c')},
- @{name='board_can_idle';src=@()},
+ @{name='board_l10_pinout';src=@()},
+ @{name='direct_indicators';src=@('main/direct/direct_indicators.c','main/direct/status_led.c')},
  @{name='ui_upgrade';src=$common},
  @{name='ui_v050';src=$common},
  @{name='ui_keys_layout';src=$common+@('main/direct/direct_key_codec.c')},
@@ -181,7 +183,8 @@ try {
  )
  foreach($case in $cases){
   $exe="tmp/$($case.name)_test.exe"
-  & $gcc -std=c11 -Wall -Wextra -Werror -Imain/direct -Imain/telemetry -Imain/ota -Imain/factory -Itests/host_factory "tests/$($case.name)_test.c" @($case.src) -o $exe
+  $test=if($case.test){$case.test}else{"tests/$($case.name)_test.c"}
+  & $gcc -std=c11 -Wall -Wextra -Werror @($case.defines) -Imain/direct -Imain/telemetry -Imain/ota -Imain/factory -Itests/host_factory $test @($case.src) -o $exe
   if($LASTEXITCODE -ne 0){throw "$($case.name) compile failed"}
   & $exe
   if($LASTEXITCODE -ne 0){throw "$($case.name) failed"}

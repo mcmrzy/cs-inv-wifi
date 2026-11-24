@@ -18,6 +18,8 @@ typedef struct {
     uint16_t result_address,result_value;
     uint8_t result_exception;
     panel_profile_t result_profile;
+    uint16_t result_readback;
+    bool result_readback_valid;
     bool editing, review, pending;
     bool blocked,model_setup;
     bool language_en;
@@ -47,7 +49,7 @@ typedef struct {
     bool language_en;
     bool setting_editor;
     bool setting_list;
-    bool setting_groups,detail_groups,detail_dashboard;
+    bool setting_groups,detail_groups,detail_dashboard,power_action;
     uint8_t illustration;
     bool alarm_list;
     uint8_t fault_rows;
@@ -58,6 +60,8 @@ typedef struct {
 } panel_view_t;
 
 #define PANEL_DETAIL_PAGES 8U
+#define PANEL_DETAIL_COLUMNS 2U
+const char *panel_detail_group_label(unsigned group,bool english);
 /* Embedded functions return directly to the graphical menu that opened them. */
 bool panel_ui_can_exit(const panel_ui_t *,const panel_snapshot_t *,panel_page_t root);
 

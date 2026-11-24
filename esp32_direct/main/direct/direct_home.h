@@ -12,6 +12,7 @@ typedef struct {
  uint32_t battery_watts;
  direct_home_battery_state_t battery_state;
 } direct_home_values_t;
+void direct_home_format_power(char out[16],int32_t watts);
 void direct_home_values(const direct_ui_data_t *,direct_home_values_t *);
 /* -1 disconnected, -2 AP connected with unknown RSSI, 0..3 signal strength. */
 int direct_home_wifi_level(const direct_ui_data_t *);

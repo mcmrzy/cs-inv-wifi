@@ -45,7 +45,7 @@ static StaticSemaphore_t s_lifecycle_storage;
 static SemaphoreHandle_t s_lifecycle_mutex;
 static portMUX_TYPE s_lifecycle_init_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_host_task;
-enum { BLE_PAUSE_OTA = 1U, BLE_PAUSE_MQTT = 2U };
+enum { BLE_PAUSE_OTA = 1U, BLE_PAUSE_MQTT = 2U, BLE_PAUSE_WEATHER = 4U };
 static unsigned s_pause_owners;
 /* The event/ACK outlive a timed-out caller. Only lifecycle callers modify
  * pending; the host callback only gives the dedicated binary semaphore. */
@@ -542,6 +542,20 @@ static void mqtt_barrier_cleanup(void)
         while (xSemaphoreTake(s_mqtt_barrier_ack, 0) == pdTRUE) {}
 }
 
+int ble_prov_weather_restore_block(void)
+{
+#if defined(CONFIG_IDF_TARGET_ESP32C3) && defined(CONFIG_BT_CTRL_BLE_MAX_ACT_EFF) && \
+    CONFIG_BT_CTRL_BLE_MAX_ACT_EFF <= 2 && CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE <= 4096 && \
+    CONFIG_BT_NIMBLE_MAX_CONNECTIONS == 1 && !defined(CONFIG_BT_NIMBLE_ROLE_CENTRAL) && \
+    !defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER)
+    /* Admit a weather-only restart for this bounded C3 peripheral profile.
+     * SDK initialization checks the actual allocations within the 64 KiB budget. */
+    return 8192;
+#else
+    return 32768;
+#endif
+}
+
 /* Caller holds the lifecycle mutex. Only restore_owned may call this while
  * retaining the final pause owner, so a failed restore remains retryable. */
 static bool start_host_locked(const char *device_sn, const char *fw_version)
@@ -556,16 +570,17 @@ static bool start_host_locked(const char *device_sn, const char *fw_version)
     }
     atomic_store(&s_host_ready, false);
     atomic_store(&s_start_failed, false);
-    /* BLE used >50KB on site. Keep at least 12KB headroom and a large internal
-     * contiguous block before any NimBLE/controller/task allocations begin.
-     * Main must first release MQTT TLS/client/stack; this is admission, not a
-     * heap reservation against unrelated concurrent allocations. */
+    /* BLE used >50KB on site. Keep the 64 KiB total admission budget.
+     * Weather restart uses the configured controller's contiguous allowance.
+     * Main releases MQTT before this path when weather needs the BLE heap. */
     const unsigned caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     const size_t free_bytes = heap_caps_get_free_size(caps);
     const size_t largest = heap_caps_get_largest_free_block(caps);
-    if (free_bytes < 65536U || largest < 32768U) {
-        ESP_LOGW(TAG, "BLE start denied: internal8 free=%u largest=%u (need 65536/32768)",
-                 (unsigned)free_bytes, (unsigned)largest);
+    const unsigned minimum_block = s_pause_owners == BLE_PAUSE_WEATHER ?
+        (unsigned)ble_prov_weather_restore_block() : 32768U;
+    if (free_bytes < 65536U || largest < minimum_block) {
+        ESP_LOGW(TAG, "BLE start denied: internal8 free=%u largest=%u (need 65536/%u)",
+                 (unsigned)free_bytes, (unsigned)largest, minimum_block);
         host_start_error();
         return false;
     }
@@ -731,8 +746,7 @@ static bool suspend_owned(unsigned owner)
     xSemaphoreGive(s_host_mutex);
 
     {
-        /* Both cloud reconnect and remote OTA are idle-only: neither may
-         * terminate an active phone or a local BLE OTA session. */
+        /* Only pause an idle host. Keep active phones and local BLE OTA connected. */
         /* Stop connectable advertising before the final peer check. Treat
          * every error (including EALREADY after a connection won the race) as
          * uncertain: leave the host alive and acquire no pause owner. After a
@@ -820,6 +834,8 @@ bool ble_prov_suspend_for_ota(void) { return suspend_owned(BLE_PAUSE_OTA); }
 bool ble_prov_restore_after_ota(void) { return restore_owned(BLE_PAUSE_OTA); }
 bool ble_prov_suspend_for_mqtt(void) { return suspend_owned(BLE_PAUSE_MQTT); }
 bool ble_prov_restore_after_mqtt(void) { return restore_owned(BLE_PAUSE_MQTT); }
+bool ble_prov_suspend_for_weather(void) { return suspend_owned(BLE_PAUSE_WEATHER); }
+bool ble_prov_restore_after_weather(void) { return restore_owned(BLE_PAUSE_WEATHER); }
 
 void ble_prov_set_callback(BleProvCallback cb) { s_callback = cb; }
 void ble_prov_set_conn_callback(BleProvConnCallback cb) { s_conn_cb = cb; }

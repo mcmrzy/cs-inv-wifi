@@ -1,5 +1,6 @@
 #include "panel_catalog.h"
 #include <stdio.h>
+#include <string.h>
 
 uint16_t panel_battery_suggestion(const panel_snapshot_t *s, uint16_t address,
                                  uint16_t charge_deciamp, uint16_t charge_decivolt,
@@ -26,7 +27,7 @@ static const panel_setting_t settings[] = {
     {0x4100,0x02a0,"输出电压","V",1},
     {0x4101,0x02a1,"输出频率","Hz",1},
     {0x4102,0x0142,"输出优先级","",1},
-    {0x4103,0x0140,"运行模式","",1},
+    {0x4103,0x0140,"输入范围","",1},
     {0x4104,0x0143,"充电优先级","",1},
     {0x4105,0xffff,"市电充电电流","A",1},
     {0x4106,0xffff,"最大充电电流","A",1},
@@ -86,6 +87,14 @@ const char *panel_setting_group_name(unsigned group)
         "发电机","BMS通信","系统功能","并机设置","双路输出"};
     return group<PANEL_SETTING_GROUPS?names[group]:"";
 }
+
+const char *panel_setting_group_label(unsigned group,bool english)
+{
+    static const char *const names[]={"All settings","Output","Battery","Equalize","Generator",
+        "BMS link","System","Parallel","Output 2"};
+    if(!english)return panel_setting_group_name(group);
+    return group<PANEL_SETTING_GROUPS?names[group]:"";
+}
 unsigned panel_setting_group_for(uint16_t a)
 {
     if(a<=0x4104 || a==0x410e || a==0x410f)return 1;
@@ -124,16 +133,16 @@ unsigned panel_setting_group_position(unsigned group,unsigned index)
 }
 static bool profile_conflict(const panel_snapshot_t *s)
 {
-    return (s->profile_locked || panel_is_3ku(s)) &&
+    return (s->profile_locked || s->config.profile_override==PANEL_PROFILE_3KU || s->detected_profile==PANEL_PROFILE_3KU) &&
            s->config.profile_override!=PANEL_PROFILE_UNKNOWN && s->detected_profile!=PANEL_PROFILE_UNKNOWN &&
-           s->detected_profile!=s->config.profile_override &&
+           !panel_profile_same_family(s->detected_profile,s->config.profile_override) &&
            panel_fresh(s,0x38) && panel_fresh(s,0x39);
 }
 
 static bool unsupported_profile(const panel_snapshot_t *s)
 {
     return (s->config.profile_override!=PANEL_PROFILE_UNKNOWN &&
-            !panel_profile_supported(s->config.profile_override)) ||
+            !panel_profile_supported(panel_effective_profile(s))) ||
            (s->detected_profile!=PANEL_PROFILE_UNKNOWN && !panel_profile_supported(s->detected_profile));
 }
 
@@ -150,6 +159,12 @@ static bool fixed_3ku(uint16_t address)
            address==0x411d || address==0x411f;
 }
 
+bool panel_charge_switch_reserved(const panel_snapshot_t *s)
+{
+    /* WF_UserSet 4124 is defined in the 3KU table and reserved in V1.27. */
+    return s && panel_profile_supported(panel_effective_profile(s)) && !panel_is_3ku(s);
+}
+
 panel_setting_access_t panel_setting_access(const panel_snapshot_t *s,uint16_t address)
 {
     uint16_t state=0,next;
@@ -159,15 +174,17 @@ panel_setting_access_t panel_setting_access(const panel_snapshot_t *s,uint16_t a
     if(!panel_setting_find(address) || unsupported_profile(s))return PANEL_ACCESS_UNSUPPORTED;
     if(panel_is_3ku(s)){
         if(profile_conflict(s))return PANEL_ACCESS_PROFILE_CONFLICT;
-        if(s->config.profile_override!=PANEL_PROFILE_3KU)return PANEL_ACCESS_MODEL;
+        if(panel_effective_profile(s)!=PANEL_PROFILE_3KU)return PANEL_ACCESS_MODEL;
         if(fixed_3ku(address))return PANEL_ACCESS_READ_ONLY;
         if(!output_state_3ku(address,state))return PANEL_ACCESS_STATE;
     }
+    if(address==0x4124 && panel_charge_switch_reserved(s))return PANEL_ACCESS_UNSUPPORTED;
     if(panel_setting_allowed(s,address,0) || panel_setting_step(s,address,0,1,&next))return PANEL_ACCESS_EDITABLE;
     if(profile_conflict(s))return PANEL_ACCESS_PROFILE_CONFLICT;
-    if(s->config.profile_override==PANEL_PROFILE_UNKNOWN)return PANEL_ACCESS_MODEL;
+    if(panel_effective_profile(s)==PANEL_PROFILE_UNKNOWN)return PANEL_ACCESS_MODEL;
     if((address==0x4110 || address==0x4111 || address==0x4153) &&
-       s->config.profile_override==PANEL_PROFILE_12KU && state!=2)return PANEL_ACCESS_STANDBY;
+       (panel_effective_profile(s)==PANEL_PROFILE_12KU ||
+        panel_effective_profile(s)==PANEL_PROFILE_6KU_PARALLEL) && state!=2)return PANEL_ACCESS_STANDBY;
     bool timed_equalization=panel_is_3ku(s) && address>=0x4114 && address<=0x4116;
     bool battery=(address>=0x4107 && address<=0x410d) || address==0x4112 || address==0x4113 ||
         timed_equalization || address==0x4117 || address==0x4118;
@@ -198,6 +215,8 @@ const char *panel_setting_access_reason(panel_setting_access_t access)
 const char *panel_setting_restriction(const panel_snapshot_t *s,uint16_t address)
 {
     panel_setting_access_t access=panel_setting_access(s,address);
+    if(access==PANEL_ACCESS_UNSUPPORTED && address==0x4124 && panel_charge_switch_reserved(s))
+        return "此机型未定义充电开关";
     uint16_t state;
     if(access==PANEL_ACCESS_STATE && panel_is_3ku(s) &&
        panel_value(s,0x42,&state) && state>=2 && state<=6){
@@ -251,7 +270,7 @@ bool panel_setting_decode_current(const panel_snapshot_t *s,uint16_t address,uin
     uint16_t flags_reg=panel_setting_current_flags(address);
     if(flags_reg!=0xffff){
         uint16_t flags;
-        if(!panel_fresh(s,flags_reg) || !panel_value(s,flags_reg,&flags))return false;
+        if(!panel_fresh(s,flags_reg) || !panel_value(s,flags_reg,&flags) || flags==0xffff)return false;
         unsigned bit=address==0x4120?2U:address==0x4121?1U:0U;
         if(!(flags&(1U<<bit))){*value=0xfff1;return true;}
         unsigned low=address==0x4120?5U:10U;
@@ -288,7 +307,7 @@ bool panel_setting_decode_current(const panel_snapshot_t *s,uint16_t address,uin
         }
     }
     if(address==0x4100){
-        if(!panel_profile_supported(s->config.profile_override) || raw<2000)return false;
+        if(!panel_profile_supported(panel_effective_profile(s)) || raw<2000)return false;
     }
     return panel_setting_decode_readback(address,raw,value);
 }
@@ -320,7 +339,7 @@ uint16_t panel_setting_current_flags(uint16_t address)
 const char *panel_profile_name(panel_profile_t profile)
 {
     static const char *const names[] = {
-        "未知/自动", "6KU", "不支持", "不支持", "12KU", "2KU", "不支持", "3KU"
+        "未知/自动", "6KU", "6KU Parallel", "不支持", "12KU", "2KU", "不支持", "3KU"
     };
     return (unsigned)profile < PANEL_PROFILE_COUNT ? names[profile] : names[0];
 }
@@ -345,10 +364,28 @@ panel_profile_t panel_detect_profile(uint16_t id38, uint16_t id39)
     /* Table identifies 0039; revision history moves the code into 0038. Only
      * unambiguous known, full-word codes are hints. Never enable writes here. */
     panel_profile_t a = profile_code(id38), b = profile_code(id39);
-    if (a && b && a != b) return PANEL_PROFILE_UNKNOWN;
+    if (a && b && a != b)
+        return panel_profile_same_family(a,b)?PANEL_PROFILE_6KU_PARALLEL:PANEL_PROFILE_UNKNOWN;
     if (a && (id39 == 0 || b == a)) return a;
     if (b && (id38 == 0 || id38 == 1 || a == b)) return b;
     return PANEL_PROFILE_UNKNOWN;
+}
+
+bool panel_observe_identity(panel_snapshot_t *s,uint16_t id38,uint16_t id39,uint32_t now)
+{
+    uint16_t prior38,prior39;
+    s->now_ms=now;
+    bool matched=panel_fresh(s,0x38) && panel_fresh(s,0x39) &&
+        panel_value(s,0x38,&prior38) && panel_value(s,0x39,&prior39) && prior38==id38 && prior39==id39;
+    panel_store(s,0x38,id38,now);panel_store(s,0x39,id39,now);
+    s->detected_profile=panel_detect_profile(id38,id39);
+    uint8_t next=matched && panel_profile_supported(s->detected_profile)?s->detected_profile:PANEL_PROFILE_UNKNOWN;
+    if(s->auto_profile==next)return false;
+    s->auto_profile=next;
+    if(s->config.profile_override!=PANEL_PROFILE_UNKNOWN)return false;
+    memset(s->setting_reads,0,sizeof(s->setting_reads));
+    s->context_generation++;
+    return true;
 }
 
 static bool between(uint16_t value, unsigned low, unsigned high)
@@ -409,8 +446,13 @@ bool panel_setting_allowed(const panel_snapshot_t *s, uint16_t address, uint16_t
     if (!s || !panel_setting_find(address) || value == 0xffff || unsupported_profile(s) ||
         !panel_online(s) || !panel_fresh(s,0x42) || !panel_value(s,0x42,&state) ||
         state < 2 || state > 8 || state == 7) return false;
-    panel_profile_t profile = s->config.profile_override;
+    panel_profile_t profile = panel_effective_profile(s);
+    uint16_t identity_word;
+    if(s->config.profile_override==PANEL_PROFILE_UNKNOWN && profile==PANEL_PROFILE_UNKNOWN &&
+       (s->detected_profile!=PANEL_PROFILE_UNKNOWN || panel_value(s,0x39,&identity_word)))return false;
+    if(s->detected_profile==PANEL_PROFILE_3KU && profile!=PANEL_PROFILE_3KU)return false;
     bool known = panel_profile_supported(profile) && !profile_conflict(s);
+    bool parallel = profile==PANEL_PROFILE_6KU_PARALLEL || profile==PANEL_PROFILE_12KU;
     if(panel_is_3ku(s)){
         if(!known || profile!=PANEL_PROFILE_3KU || fixed_3ku(address) ||
            !output_state_3ku(address,state))return false;
@@ -468,16 +510,18 @@ bool panel_setting_allowed(const panel_snapshot_t *s, uint16_t address, uint16_t
     case 0x4142:{
         /* V1.27 raw maximum per model; each step adds 5 A from 10 A. */
         static const uint8_t limits[PANEL_PROFILE_COUNT]={
-            [PANEL_PROFILE_6KU]=24,[PANEL_PROFILE_12KU]=42,[PANEL_PROFILE_2KU]=28,
+            [PANEL_PROFILE_6KU]=24,[PANEL_PROFILE_6KU_PARALLEL]=24,
+            [PANEL_PROFILE_12KU]=42,[PANEL_PROFILE_2KU]=28,
         };
         return profile!=PANEL_PROFILE_3KU && (value<=limits[profile] || value==0xfff1);
     }
-    case 0x4153:return state==2 && profile==PANEL_PROFILE_12KU && value<=1;
-    case 0x4166:return profile==PANEL_PROFILE_2KU && value<=1;
+    case 0x4153:return state==2 && parallel && value<=1;
+    case 0x4166:return (profile==PANEL_PROFILE_2KU || profile==PANEL_PROFILE_6KU_PARALLEL) && value<=1;
     case 0x418d:return profile==PANEL_PROFILE_2KU &&
         (between(value,5,55) || value==0x8001);
-    case 0x4110:return state==2 && profile==PANEL_PROFILE_12KU && value<=4;
-    case 0x4111:return state==2 && profile==PANEL_PROFILE_12KU && (value==0xfff1 || value<=5);
+    case 0x4110:return state==2 && parallel && value<=4;
+    case 0x4111:return state==2 && parallel &&
+        (value==0xfff1 || value<=(profile==PANEL_PROFILE_6KU_PARALLEL?8U:5U));
     case 0x411a:case 0x411d:return value<=1;
     case 0x411b:return value<=120;
     case 0x411c:return between(value,5,120);
@@ -485,11 +529,12 @@ bool panel_setting_allowed(const panel_snapshot_t *s, uint16_t address, uint16_t
     case 0x4102: return value <= 3;
     case 0x4105: {
         unsigned limit = profile == PANEL_PROFILE_12KU ? 160 : profile == PANEL_PROFILE_2KU ? 100 : 120;
-        return value == 2 || (value >= 10 && value <= limit && value % 10U == 0);
+        return (value == 2 && profile!=PANEL_PROFILE_6KU_PARALLEL) ||
+            (value >= 10 && value <= limit && value % 10U == 0);
     }
     case 0x4106: {
         unsigned limit = profile == PANEL_PROFILE_12KU ? 16 : profile == PANEL_PROFILE_2KU ? 10 : 12;
-        return value <= limit && (value != 0 || profile != PANEL_PROFILE_12KU);
+        return value <= limit && (value != 0 || !parallel);
     }
     case 0x4107:
         return panel_fresh(s,0x150) && value <= 4;
@@ -570,15 +615,18 @@ void panel_setting_format_profile(panel_profile_t profile,uint16_t address,
             snprintf(out,size,"机型待确认 (%u)",raw);
         else snprintf(out,size,"%u V",standard[raw]);
     } else if (address == 0x4101 && raw <= 1) snprintf(out,size,"%u Hz",raw ? 60 : 50);
-    else if (address == 0x4102 && raw <= 3) {
-        static const char *const names[] = {"GPB","PGB","PBG","MKS"};
-        static const char *const three_ku_names[] = {"GRD","PV","PBG","MKS"};
-        snprintf(out,size,"%s",profile==PANEL_PROFILE_3KU?three_ku_names[raw]:names[raw]);
+    else if (address == 0x4102 && raw <= (profile==PANEL_PROFILE_3KU?2:3)) {
+        static const char *const names[] = {"市电优先","光伏、市电、电池","光伏、电池、市电","MKS"};
+        const char *name=profile==PANEL_PROFILE_3KU && raw==1?"光伏优先":names[raw];
+        snprintf(out,size,"%s",name);
     } else if (address == 0x4103 && raw <= 2) {
-        static const char *const names[] = {"APP","UPS","GEN"};
+        static const char *const names[] = {"宽电压范围","窄电压范围","发电机输入"};
         snprintf(out,size,"%s",names[raw]);
     } else if (address == 0x4104 && (raw <= 2 || (raw==3 && profile==PANEL_PROFILE_3KU))) {
-        static const char *const names[] = {"PNG","OPV","PVF","GRD"};
+        static const char *const names[] = {"光伏与市电","仅光伏","光伏优先","市电优先"};
+        snprintf(out,size,"%s",names[raw]);
+    } else if (address == 0x4110 && raw <= 4) {
+        static const char *const names[]={"单机","单相并机","三相 A 相","三相 B 相","三相 C 相"};
         snprintf(out,size,"%s",names[raw]);
     } else if (address == 0x4106 && raw <= 16) snprintf(out,size,"%u A",raw ? raw * 10U : 2U);
     else if (address == 0x4123 && raw <= 2) {
@@ -587,13 +635,15 @@ void panel_setting_format_profile(panel_profile_t profile,uint16_t address,
     } else if (address == 0x4107) {
         static const char *const standard[]={"铅酸","注水铅酸","三元锂","磷酸铁锂","自定义"};
         if(profile==PANEL_PROFILE_3KU && raw==2)snprintf(out,size,"锂电池");
-        else if(profile==PANEL_PROFILE_3KU && raw==3)snprintf(out,size,"FEL (3)");
+        else if(profile==PANEL_PROFILE_3KU && raw==3)snprintf(out,size,"胶体铅酸");
         else if(raw<5)snprintf(out,size,"%s",standard[raw]);
         else snprintf(out,size,"未知类型 %u",raw);
     } else if(address==0x411e && raw<=6){
         static const char *const names[]={"关闭","CVTE","古瑞瓦特 GRO","日月元 VOL","派能 PYL","铁塔 IRF","沛城 PAC"};
         snprintf(out,size,"%s",profile==PANEL_PROFILE_3KU && raw==5?"IRON":names[raw]);
-    } else if((address==0x4124 || (address==0x411a && profile==PANEL_PROFILE_3KU)) && raw<=1){
+    } else if(address==0x4124 && raw<=1){
+        snprintf(out,size,"%s",raw?"停止充电":"允许充电");
+    } else if(address==0x411a && profile==PANEL_PROFILE_3KU && raw<=1){
         snprintf(out,size,"%s",raw?"关闭":"开启");
     } else if(address==0x4142 && raw<=42){
         snprintf(out,size,"%u A",10U+5U*raw);
@@ -612,4 +662,4 @@ void panel_setting_format_profile(panel_profile_t profile,uint16_t address,
 void panel_setting_format(const panel_snapshot_t *s,uint16_t address,
                           uint16_t raw,char *out,size_t size)
 {panel_setting_format_profile(panel_is_3ku(s)?PANEL_PROFILE_3KU:
-                              s?s->config.profile_override:PANEL_PROFILE_UNKNOWN,address,raw,out,size);}
+                              panel_effective_profile(s),address,raw,out,size);}

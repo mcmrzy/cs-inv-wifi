@@ -38,14 +38,20 @@ int main(void){
     assert(panel_setting_read_find(&s,0x411f)->state==PANEL_SETTING_UNSUPPORTED);
     assert(panel_setting_read_find(&s,0x410c)->state==PANEL_SETTING_TIMEOUT);
     assert(!panel_settings_query_tick(&q,&s,&io));
+    f.now+=15000;panel_store(&s,0x42,3,f.now);
+    assert(!panel_settings_query_tick(&q,&s,&io) && f.reads==5);
     addresses[0]=0x4100;panel_settings_query_start(&q,&s,addresses,1);
     assert(panel_settings_query_tick(&q,&s,&io) && q.fallback);
     assert(panel_settings_query_tick(&q,&s,&io) && !q.fallback);
     r=panel_setting_read_find(&s,0x4100);assert(r->value==2 && !r->independent);
     assert(f.regs[5]==0x2a0 && f.regs[6]==0x4100);
     panel_invalidate(&s,0x42);assert(!panel_settings_query_tick(&q,&s,&io));
-    panel_store(&s,0x42,3,f.now);assert(panel_settings_query_tick(&q,&s,&io));
-    assert(f.regs[7]==0x2a0); /* Recovery refreshes immediately, without waiting for the round deadline. */
+    panel_store(&s,0x42,3,f.now);assert(!panel_settings_query_tick(&q,&s,&io) && f.reads==7);
+    uint16_t merged[]={0x4105,0x4100};
+    panel_settings_query_start(&q,&s,merged,2);
+    assert(panel_settings_query_tick(&q,&s,&io) && f.regs[7]==0x4105);
+    assert(!panel_settings_query_tick(&q,&s,&io) && f.reads==8);
+    assert(panel_setting_read_find(&s,0x4100)->value==2);
     s.command_busy=true;assert(!panel_settings_query_tick(&q,&s,&io));s.command_busy=false;
     panel_config_t config=s.config;panel_device_context_reset(&s,&config);
     assert(!panel_setting_read_find(&s,0x4100));
@@ -65,12 +71,18 @@ int main(void){
     assert(panel_settings_query_tick(&q,&s,&io));
     r=panel_setting_read_find(&s,0x4120);
     assert(f.regs[0]==0x350 && f.regs[1]==0x19e && r->independent && r->value==20);
-    f.reads=0;f.flags=0;panel_settings_query_start(&q,&s,addresses,1);
+    f.reads=0;f.flags=0;panel_settings_query_start(&q,&s,NULL,0);panel_settings_query_start(&q,&s,addresses,1);
     assert(panel_settings_query_tick(&q,&s,&io) && panel_settings_query_tick(&q,&s,&io));
     assert(panel_setting_read_find(&s,0x4120)->value==0xfff1);
-    f.reads=0;f.flags_error=true;panel_settings_query_start(&q,&s,addresses,1);
+    f.reads=0;f.flags_error=true;panel_settings_query_start(&q,&s,NULL,0);panel_settings_query_start(&q,&s,addresses,1);
     assert(panel_settings_query_tick(&q,&s,&io) && panel_settings_query_tick(&q,&s,&io));
     r=panel_setting_read_find(&s,0x4120);
     assert(!r->independent && r->state==PANEL_SETTING_EMPTY);
-    puts("PASS setting queries: visible-page reads, independent/RW fallback, FFFF/timeout/exception, refresh and context reset; no writes");
+    f.reads=0;f.flags_error=false;f.now+=PANEL_FRESH_MS+1;
+    s.now_ms=f.now;panel_store(&s,0x42,3,f.now);
+    panel_settings_query_start(&q,&s,addresses,1);
+    assert(panel_setting_read_find(&s,0x4120)->state==PANEL_SETTING_UNREAD);
+    assert(panel_settings_query_tick(&q,&s,&io) && panel_settings_query_tick(&q,&s,&io));
+    assert(f.reads==2 && panel_setting_read_find(&s,0x4120)->independent);
+    puts("PASS setting queries: visible-page reads, independent/RW fallback, FFFF/timeout/exception, one-shot reads and context reset; no writes");
 }

@@ -9,3 +9,5 @@ esp_err_t direct_keys_init(void);
 uint8_t direct_keys_get_event(void);
 /* The timestamp is captured by the scanner, independent of rendering latency. */
 bool direct_keys_get_timed_event(uint8_t *key, uint32_t *timestamp_ms);
+/* press is false for hold-generated direction repeats. */
+bool direct_keys_get_event_with_press(uint8_t *key, uint32_t *timestamp_ms, bool *press);

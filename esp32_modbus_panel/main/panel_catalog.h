@@ -8,8 +8,10 @@ typedef struct {
 } panel_setting_t;
 size_t panel_setting_count(void);
 #define PANEL_SETTING_GROUPS 9U
+#define PANEL_SETTING_GROUP_COLUMNS 3U
 #define PANEL_SETTING_GROUP_BMS 5U
 const char *panel_setting_group_name(unsigned group);
+const char *panel_setting_group_label(unsigned group,bool english);
 unsigned panel_setting_group_for(uint16_t address);
 unsigned panel_setting_group_count(unsigned group);
 unsigned panel_setting_group_index(unsigned group,unsigned position);
@@ -22,6 +24,7 @@ typedef enum {
     PANEL_ACCESS_MODE, PANEL_ACCESS_MODE_FIXED
 } panel_setting_access_t;
 panel_setting_access_t panel_setting_access(const panel_snapshot_t *,uint16_t address);
+bool panel_charge_switch_reserved(const panel_snapshot_t *);
 const char *panel_setting_access_reason(panel_setting_access_t access);
 const char *panel_setting_restriction(const panel_snapshot_t *,uint16_t address);
 const panel_setting_t *panel_setting(size_t index);
@@ -34,8 +37,13 @@ uint16_t panel_setting_current_flags(uint16_t address);
 bool panel_setting_decode_readback(uint16_t address,uint16_t raw,uint16_t *value);
 bool panel_setting_decode_current(const panel_snapshot_t *,uint16_t address,uint16_t raw,uint16_t *value);
 const char *panel_profile_name(panel_profile_t profile);
+static inline bool panel_power_changes_output(uint16_t reg,uint16_t value)
+{
+    return reg==0x4123 && (value==1 || value==2);
+}
 /* Diagnostic candidate only. Conflicting or unrecognised encodings are unknown. */
 panel_profile_t panel_detect_profile(uint16_t id38, uint16_t id39);
+bool panel_observe_identity(panel_snapshot_t *s,uint16_t id38,uint16_t id39,uint32_t now);
 bool panel_setting_allowed(const panel_snapshot_t *s, uint16_t address, uint16_t value);
 uint16_t panel_battery_suggestion(const panel_snapshot_t *s, uint16_t address,
                                  uint16_t charge_deciamp, uint16_t charge_decivolt,

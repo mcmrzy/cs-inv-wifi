@@ -154,6 +154,8 @@ static uint16_t s_config[DIRECT_DSP_CONFIG_COUNT];
 static bool s_config_valid[DIRECT_DSP_CONFIG_COUNT];
 static uint16_t s_local[3]={1,0,1};
 static uint32_t s_revision=1,s_observation_sequence;
+static uint16_t s_system_flags;
+static bool s_system_flags_valid;
 static arm_write_result_cb_t s_write_cb[2];
 static arm_ctrl_snapshot_cb_t s_ctrl_cb;
 static atomic_int s_ui_write_result=-3;
@@ -208,6 +210,13 @@ static void update_config_locked(void)
             g_ctrl_param[i]=wire_known?wire:0;
         }
     }
+    uint16_t flags=0;
+    bool have_flags=cached_context_current() && panel_fresh(&s_mb,0x351) &&
+        panel_value(&s_mb,0x351,&flags) && flags!=0xffff;
+    flags&=0x08b0; /* Saving, auto frequency, battery open alarm and mute. */
+    if(have_flags!=s_system_flags_valid || (have_flags && flags!=s_system_flags))changed=true;
+    s_system_flags=flags;
+    s_system_flags_valid=have_flags;
     if(changed){if(s_revision!=UINT32_MAX)s_revision++;s_observation_sequence++;}
     g_read_write.CtrlParamAlterTime=s_revision;
 }
@@ -772,7 +781,7 @@ void arm_poll_request_config(void)
     for(unsigned i=0;i<CTRL_PARAM_COUNT;i++){values[i]=g_ctrl_param[i];if(!s_config_valid[i])complete=false;}
     revision=s_revision;cb=s_ctrl_cb;arm_poll_give_param();
     /* This legacy callback has no validity mask, so never publish absent fields
-     * as zero. The ordinary telemetry API uses direct_config_snapshot_wire. */
+     * as zero. The ordinary telemetry path publishes a Modbus snapshot. */
     if(complete && revision && cb)cb(values,CTRL_PARAM_COUNT,revision);
 }
 static int enqueue_locked(uint16_t index,uint16_t value,bool cloud,bool wire)
@@ -852,17 +861,24 @@ bool direct_config_get_wire(uint16_t index,uint16_t *value)
     if(local>=0)*value=index==15?(uint16_t)(1U-s_local[local]):s_local[local];
     arm_poll_give_param();return known;
 }
-bool direct_config_snapshot_wire(uint16_t values[CTRL_PARAM_COUNT],bool valid[CTRL_PARAM_COUNT],uint32_t *revision)
+bool full_modbus_cloud_config_snapshot(uint16_t *values,bool *valid,uint32_t *revision)
 {
     if(!values || !valid || !revision || !arm_poll_take_param())return false;
     s_mb.now_ms=now_ms();
-    for(unsigned i=0;i<CTRL_PARAM_COUNT;i++){
-        int local=local_slot((uint16_t)i);uint16_t value=0;
-        valid[i]=local>=0 || read_config_locked((uint16_t)i,true,&value);
+    bool observed=false;
+    for(unsigned i=0;i<FULL_MB_CLOUD_CONFIG_COUNT;i++){
+        int local=local_slot((uint16_t)i);
+        uint16_t index=i<CTRL_PARAM_COUNT?(uint16_t)i:(uint16_t)(FULL_MB_POWER_SAVING+i-CTRL_PARAM_COUNT);
+        uint16_t value=0;
+        bool remote=local<0 && read_config_locked(index,true,&value);
+        observed|=remote;
+        valid[i]=local>=0 || remote;
         if(local>=0)value=i==15?(uint16_t)(1U-s_local[local]):s_local[local];
         values[i]=valid[i]?value:0;
     }
-    *revision=s_revision;arm_poll_give_param();return true;
+    *revision=s_revision;
+    arm_poll_give_param();
+    return observed;
 }
 bool direct_config_observed_snapshot_wire(direct_config_observation_t *out)
 {
@@ -937,6 +953,14 @@ bool direct_dsp_get_measurement(RunParamDef *measurement,uint32_t *received)
     bool valid=s_context_generation==panel_bus_context_generation() &&
         s_measurement_last_ms && now_ms()-s_measurement_last_ms<=FULL_MB_MEASUREMENT_FRESH_MS;
     if(valid){*measurement=g_run_param;*received=s_measurement_last_ms;}
+    arm_poll_give_param();return valid;
+}
+bool direct_modbus_get_partial_telemetry(RunParamDef *measurement,bool words[RUN_PARAM_WORDS])
+{
+    if(!arm_poll_take_param())return false;
+    s_mb.now_ms=now_ms();
+    bool valid=!atomic_load(&s_quiet) && s_context_generation==panel_bus_context_generation() &&
+        full_mb_partial_telemetry(&s_mb,measurement,words);
     arm_poll_give_param();return valid;
 }
 bool direct_dsp_get_diagnostics(direct_dsp_diagnostics_t *out)

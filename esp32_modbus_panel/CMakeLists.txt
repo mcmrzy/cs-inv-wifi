@@ -1,10 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 set(IDF_TARGET "esp32c3")
 option(PANEL_BMS_DIAGNOSTIC "Enable bounded UART1 BBJ diagnostics" OFF)
+option(PANEL_BUZZER_DIAGNOSTIC "Play a stepped frequency test at boot" OFF)
 if(PANEL_BMS_DIAGNOSTIC)
     set(PROJECT_VER "0.4.3-bms-diag4")
+elseif(PANEL_BUZZER_DIAGNOSTIC)
+    set(PROJECT_VER "0.4.46-buzzer-diag")
 else()
-    set(PROJECT_VER "0.4.31-modbus-full")
+    set(PROJECT_VER "0.4.90-modbus-full")
 endif()
 set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../esp32_direct/components")
 if(NOT DEFINED SDKCONFIG_DEFAULTS)
@@ -29,6 +32,9 @@ add_custom_target(panel_pairing_config
     BYPRODUCTS "${panel_pairing_header}"
     VERBATIM)
 idf_component_get_property(panel_main_lib main COMPONENT_LIB)
+if(PANEL_BUZZER_DIAGNOSTIC AND NOT PANEL_BMS_DIAGNOSTIC)
+    target_compile_definitions(${panel_main_lib} PRIVATE PANEL_BUZZER_DIAGNOSTIC=1)
+endif()
 add_dependencies(${panel_main_lib} panel_pairing_config)
 # Scope this substitution to cJSON, whose only scanf call parses its own %lg
 # numeric output. Fail configuration if an IDF update changes that contract.
@@ -47,3 +53,6 @@ idf_component_get_property(panel_lvgl lvgl__lvgl COMPONENT_LIB)
 target_compile_definitions(${panel_lvgl} PUBLIC "LV_CONF_PATH=${CMAKE_CURRENT_SOURCE_DIR}/full/lv_conf.h")
 
 
+
+# Software AES keeps lookup tables in flash, with one table per direction.
+target_compile_definitions(mbedcrypto PRIVATE MBEDTLS_AES_FEWER_TABLES)

@@ -89,15 +89,19 @@ def array(kind, name, values, fmt, columns):
     return "\n".join(lines)
 
 
-def asset(name, palette, rows):
-    offsets, encoded = pack_rows(rows)
+def palette_array(name, palette):
     colors = bytearray()
     for rgba in palette:
         r, g, b, a = rgba.to_bytes(4, "big")
         rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
         colors.extend((rgb565 & 255, rgb565 >> 8, a))
+    return array("uint8_t", f"{name}_palette", colors, lambda v: f"0x{v:02x}", 24)
+
+
+def asset(name, palette, rows):
+    offsets, encoded = pack_rows(rows)
     return "\n".join([
-        array("uint8_t", f"{name}_palette", colors, lambda v: f"0x{v:02x}", 24),
+        palette_array(name, palette),
         array("uint16_t", f"{name}_blocks", offsets, str, 16),
         array("uint8_t", f"{name}_pixels", encoded, lambda v: f"0x{v:02x}", 20),
         f"static const panel_indexed_art_t {name}_art="

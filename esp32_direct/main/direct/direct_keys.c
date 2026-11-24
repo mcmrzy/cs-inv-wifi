@@ -1,5 +1,8 @@
 #include "direct_keys.h"
 #include "direct_buzzer.h"
+#ifdef PANEL_FULL_DIRECT
+#include "panel_sound.h"
+#endif
 #include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -14,6 +17,7 @@ static const char *TAG = "direct_keys";
 static portMUX_TYPE s_scan_mux = portMUX_INITIALIZER_UNLOCKED;
 typedef struct {
     uint8_t key;
+    bool press;
     uint32_t timestamp_ms;
 } key_event_t;
 
@@ -64,7 +68,7 @@ static void keys_task(void *arg)
                 }
             }
             uint8_t key = direct_key_update(&state,sample,now_ms);
-            key_event_t event = {.key = key, .timestamp_ms = now_ms};
+            key_event_t event = {.key = key, .press = state.press_edge, .timestamp_ms = now_ms};
 #ifdef PANEL_FULL_DIRECT
             if(key){
 #else
@@ -77,7 +81,11 @@ static void keys_task(void *arg)
                 if(state.press_edge || uxQueueSpacesAvailable(s_events)>4U)
                     queued=xQueueSend(s_events,&event,state.press_edge ? pdMS_TO_TICKS(100) : 0)==pdTRUE;
                 if(queued)events++;
+#ifdef PANEL_FULL_DIRECT
+                if(queued && state.press_edge)panel_sound_key(key);
+#else
                 if(state.press_edge)direct_buzzer_pulse();
+#endif
                 ESP_LOGW(TAG,"KEY_EVENT key=%u queued=%u",key,queued);
                 if(!queued)ESP_LOGW(TAG,"Key event queue full; event %u dropped",key);
             }
@@ -133,10 +141,16 @@ uint8_t direct_keys_get_event(void)
 
 bool direct_keys_get_timed_event(uint8_t *key, uint32_t *timestamp_ms)
 {
+    return direct_keys_get_event_with_press(key,timestamp_ms,NULL);
+}
+
+bool direct_keys_get_event_with_press(uint8_t *key, uint32_t *timestamp_ms, bool *press)
+{
     if (!key || !timestamp_ms) return false;
     key_event_t event;
     if (!s_events || xQueueReceive(s_events, &event, 0) != pdTRUE) return false;
     *key = event.key;
     *timestamp_ms = event.timestamp_ms;
+    if(press)*press=event.press;
     return true;
 }

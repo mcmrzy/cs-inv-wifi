@@ -49,9 +49,10 @@ class BleMemoryLifecycleTests(unittest.TestCase):
         names = ("ble_prov_host_acquire", "ble_prov_host_release", "reset_host_handles",
                  "ble_prov_start", "ble_prov_stop", "ble_prov_resume",
                  "ble_prov_suspend_for_ota", "ble_prov_restore_after_ota", "ble_prov_notify_status",
+                 "ble_prov_suspend_for_weather", "ble_prov_restore_after_weather",
                  "ble_prov_is_connected")
         helpers = ("lifecycle_acquire", "lifecycle_release", "mqtt_barrier_ack",
-                   "mqtt_host_barrier", "mqtt_barrier_cleanup", "start_host_locked",
+                   "mqtt_host_barrier", "mqtt_barrier_cleanup", "ble_prov_weather_restore_block", "start_host_locked",
                    "suspend_owned", "restore_owned", "host_start_error",
                    "start_advertising", "nimble_host_reset", "nimble_host_sync")
         functions = "\n".join(function(source, name) for name in helpers
@@ -117,6 +118,9 @@ static void process_host_queue(void);
 #define pdMS_TO_TICKS(ms) (ms)
 #define pdPASS 1
 #define CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE 4096
+#define CONFIG_IDF_TARGET_ESP32C3 1
+#define CONFIG_BT_CTRL_BLE_MAX_ACT_EFF 2
+#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1
 #define configMAX_PRIORITIES 25
 #define ESP_OK 0
 #define BLE_HS_CONN_HANDLE_NONE 65535
@@ -375,6 +379,47 @@ PROGRAM
     nimble_host_sync(); assert(ble_prov_is_ready() && !locked);
     puts("PASS: internal 8bit free/largest admission covers start, MQTT restore and OTA restore");
 '''))
+
+    def test_weather_restore_with_field_fragmentation_preserves_other_pause_owners(self):
+        self.compile_run(self.lifecycle_harness(r'''
+    assert(ble_prov_start("SN123","0.4.57")); nimble_host_sync();
+    assert(ble_prov_suspend_for_weather());
+    internal_free=82212; internal_largest=22528;
+    assert(ble_prov_restore_after_weather()); nimble_host_sync();
+    assert(ble_prov_is_ready() && init_calls==2 && !locked);
+    assert(ble_prov_suspend_for_weather());
+    internal_free=65535; assert(!ble_prov_restore_after_weather());
+    internal_free=82212; internal_largest=8191;
+    assert(!ble_prov_restore_after_weather());
+    internal_largest=8192; init_error=1;
+    assert(!ble_prov_restore_after_weather()); assert(!ble_prov_is_ready());
+    init_error=0;
+    assert(ble_prov_restore_after_weather()); nimble_host_sync();
+    assert(ble_prov_is_ready());
+    assert(ble_prov_suspend_for_weather());
+    assert(ble_prov_suspend_for_ota());
+    assert(ble_prov_restore_after_weather());
+    assert(!ble_prov_restore_after_ota());
+    internal_largest=32768;
+    assert(ble_prov_restore_after_ota()); nimble_host_sync();
+    assert(ble_prov_is_ready() && !locked);
+    puts("PASS: C3 weather restore with 82212/22528 field heap, low-memory refusal, init failure retry and OTA ownership");
+'''))
+
+    def test_weather_restore_keeps_original_block_budget_for_larger_profiles(self):
+        harness = self.lifecycle_harness(r'''
+    assert(ble_prov_weather_restore_block()==32768);
+    assert(ble_prov_start("SN123","0.4.57")); nimble_host_sync();
+    assert(ble_prov_suspend_for_weather());
+    internal_free=82212; internal_largest=22528;
+    assert(!ble_prov_restore_after_weather());
+    internal_largest=32768;
+    assert(ble_prov_restore_after_weather()); nimble_host_sync();
+    assert(ble_prov_is_ready() && !locked);
+    puts("PASS: larger controller profiles retain the 32KB BLE restore budget");
+''')
+        self.compile_run(harness.replace("#define CONFIG_BT_CTRL_BLE_MAX_ACT_EFF 2",
+                                         "#define CONFIG_BT_CTRL_BLE_MAX_ACT_EFF 3"))
 
     def test_sync_address_and_advertising_failures_never_report_ready(self):
         self.compile_run(self.lifecycle_harness(r'''

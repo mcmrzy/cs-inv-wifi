@@ -19,7 +19,7 @@ int main(void){
  assert(v.setting_editor && v.footer_notice && v.key_labels[KEY_ENTER]==KEY_NONE);
  assert(strstr(v.footer,"方向键选择拟设值"));
  assert(!panel_ui_key(&u,DIRECT_KEY_ENTER,&s,&c) && !u.review);
- panel_ui_key(&u,DIRECT_KEY_RIGHT,&s,&c);assert(u.draft!=0xffff);
+ panel_ui_key(&u,DIRECT_KEY_LEFT,&s,&c);assert(u.draft!=0xffff);
  panel_ui_view(&u,&s,&v);assert(strstr(v.footer,"确认保存") && v.key_labels[KEY_ENTER]==KEY_SAVE);
  assert(panel_ui_key(&u,DIRECT_KEY_ENTER,&s,&c) && c.address==0x4100 && !u.review);
  assert(!panel_ui_key(&u,DIRECT_KEY_ENTER,&s,&c));
@@ -54,6 +54,11 @@ int main(void){
  u.detail=0;value(0x53, (uint16_t)-420);
  panel_ui_view(&u,&s,&v);
  assert(!strcmp(v.rows[3],"向电网送电")&&!strcmp(v.values[3],"420 W"));
+    value(0x44,1U<<1);panel_ui_view(&u,&s,&v);
+    assert(!strcmp(v.rows[3],"从电网取电")&&!strcmp(v.values[3],"420 W"));
+    u.page=PANEL_PAGE_HOME;panel_ui_view(&u,&s,&v);
+    assert(strstr(v.rows[1],"  420W"));
+    u.page=PANEL_PAGE_DETAILS;
  u.detail=1;value(0x81,(uint16_t)-120);value(0x85,620);
  panel_ui_view(&u,&s,&v);
  assert(!strcmp(v.rows[3],"充电功率")&&!strcmp(v.values[3],"620 W"));
@@ -62,7 +67,8 @@ int main(void){
  panel_ui_init(&u);u.page=PANEL_PAGE_ALARMS;value(0x46,1);
  panel_ui_key(&u,DIRECT_KEY_DOWN,&s,&c);assert(u.selected==0);
  value(0x46,63);panel_ui_key(&u,DIRECT_KEY_DOWN,&s,&c);assert(u.selected==1);
- panel_ui_key(&u,DIRECT_KEY_DOWN,&s,&c);assert(u.selected==0);
+ panel_ui_key(&u,DIRECT_KEY_DOWN,&s,&c);assert(u.selected==1);
+ panel_ui_key(&u,DIRECT_KEY_UP,&s,&c);assert(u.selected==0);
  /* Expired current values must not seed a new edit. */
  value(0x2a1,5000);s.now_ms=7000;value(0x42,3);s.updated_ms[panel_slot(0x42)]=7000;
  panel_ui_init(&u);u.page=PANEL_PAGE_SETTINGS;u.selected=1;
@@ -82,7 +88,7 @@ int main(void){
  assert(!panel_ui_key(&u,DIRECT_KEY_ENTER,&s,&c) && u.editing && u.draft==6 && u.edit_original_valid);
  assert(!panel_ui_key(&u,DIRECT_KEY_ENTER,&s,&c) && !u.editing && strstr(u.message,"无需发送"));
  assert(!panel_ui_key(&u,DIRECT_KEY_ENTER,&s,&c) && u.editing);
- assert(!panel_ui_key(&u,DIRECT_KEY_RIGHT,&s,&c) && u.draft==7);
+ assert(!panel_ui_key(&u,DIRECT_KEY_LEFT,&s,&c) && u.draft==7);
  assert(panel_ui_key(&u,DIRECT_KEY_ENTER,&s,&c) && c.address==0x4106 && c.value==7);
  puts("PASS user panel: deliberate unknown drafts, documented readbacks, units/enums, generator and stale edit");
 }

@@ -21,6 +21,7 @@ class LcdIsolationTests(unittest.TestCase):
 #define LCD_H 240
 #define BLACK 0
 #define WHITE 65535
+#define CONFIG_DIRECT_LCD_BL_PIN 5
 #define ESP_OK 0
 #define ESP_FAIL -1
 #define ESP_OTA_IMG_PENDING_VERIFY 1
@@ -32,7 +33,7 @@ typedef int esp_partition_t;
 static jmp_buf done;
 static atomic_uint s_lcd_tx_errors,s_spi_transfers;
 static uint16_t fb[LCD_H][LCD_W];
-static unsigned holds,shown,confirmed,writes;
+static unsigned holds,shown,confirmed,writes,bl_level,bl_transitions;
 static bool pending=true,inject_error;
 static void fill_rect(int x,int y,int w,int h,uint16_t c){
  assert(x>=0&&y>=0&&x+w<=LCD_W&&y+h<=LCD_H);
@@ -41,12 +42,17 @@ static void fill_rect(int x,int y,int w,int h,uint16_t c){
  if(inject_error)atomic_store(&s_lcd_tx_errors,1);
 }
 static void direct_panel_enable_display(void){shown++;}
+static int gpio_set_level(int pin,unsigned level){
+ assert(pin==5&&level<=1);
+ bl_level=level;bl_transitions++;return ESP_OK;
+}
 static const esp_partition_t *esp_ota_get_running_partition(void){static int p;return &p;}
 static int esp_ota_get_state_partition(const int *p,int *s){assert(p);*s=pending?1:2;return 0;}
 static int esp_ota_mark_app_valid_cancel_rollback(void){confirmed++;return 0;}
 static void vTaskDelay(unsigned ms){
  const uint16_t colors[]={0xf800,0x07e0,0x001f,0,65535};
  assert(ms==2000&&shown==1&&writes==LCD_W*LCD_H);
+ assert(bl_level==(holds<6)&&bl_transitions==1+holds/6);
  for(int y=0;y<LCD_H;y++)for(int x=0;x<LCD_W;x++){
   uint16_t expected=holds%6<5?colors[holds%6]:(((x/16+y/16)&1)?BLACK:WHITE);
   assert(fb[y][x]==expected);
@@ -57,14 +63,14 @@ static void vTaskDelay(unsigned ms){
 FUNCTION
 int main(void){
  for(int mode=0;mode<3;mode++){
-  holds=shown=confirmed=writes=0;atomic_store(&s_lcd_tx_errors,0);
+  holds=shown=confirmed=writes=bl_level=bl_transitions=0;atomic_store(&s_lcd_tx_errors,0);
   pending=mode!=1;inject_error=mode==2;
   int result=setjmp(done);
   if(!result)panel_isolation_loop();
   if(inject_error)assert(result==2&&holds==0&&confirmed==0);
   else assert(result==1&&holds==12&&confirmed==(pending?1U:0U));
  }
- puts("PASS two full pattern cycles, every pixel, 2s hold, OTA pending-only confirmation and SPI failure guard");
+ puts("PASS two full pattern cycles, GPIO5 high/low, 2s hold, OTA confirmation and SPI failure guard");
 }
 '''.replace('FUNCTION', function(source, 'panel_isolation_loop'))
         local_mode.LocalModeTests.compile_run(self, harness)
